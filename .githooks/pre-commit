@@ -1,0 +1,9 @@
+#!/bin/sh
+# Secret guard - see scripts/check-secrets.mjs. Enable with:
+#   git config core.hooksPath .githooks
+if [ -n "$SKIP_SECRET_CHECK" ]; then exit 0; fi
+if ! command -v node >/dev/null 2>&1; then
+  echo "check-secrets: node not on PATH, skipping secret scan" >&2
+  exit 0
+fi
+exec node "$(git rev-parse --show-toplevel)/scripts/check-secrets.mjs"
