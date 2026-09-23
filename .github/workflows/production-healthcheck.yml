@@ -1,0 +1,109 @@
+name: Production Healthcheck
+
+on:
+  schedule:
+    - cron: "*/15 * * * *"
+  workflow_dispatch:
+    inputs:
+      diagnostics:
+        description: Collect sanitized server diagnostics
+        required: true
+        type: choice
+        options:
+          - "false"
+          - "true"
+        default: "false"
+      nginx_buffer_repair:
+        description: Install nginx proxy buffer tuning for auth cookies
+        required: true
+        type: choice
+        options:
+          - "false"
+          - "true"
+        default: "false"
+
+jobs:
+  healthcheck:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check public endpoints
+        run: |
+          set -eu
+
+          check_url() {
+            name="$1"
+            url="$2"
+            curl -fsS --max-time 20 "$url" >/dev/null
+            echo "$name healthy"
+          }
+
+          check_url "Web" "https://aifyamed.com"
+          check_url "API gateway" "https://aifyamed.com/api/health"
+          check_url "Keycloak" "https://aifyamed.com/auth/realms/aifya/.well-known/openid-configuration"
+
+      - name: Tune nginx proxy buffers
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.nginx_buffer_repair == 'true' }}
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.SERVER_IP }}
+          username: ${{ secrets.SERVER_USER }}
+          key: ${{ secrets.DEPLOY_KEY }}
+          script: |
+            set -eu
+            if [ "$(id -u)" -eq 0 ]; then
+              SUDO=""
+            else
+              SUDO="sudo"
+            fi
+
+            tmp="$(mktemp)"
+            cat > "$tmp" <<'NGINX'
+            # Aifya auth callback sets secure token cookies; allow larger upstream headers.
+            proxy_buffer_size 32k;
+            proxy_buffers 8 64k;
+            proxy_busy_buffers_size 128k;
+            large_client_header_buffers 4 32k;
+            NGINX
+
+            $SUDO install -m 0644 "$tmp" /etc/nginx/conf.d/aifya-proxy-buffers.conf
+            rm -f "$tmp"
+            $SUDO nginx -t
+            $SUDO systemctl reload nginx
+            echo "nginx proxy buffers tuned"
+
+      - name: Collect server diagnostics
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.diagnostics == 'true' }}
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.SERVER_IP }}
+          username: ${{ secrets.SERVER_USER }}
+          key: ${{ secrets.DEPLOY_KEY }}
+          script: |
+            set -eu
+
+            redact() {
+              sed -E \
+                -e 's/(code=)[^&[:space:]]+/\1[redacted]/g' \
+                -e 's/(state=)[^&[:space:]]+/\1[redacted]/g' \
+                -e 's/(nonce=)[^&[:space:]]+/\1[redacted]/g' \
+                -e 's/(code_challenge=)[^&[:space:]]+/\1[redacted]/g' \
+                -e 's/(access_token=)[^&[:space:]]+/\1[redacted]/g' \
+                -e 's/(refresh_token=)[^&[:space:]]+/\1[redacted]/g'
+            }
+
+            echo "::group::Process status"
+            pm2 status || true
+            echo "::endgroup::"
+
+            echo "::group::Local web probes"
+            curl -sS -i --max-time 10 http://127.0.0.1:3000/api/auth/me | redact || true
+            curl -sS -I --max-time 10 "http://127.0.0.1:3000/api/auth/login?returnTo=/en" | redact || true
+            echo "::endgroup::"
+
+            echo "::group::Nginx errors"
+            tail -n 120 /var/log/nginx/error.log 2>/dev/null | redact || true
+            echo "::endgroup::"
+
+            echo "::group::PM2 web logs"
+            pm2 logs aifya-web --lines 160 --nostream 2>/dev/null | redact || true
+            echo "::endgroup::"

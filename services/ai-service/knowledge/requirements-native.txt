@@ -1,0 +1,32 @@
+# Aifya Knowledge RAG - Docker-free local run.
+#
+# Everything needed to run the service on a plain machine with only
+# PostgreSQL. Deliberately excludes torch, sentence-transformers, minio,
+# celery and redis: the storage, vector and ingest backends fall back to
+# local implementations and EMBEDDING_BACKEND=auto degrades to hashed
+# embeddings, so nothing else has to be installed or downloaded.
+#
+# Use the full requirements.txt instead when you want BGE-M3 embeddings or
+# you are running the docker-compose stack.
+
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+pydantic==2.10.4
+pydantic-settings==2.7.1
+
+sqlalchemy[asyncio]==2.0.36
+asyncpg==0.30.0
+psycopg2-binary==2.9.10
+
+# Embedded vector store (qdrant-client local mode) + hashed embeddings
+qdrant-client==1.12.1
+numpy>=1.26.0
+
+PyMuPDF==1.25.1
+python-docx==1.1.2
+
+python-jose[cryptography]==3.3.0
+httpx==0.28.1
+python-multipart==0.0.20
+structlog==24.4.0
+python-dotenv==1.0.1

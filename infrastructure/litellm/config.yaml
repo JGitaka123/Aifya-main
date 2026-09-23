@@ -1,0 +1,44 @@
+# LiteLLM proxy — an OpenAI-compatible gateway in front of managed model
+# providers (Claude, etc.). Aifya's AI services (ScribeAI, knowledge) call
+# one stable /v1 endpoint, so moving between hosted APIs and (later)
+# self-hosted vLLM needs no application change. See docs/DEPLOYMENT.md §7.
+#
+# Server .env keys this reads:
+#   ANTHROPIC_API_KEY        — for the Claude chat / clinical-reasoning models
+#   WHISPER_OPENAI_API_KEY   — only if Whisper transcription is routed to OpenAI
+#
+# Adjust the provider model ids below to whatever you have licensed.
+# The proxy runs keyless on the internal docker network only (never publish
+# port 4000; the host firewall must keep it private) — the upstream provider
+# keys live only inside this container.
+
+model_list:
+  # ── Chat / clinical reasoning ──────────────────────────────────────────
+  # ScribeAI note generation + discharge summaries request "gpt-4o"; map that
+  # name onto Claude so no app code changes.
+  - model_name: gpt-4o
+    litellm_params:
+      model: anthropic/claude-sonnet-5
+      api_key: os.environ/ANTHROPIC_API_KEY
+  - model_name: claude-sonnet
+    litellm_params:
+      model: anthropic/claude-sonnet-5
+      api_key: os.environ/ANTHROPIC_API_KEY
+  - model_name: claude-haiku
+    litellm_params:
+      model: anthropic/claude-haiku-4-5-20251001
+      api_key: os.environ/ANTHROPIC_API_KEY
+
+  # ── Audio transcription (ScribeAI ambient capture) ─────────────────────
+  # Anthropic does not transcribe audio. Route Whisper to a transcription
+  # provider — OpenAI shown; swap to groq/whisper-large-v3, Deepgram, or a
+  # self-hosted faster-whisper endpoint as you prefer.
+  - model_name: whisper-1
+    litellm_params:
+      model: openai/whisper-1
+      api_key: os.environ/WHISPER_OPENAI_API_KEY
+
+litellm_settings:
+  # Silently drop request params a given provider doesn't accept, so the
+  # OpenAI-shaped calls from the app work unchanged against Claude.
+  drop_params: true

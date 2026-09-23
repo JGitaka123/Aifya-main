@@ -1,0 +1,239 @@
+name: Deploy Backend to Production
+
+# Backend-only deploy. The Next.js frontend (www.aifyamed.com) is deployed
+# by Vercel from this repo (Root Directory apps/web) and is NOT built or
+# shipped here — see docs/DEPLOYMENT.md.
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'services/**'
+      - 'docker-compose.yml'
+      - 'docker-compose.prod.yml'
+      - 'infrastructure/**'
+      - '.github/workflows/deploy.yml'
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    # Deploys pause here for manual approval once a required reviewer is
+    # set on the "production" environment (GitHub → Settings →
+    # Environments → production → Required reviewers). Without that
+    # setting this is a no-op, so configuring it is a go-live item.
+    environment: production
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Create server env file
+        env:
+          PRODUCTION_ENV: ${{ secrets.PRODUCTION_ENV }}
+        run: |
+          : "${PRODUCTION_ENV:?PRODUCTION_ENV secret is required}"
+          printf '%s\n' "$PRODUCTION_ENV" > server.env
+
+      - name: Validate production compose
+        env:
+          DATABASE_URL: postgresql+asyncpg://aifya_user:ci_password@postgres:5432/aifya
+          SECRET_KEY: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+          KEYCLOAK_URL: https://auth.aifyamed.com
+          CORS_ORIGINS: https://www.aifyamed.com
+        run: docker compose -f docker-compose.yml -f docker-compose.prod.yml config --quiet
+
+      - name: Prepare backend source directories
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.SERVER_IP }}
+          username: ${{ secrets.SERVER_USER }}
+          key: ${{ secrets.DEPLOY_KEY }}
+          script: |
+            set -eu
+            mkdir -p /root/Aifya/services /root/Aifya/services/ai-service /root/Aifya/infrastructure
+            # Remove stale sources so deleted files don't linger (scp only adds).
+            rm -rf \
+              /root/Aifya/services/api-gateway \
+              /root/Aifya/services/ai-service/claimflow \
+              /root/Aifya/infrastructure/keycloak
+
+      - name: Copy backend deployment sources to server
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.SERVER_IP }}
+          username: ${{ secrets.SERVER_USER }}
+          key: ${{ secrets.DEPLOY_KEY }}
+          source: ".dockerignore,.env.example,docker-compose.yml,docker-compose.prod.yml,services/api-gateway/,services/ai-service/claimflow/,infrastructure/keycloak/"
+          target: "/root/Aifya/"
+          strip_components: 0
+
+      - name: Copy server env to server
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.SERVER_IP }}
+          username: ${{ secrets.SERVER_USER }}
+          key: ${{ secrets.DEPLOY_KEY }}
+          source: "server.env"
+          target: "/root/Aifya/"
+          strip_components: 0
+
+      - name: Restart server
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.SERVER_IP }}
+          username: ${{ secrets.SERVER_USER }}
+          key: ${{ secrets.DEPLOY_KEY }}
+          script: |
+            set -eu
+            cd /root/Aifya
+            if [ -f server.env ]; then
+              mv server.env .env
+              chmod 600 .env
+            fi
+
+            # Keep the approved no-login beta bound to its synthetic facility.
+            # Remove these overrides when authenticated production access launches.
+            upsert_env() {
+              key="$1"
+              value="$2"
+              tmp_env="$(mktemp)"
+              grep -v "^${key}=" .env > "$tmp_env" || true
+              printf '%s=%s\n' "$key" "$value" >> "$tmp_env"
+              mv "$tmp_env" .env
+            }
+            upsert_env CORS_ORIGINS "https://aifyamed.com,https://www.aifyamed.com"
+            upsert_env BETA_PUBLIC_ACCESS "true"
+            upsert_env BETA_FACILITY_ID "5727435c-1ef2-5d25-bc64-b927f4571df5"
+            upsert_env BETA_USER_ID "ca456511-cf38-54ca-9f24-c16c95026f61"
+            chmod 600 .env
+
+            COMPOSE="docker compose -f docker-compose.yml -f docker-compose.prod.yml"
+            trap 'status=$?; if [ "$status" -ne 0 ]; then echo "::group::Deployment diagnostics"; $COMPOSE ps || true; $COMPOSE logs --tail=120 postgres keycloak api-gateway claimflow-validator || true; echo "::endgroup::"; fi; exit "$status"' EXIT
+            $COMPOSE config --quiet
+            $COMPOSE build api-gateway claimflow-validator
+            $COMPOSE up -d postgres redis
+            postgres_ready=false
+            for attempt in $(seq 1 30); do
+              if $COMPOSE exec -T -u postgres postgres sh -c 'pg_isready -U "$POSTGRES_USER" -d "$POSTGRES_DB"' >/dev/null 2>&1; then
+                postgres_ready=true
+                break
+              fi
+              sleep 2
+            done
+            if [ "$postgres_ready" != "true" ]; then
+              echo "Postgres did not become ready" >&2
+              exit 1
+            fi
+            postgres_user="$(sed -n 's/^POSTGRES_USER=//p' .env | tail -n 1)"
+            postgres_password="$(sed -n 's/^POSTGRES_PASSWORD=//p' .env | tail -n 1)"
+            postgres_db="$(sed -n 's/^POSTGRES_DB=//p' .env | tail -n 1)"
+            postgres_user="${postgres_user:-aifya_user}"
+            postgres_db="${postgres_db:-aifya}"
+            if [ -z "$postgres_password" ]; then
+              echo "POSTGRES_PASSWORD is required" >&2
+              exit 1
+            fi
+            database_url="$($COMPOSE run --rm --no-deps -T -e POSTGRES_USER="$postgres_user" -e POSTGRES_PASSWORD="$postgres_password" -e POSTGRES_DB="$postgres_db" api-gateway python -c 'import os; from urllib.parse import quote; print("postgresql+asyncpg://{}:{}@postgres:5432/{}".format(quote(os.environ["POSTGRES_USER"], safe=""), quote(os.environ["POSTGRES_PASSWORD"], safe=""), quote(os.environ["POSTGRES_DB"], safe="")))')"
+            tmp_env="$(mktemp)"
+            grep -v '^DATABASE_URL=' .env > "$tmp_env"
+            printf 'DATABASE_URL=%s\n' "$database_url" >> "$tmp_env"
+            mv "$tmp_env" .env
+            chmod 600 .env
+            export POSTGRES_USER="$postgres_user"
+            export POSTGRES_PASSWORD="$postgres_password"
+            export POSTGRES_DB="$postgres_db"
+            export DATABASE_URL="$database_url"
+            $COMPOSE exec -T -u postgres -e TARGET_DB_PASSWORD="$postgres_password" postgres sh <<'POSTGRES_PASSWORD_SYNC'
+            set -eu
+            cat > /tmp/sync-password.sql <<'SQL'
+            ALTER ROLE :"db_user" WITH PASSWORD :'db_password';
+            SQL
+            psql \
+              -v ON_ERROR_STOP=1 \
+              -U "$POSTGRES_USER" \
+              -d "$POSTGRES_DB" \
+              -v db_user="$POSTGRES_USER" \
+              -v db_password="$TARGET_DB_PASSWORD" \
+              -f /tmp/sync-password.sql
+            rm -f /tmp/sync-password.sql
+            POSTGRES_PASSWORD_SYNC
+            $COMPOSE up -d --force-recreate keycloak
+            set +e
+            $COMPOSE run --rm -T api-gateway python - <<'PY'
+            import asyncio
+            import os
+
+            from sqlalchemy import text
+            from sqlalchemy.ext.asyncio import create_async_engine
+
+
+            async def main() -> int:
+                engine = create_async_engine(os.environ["DATABASE_URL"])
+                try:
+                    async with engine.begin() as conn:
+                        has_facilities = await conn.scalar(
+                            text("SELECT to_regclass('public.facilities') IS NOT NULL")
+                        )
+                        has_alembic = await conn.scalar(
+                            text("SELECT to_regclass('public.alembic_version') IS NOT NULL")
+                        )
+                        has_version = False
+                        if has_alembic:
+                            has_version = await conn.scalar(
+                                text("SELECT EXISTS (SELECT 1 FROM public.alembic_version)")
+                            )
+                finally:
+                    await engine.dispose()
+
+                if has_facilities and not has_version:
+                    print("Existing schema detected without Alembic version; stamping baseline.")
+                    return 42
+
+                return 0
+
+
+            raise SystemExit(asyncio.run(main()))
+            PY
+            baseline_status=$?
+            set -e
+            if [ "$baseline_status" -eq 42 ]; then
+              $COMPOSE run --rm -T api-gateway python -m alembic stamp 007_employee_staff_sync
+            elif [ "$baseline_status" -ne 0 ]; then
+              exit "$baseline_status"
+            fi
+            $COMPOSE run --rm api-gateway python -m alembic upgrade head
+            $COMPOSE up -d --force-recreate keycloak api-gateway claimflow-validator litellm
+
+            # attempts × interval-seconds; Keycloak is given a longer window
+            # because production `start --import-realm` boots slowly on the VPS.
+            wait_for_url() {
+              name="$1"
+              url="$2"
+              attempts="${3:-30}"
+              interval="${4:-3}"
+              for attempt in $(seq 1 "$attempts"); do
+                if curl -fsS "$url" >/dev/null; then
+                  echo "$name healthy"
+                  return 0
+                fi
+                sleep "$interval"
+              done
+              echo "$name failed health check: $url" >&2
+              return 1
+            }
+
+            keycloak_realm="$(sed -n 's/^KEYCLOAK_REALM=//p' .env | tail -n 1)"
+            keycloak_realm="${keycloak_realm:-aifya}"
+            # Keycloak is NON-FATAL for this deploy: the approved public beta
+            # bypasses auth (BETA_PUBLIC_ACCESS=true), so a slow/failed realm
+            # import must not block shipping backend fixes. Warn, don't fail.
+            # Remove the `|| ...` guard when authenticated production launches.
+            keycloak_url="http://localhost:8080/realms/$keycloak_realm/.well-known/openid-configuration"
+            if ! wait_for_url "Keycloak" "$keycloak_url" 60 5; then
+              echo "::warning::Keycloak realm not ready after 300s; beta bypasses auth, continuing deploy."
+            fi
+            # These are hard gates — a failure here fails the deploy (set -e).
+            wait_for_url "API gateway" "http://localhost:8000/api/health"
+            wait_for_url "ClaimFlow validator" "http://localhost:8030/health"
+            wait_for_url "LiteLLM proxy" "http://localhost:4000/health/liveliness"
+            echo "Backend deployment complete!"

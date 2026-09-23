@@ -1,0 +1,1 @@
+"""Referral document generation package."""

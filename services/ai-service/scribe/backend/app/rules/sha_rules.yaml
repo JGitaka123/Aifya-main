@@ -1,0 +1,97 @@
+rules:
+  membership:
+    - id: SHA-R1
+      name: "Member Status"
+      severity: BLOCK
+      message: "Patient SHA status must be active"
+      fix: "Verify SHA card on portal or call SHA helpline"
+
+  preauth:
+    - id: SHA-R2a
+      name: "Surgical Pre-Auth"
+      severity: BLOCK
+      applies_to: 
+        procedure_categories: ["surgical", "invasive"]
+      message: "Surgical procedures require SHA pre-authorization"
+      fix: "Submit pre-auth request via SHA portal before procedure"
+      
+    - id: SHA-R2b
+      name: "Imaging Pre-Auth (>KES 5K)"
+      severity: BLOCK
+      applies_to: 
+        procedure_categories: ["imaging"]
+        amount_min: 5000
+      message: "Imaging procedures exceeding KES 5000 require SHA pre-authorization"
+      fix: "Submit pre-auth request for high-value imaging"
+        
+    - id: SHA-R2c
+      name: "Inpatient Pre-Auth (>48hrs)"
+      severity: BLOCK
+      applies_to: 
+        encounter_type: "inpatient"
+        los_min_hours: 48
+      message: "Inpatient admissions beyond 48 hours require extended pre-authorization"
+      fix: "Submit inpatient pre-auth extension via SHA portal"
+
+  clinical_evidence:
+    - id: SHA-R3a
+      name: "Hypertension Vitals Required"
+      severity: BLOCK
+      trigger_icds: ["BA00", "BA01", "BA02", "JA24"]
+      require_loincs: ["85354-9"]
+      message: "Hypertension diagnosis requires Blood Pressure vitals."
+      fix: "Please return to the SOAP note and enter the Blood Pressure reading in the Vitals section."
+
+    - id: SHA-R3b
+      name: "Diabetes Labs Required"
+      severity: BLOCK
+      trigger_icds: ["5A10", "5A11", "5A12", "5A13", "5A14"]
+      require_loincs: ["2339-0", "4548-4"]
+      message: "Diabetes diagnosis requires fasting glucose or HbA1c labs."
+      fix: "Ensure appropriate laboratory tests were ordered or resulted for this diagnosis."
+
+    - id: SHA-R3c
+      name: "Malaria Test Required"
+      severity: BLOCK
+      trigger_icds: ["1F40", "1F41", "1F42", "1F43", "1F44", "1F45"]
+      require_loincs: ["32700-7", "51587-4"]
+      message: "Malaria diagnosis requires positive RDT or slide microscopy."
+      fix: "Attach or order a malaria diagnostic test."
+
+    - id: SHA-R3d
+      name: "Pneumonia Exam Missing"
+      severity: WARNING
+      trigger_icds: ["CA40", "CA41", "CA42"]
+      require_fields: ["physical_exam"]
+      message: "Pneumonia diagnoses generally require documented physical examination findings."
+      fix: "Consider documenting chest auscultation or respiratory rate in the physical exam."
+
+  coding:
+    - id: SHA-R4
+      name: "ICD-11 Validation"
+      severity: BLOCK
+      message: "Primary diagnosis MUST have a validated ICD-11 code."
+      fix: "Select an official WHO ICD-11 code for the primary diagnosis."
+
+  tariff:
+    - id: SHA-R6
+      name: "Tariff Limit Exceeded"
+      severity: WARNING
+      message: "Amount exceeds expected gazetted baseline tariff for this encounter type."
+      fix: "Verify billing amounts against SHA Gazetted Tariffs schedule."
+
+  duplicate:
+    - id: SHA-R7
+      name: "Duplicate Claim Prevention"
+      severity: BLOCK
+      message: "An identical claim on the same date for the same diagnosis already exists."
+      fix: "Review existing claims for this patient to prevent double-billing."
+
+  timeliness:
+    - id: SHA-R9
+      name: "Claim Submission Deadline"
+      severity: BLOCK
+      warning_threshold_days: 25
+      block_threshold_days: 30
+      message: "Claim is outside the 30-day post-encounter submission window."
+      fix: "Attempt manual override for late submission appeals, or void claim."

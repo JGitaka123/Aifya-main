@@ -1,0 +1,96 @@
+services:
+  postgres:
+    # Not published to the host in prod — internal docker network only.
+    ports: !reset []
+    restart: unless-stopped
+
+  redis:
+    ports: !reset []
+    restart: unless-stopped
+
+  keycloak:
+    # Production mode (not start-dev): TLS is terminated by the front proxy
+    # (Caddy), so Keycloak serves HTTP behind it and trusts X-Forwarded-*.
+    command: ["start", "--import-realm"]
+    environment:
+      KC_HOSTNAME: ${KEYCLOAK_URL:?KEYCLOAK_URL is required}
+      KC_HOSTNAME_STRICT: "false"
+      KC_PROXY_HEADERS: xforwarded
+      KC_HTTP_ENABLED: "true"
+    volumes:
+      # Production realm: no demo users, www.aifyamed.com redirect URIs,
+      # password policy + PKCE. Overrides the dev realm at the same target.
+      - ./infrastructure/keycloak/aifya-realm.prod.json:/opt/keycloak/data/import/aifya-realm.json:ro
+    restart: unless-stopped
+
+  # The one-shot migrator must reach the same database the gateway uses. In
+  # dev it derives that URL from POSTGRES_*; in prod the operator sets
+  # DATABASE_URL explicitly (docs/DEPLOYMENT.md 5.2), so mirror it here.
+  db-migrate:
+    environment:
+      DATABASE_URL: ${DATABASE_URL:?DATABASE_URL is required}
+      DEBUG: ${DEBUG:-false}
+
+  api-gateway:
+    environment:
+      DEBUG: ${DEBUG:-false}
+      DATABASE_URL: ${DATABASE_URL:?DATABASE_URL is required}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      KAFKA_BOOTSTRAP_SERVERS: ${KAFKA_BOOTSTRAP_SERVERS:-kafka:9092}
+      KEYCLOAK_URL: ${KEYCLOAK_URL:?KEYCLOAK_URL is required}
+      KEYCLOAK_REALM: ${KEYCLOAK_REALM:-aifya}
+      KEYCLOAK_CLIENT_ID: ${API_KEYCLOAK_CLIENT_ID:-aifya-api}
+      # This deployment is the explicitly approved no-login beta environment.
+      # Set BETA_PUBLIC_ACCESS=false in server.env when authentication is restored.
+      BETA_PUBLIC_ACCESS: ${BETA_PUBLIC_ACCESS:-true}
+      BETA_USER_ID: ${BETA_USER_ID:-00000000-0000-0000-0000-000000000002}
+      BETA_FACILITY_ID: ${BETA_FACILITY_ID:-00000000-0000-0000-0000-000000000001}
+      BETA_USER_EMAIL: ${BETA_USER_EMAIL:-beta@aifyamed.com}
+      BETA_USER_NAME: ${BETA_USER_NAME:-Aifya Beta Tester}
+      AI_SERVICE_URL: ${AI_SERVICE_URL:-http://ai-service:8010}
+      VLLM_MEDGEMMA_27B_URL: ${VLLM_MEDGEMMA_27B_URL:-http://medgemma:8004/v1}
+      SECRET_KEY: ${SECRET_KEY:?SECRET_KEY is required}
+      CORS_ORIGINS: ${CORS_ORIGINS:?CORS_ORIGINS is required}
+      # Secure by default; add extra source IPs/CIDRs if your edge rewrites them.
+      MPESA_CALLBACK_IP_ENFORCE: ${MPESA_CALLBACK_IP_ENFORCE:-true}
+      MPESA_CALLBACK_IP_ALLOWLIST: ${MPESA_CALLBACK_IP_ALLOWLIST:-}
+    restart: unless-stopped
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=5).read()\"",
+        ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  # The workers run the same code as the gateway, so they must see the same
+  # database, secret and debug flag. The base file hardcodes DEBUG: "true"
+  # and a dev SECRET_KEY default, neither of which belongs in production.
+  api-worker:
+    environment:
+      DEBUG: ${DEBUG:-false}
+      DATABASE_URL: ${DATABASE_URL:?DATABASE_URL is required}
+      SECRET_KEY: ${SECRET_KEY:?SECRET_KEY is required}
+
+  api-beat:
+    environment:
+      DEBUG: ${DEBUG:-false}
+      DATABASE_URL: ${DATABASE_URL:?DATABASE_URL is required}
+      SECRET_KEY: ${SECRET_KEY:?SECRET_KEY is required}
+
+  # billing-service and sync-service are disabled in the base compose
+  # file (see docs/AUDIT-REPORT.md C-2/C-5) and intentionally have no
+  # prod overrides here.
+  web:
+    environment:
+      # Dev hardcodes http://localhost:3000 in the base file. In production
+      # this is the public origin: the login/logout redirects and the
+      # session cookie host derive from it.
+      NEXTAUTH_URL: ${NEXTAUTH_URL:-http://localhost:3000}
+    restart: unless-stopped
+
+  minio:
+    restart: unless-stopped

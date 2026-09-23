@@ -1,0 +1,170 @@
+name: Facility License Bootstrap
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - .github/workflows/facility-license-bootstrap.yml
+  workflow_run:
+    workflows: ["Deploy to Production"]
+    branches: [ main ]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      facility_id:
+        description: Facility UUID
+        required: true
+        default: 00000000-0000-0000-0000-000000000001
+      tier:
+        description: License tier
+        required: true
+        type: choice
+        options:
+          - enterprise
+          - professional
+          - community
+          - government
+        default: enterprise
+      billing_cycle:
+        description: Billing cycle
+        required: true
+        type: choice
+        options:
+          - annual
+          - monthly
+          - perpetual
+        default: annual
+      expires_days:
+        description: Days until expiry. Use 0 for service default.
+        required: true
+        default: "365"
+      issued_by:
+        description: Issued by
+        required: true
+        default: aifya-ops
+      notes:
+        description: License notes
+        required: true
+        default: Production pilot license
+
+jobs:
+  bootstrap-license:
+    if: ${{ github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success' }}
+    runs-on: ubuntu-latest
+    env:
+      BOOTSTRAP_FACILITY_ID: ${{ github.event.inputs.facility_id || '00000000-0000-0000-0000-000000000001' }}
+      BOOTSTRAP_LICENSE_TIER: ${{ github.event.inputs.tier || 'enterprise' }}
+      BOOTSTRAP_BILLING_CYCLE: ${{ github.event.inputs.billing_cycle || 'annual' }}
+      BOOTSTRAP_EXPIRES_DAYS: ${{ github.event.inputs.expires_days || '365' }}
+      BOOTSTRAP_ISSUED_BY: ${{ github.event.inputs.issued_by || 'aifya-ops' }}
+      BOOTSTRAP_NOTES: ${{ github.event.inputs.notes || 'Production pilot license' }}
+
+    steps:
+      - name: Issue or replace active facility license
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.SERVER_IP }}
+          username: ${{ secrets.SERVER_USER }}
+          key: ${{ secrets.DEPLOY_KEY }}
+          envs: BOOTSTRAP_FACILITY_ID,BOOTSTRAP_LICENSE_TIER,BOOTSTRAP_BILLING_CYCLE,BOOTSTRAP_EXPIRES_DAYS,BOOTSTRAP_ISSUED_BY,BOOTSTRAP_NOTES
+          script: |
+            set -eu
+            cd /root/Aifya
+            COMPOSE="docker compose -f /root/Aifya/docker-compose.yml -f /root/Aifya/docker-compose.prod.yml"
+
+            : "${BOOTSTRAP_FACILITY_ID:?BOOTSTRAP_FACILITY_ID is required}"
+            : "${BOOTSTRAP_LICENSE_TIER:?BOOTSTRAP_LICENSE_TIER is required}"
+            : "${BOOTSTRAP_BILLING_CYCLE:?BOOTSTRAP_BILLING_CYCLE is required}"
+            : "${BOOTSTRAP_EXPIRES_DAYS:?BOOTSTRAP_EXPIRES_DAYS is required}"
+
+            $COMPOSE run --rm -T \
+              -e BOOTSTRAP_FACILITY_ID="$BOOTSTRAP_FACILITY_ID" \
+              -e BOOTSTRAP_LICENSE_TIER="$BOOTSTRAP_LICENSE_TIER" \
+              -e BOOTSTRAP_BILLING_CYCLE="$BOOTSTRAP_BILLING_CYCLE" \
+              -e BOOTSTRAP_EXPIRES_DAYS="$BOOTSTRAP_EXPIRES_DAYS" \
+              -e BOOTSTRAP_ISSUED_BY="$BOOTSTRAP_ISSUED_BY" \
+              -e BOOTSTRAP_NOTES="$BOOTSTRAP_NOTES" \
+              api-gateway python - <<'PY'
+            import asyncio
+            import os
+            import uuid
+            from datetime import datetime, timedelta, timezone
+
+            from app.auth.license_check import invalidate_license_cache
+            from app.database import async_session
+            from app.schemas.licensing import LicenseCreate, TIER_ENTITLEMENTS
+            from app.services.licensing_service import LicensingService
+
+
+            async def main() -> None:
+                facility_id = str(uuid.UUID(os.environ["BOOTSTRAP_FACILITY_ID"]))
+                tier = os.environ["BOOTSTRAP_LICENSE_TIER"]
+                billing_cycle = os.environ["BOOTSTRAP_BILLING_CYCLE"]
+                expires_days = int(os.environ["BOOTSTRAP_EXPIRES_DAYS"])
+                issued_by = os.environ.get("BOOTSTRAP_ISSUED_BY") or "aifya-ops"
+                notes = os.environ.get("BOOTSTRAP_NOTES") or "Production pilot license"
+
+                if tier not in TIER_ENTITLEMENTS:
+                    raise SystemExit(f"Unsupported tier: {tier}")
+                if billing_cycle not in {"monthly", "annual", "perpetual"}:
+                    raise SystemExit(f"Unsupported billing cycle: {billing_cycle}")
+
+                expires_at = None
+                if expires_days > 0:
+                    expires_at = datetime.now(timezone.utc) + timedelta(days=expires_days)
+
+                async with async_session() as db:
+                    service = LicensingService(db)
+                    license_obj = await service.get_facility_license(uuid.UUID(facility_id))
+                    entitlements = TIER_ENTITLEMENTS[tier]
+
+                    if license_obj is None:
+                        license_obj = await service.create_license(
+                            LicenseCreate(
+                                facility_id=facility_id,
+                                tier=tier,
+                                billing_cycle=billing_cycle,
+                                expires_at=expires_at,
+                                issued_by=issued_by,
+                                notes=notes,
+                            )
+                        )
+                        action = "Issued"
+                    else:
+                        license_obj.tier = tier
+                        license_obj.max_users = entitlements["max_users"]
+                        license_obj.max_patients = entitlements["max_patients"]
+                        license_obj.max_facilities = entitlements["max_facilities"]
+                        license_obj.enabled_modules = entitlements["enabled_modules"]
+                        license_obj.feature_flags = entitlements["feature_flags"]
+                        license_obj.billing_cycle = billing_cycle
+                        license_obj.price_cents = entitlements[
+                            "price_annual_kes" if billing_cycle == "annual" else "price_monthly_kes"
+                        ]
+                        license_obj.expires_at = expires_at
+                        license_obj.issued_by = issued_by
+                        license_obj.notes = notes
+                        action = "Updated"
+
+                    await db.flush()
+                    await db.commit()
+
+                await invalidate_license_cache(uuid.UUID(facility_id))
+                print(f"{action} active {tier} license for facility {facility_id}.")
+                print(f"Modules enabled: {len(license_obj.enabled_modules)}")
+                print(f"License key prefix: {license_obj.license_key[:12]}...")
+
+
+            asyncio.run(main())
+            PY
+
+      - name: Summary
+        run: |
+          {
+            echo "### Facility license bootstrap complete"
+            echo ""
+            echo "- Facility: \`${BOOTSTRAP_FACILITY_ID}\`"
+            echo "- Tier: \`${BOOTSTRAP_LICENSE_TIER}\`"
+            echo "- Billing cycle: \`${BOOTSTRAP_BILLING_CYCLE}\`"
+            echo "- Expires days: \`${BOOTSTRAP_EXPIRES_DAYS}\`"
+          } >> "$GITHUB_STEP_SUMMARY"

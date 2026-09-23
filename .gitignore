@@ -1,0 +1,80 @@
+# Dependencies
+node_modules/
+.pnpm-store/
+.uv-cache/
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Build
+.next/
+out/
+dist/
+build/
+*.egg-info/
+*.tsbuildinfo
+
+# Environment
+.env
+.env.*
+.env.local
+.env.*.local
+!.env.example
+*.env
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Claude Code
+.claude/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Docker
+docker-compose.override.yml
+
+# Logs
+*.log
+logs/
+
+# Test/Coverage
+coverage/
+htmlcov/
+.coverage
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Secrets — NEVER commit
+*.pem
+*.key
+secrets/
+vault-tokens/
+
+# Go
+services/billing-service/billing-service
+services/sync-service/sync-service
+
+# MinIO data
+minio-data/
+
+# Postgres data
+pgdata/
+
+# Debug utility scripts — NEVER commit (may contain credential access patterns)
+debug_db.py
+find_ids.py
+gen_hash.py
+test_hash.py
+
+# Knowledge RAG local uploads + embedded vector store
+services/ai-service/knowledge/data/
+
+# Local data volumes (generic bind-mount data dirs)
+data/

@@ -1,0 +1,14 @@
+# Keep local development state out of the image. Without this the native
+# .env (local storage / embedded Qdrant / inline ingest) and the data/
+# directory are copied in by "COPY . ." and quietly change container
+# behaviour, because a dotenv value beats the documented default.
+.env
+.env.*
+!.env.example
+data/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+tests/

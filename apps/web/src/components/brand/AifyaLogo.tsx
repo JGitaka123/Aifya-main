@@ -1,0 +1,62 @@
+import { cn } from "@/lib/utils";
+
+interface AifyaMarkProps {
+  className?: string;
+  title?: string;
+}
+
+/**
+ * Aifya brand mark: an A with a clinical cross held in negative space.
+ * @param props.className - Optional sizing and layout classes
+ * @param props.title - Accessible label when the mark is not decorative
+ * @returns Scalable Aifya logo mark
+ */
+export function AifyaMark({ className, title }: AifyaMarkProps) {
+  return (
+    <svg
+      viewBox="0 0 64 64"
+      className={cn("shrink-0", className)}
+      role={title ? "img" : undefined}
+      aria-hidden={title ? undefined : true}
+      xmlns="http://www.w3.org/2000/svg"
+    >
+      {title && <title>{title}</title>}
+      <path
+        d="M31.8 5.5c-4.7 0-7.8 2.5-10.1 7.7L4.3 52.7C2.7 56.4 5.4 60 9.5 60h10.1c5.6 0 9.5-2.9 11.9-8.4l4-9.2-5.2-10.8h-5.6v-6.2h2.7v-4.7h6.8V12c0-3.7-.8-6.5-2.4-6.5Z"
+        fill="#125C43"
+      />
+      <path
+        d="M34.2 5.7v15h3.1v4.7h4.5v6.2h-7.3l-3.9 8.9 5.1 11.2c2.5 5.5 6.3 8.3 11.8 8.3h7c4.1 0 6.8-3.6 5.2-7.3L42.3 13.2c-2.1-4.7-4.7-7.2-8.1-7.5Z"
+        fill="#23A36D"
+      />
+      <path
+        d="M30.4 53.6c1.8-5.3 5.1-8.4 10.1-9.4-.4 5.8-3.8 9.1-10.1 9.4Z"
+        fill="#F06D4F"
+      />
+    </svg>
+  );
+}
+
+interface AifyaLogoProps extends AifyaMarkProps {
+  compact?: boolean;
+}
+
+/**
+ * Aifya mark and wordmark lockup for product chrome.
+ * @param props.className - Optional classes for the lockup container
+ * @param props.compact - Shows only the mark when true
+ * @param props.title - Accessible title for the logo mark
+ * @returns Aifya brand lockup
+ */
+export function AifyaLogo({ className, compact = false, title }: AifyaLogoProps) {
+  return (
+    <div className={cn("flex items-center gap-2.5", className)}>
+      <AifyaMark className="h-9 w-9" title={compact ? title ?? "Aifya" : title} />
+      {!compact && (
+        <span className="text-[1.05rem] font-bold leading-none text-sidebar-foreground">
+          Aifya
+        </span>
+      )}
+    </div>
+  );
+}

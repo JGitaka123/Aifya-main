@@ -1,0 +1,89 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "aifya-api-gateway"
+version = "0.1.0"
+description = "Aifya HMIS API Gateway"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.32.0",
+    "sqlalchemy[asyncio]>=2.0.0",
+    "asyncpg>=0.30.0",
+    "alembic>=1.14.0",
+    "pydantic>=2.10.0",
+    "pydantic-settings>=2.6.0",
+    "celery[redis]>=5.4.0",
+    "redis>=5.2.0",
+    "python-jose[cryptography]>=3.3.0",
+    "httpx>=0.28.0",
+    "python-multipart>=0.0.12",
+    "aiokafka>=0.12.0",
+    "structlog>=24.0.0",
+    "reportlab>=4.0.0",
+    "sentry-sdk[fastapi]>=2.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "aiosqlite>=0.20.0",
+    "pytest>=8.3.0",
+    "pytest-asyncio>=0.24.0",
+    "httpx>=0.28.0",
+    "mypy>=1.13.0",
+    "ruff>=0.8.0",
+    "factory-boy>=3.3.0",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["app*"]
+exclude = ["alembic*", "scripts*", "tests*"]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 88
+
+[tool.ruff.lint]
+# TC (typing-only imports) intentionally not selected: it is a load-time
+# optimization that would churn ~75 import sites for no runtime benefit.
+select = ["E", "F", "I", "N", "UP", "B", "SIM", "RUF"]
+ignore = [
+    "B008",  # FastAPI DI idiom: Depends()/Query()/Header() in defaults
+    "E501",  # line length — style debt tracked in docs/AUDIT-REPORT.md
+]
+
+[tool.ruff.lint.per-file-ignores]
+# FHIR R4 resource fields are camelCase by spec.
+"app/services/fhir/models.py" = ["N815"]
+# DHIS2 Web API payload fields are camelCase by spec.
+"app/services/dhis2/client.py" = ["N815"]
+
+[tool.mypy]
+# Pragmatic baseline (gated in CI): bug-finding checks on, annotation-
+# completeness churn off. Tightening back to strict is tracked debt.
+python_version = "3.12"
+plugins = ["pydantic.mypy"]
+check_untyped_defs = true
+no_implicit_optional = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+disallow_untyped_defs = false
+disallow_any_generics = false
+warn_return_any = false
+
+[[tool.mypy.overrides]]
+module = [
+    "reportlab.*",
+    "celery.*",
+    "kafka.*",
+    "aiokafka.*",
+    "jose.*",
+]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]

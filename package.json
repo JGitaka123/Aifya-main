@@ -1,0 +1,33 @@
+{
+  "name": "aifya",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Aifya — AI-Native Hospital Management System",
+  "scripts": {
+    "dev": "docker compose up -d",
+    "dev:web": "pnpm --filter @aifya/web dev",
+    "build:web": "pnpm --filter @aifya/web build",
+    "test": "pnpm run test:web && pnpm run test:api && pnpm run test:billing && pnpm run test:sync",
+    "test:web": "pnpm --filter @aifya/web test",
+    "test:api": "cd services/api-gateway && python -m pytest -q tests/test_auth_dependencies.py tests/test_payroll_calculations.py tests/test_patients.py tests/test_finance_engine.py tests/test_finance_reports.py tests/test_payroll_engine.py",
+    "test:api:full": "cd services/api-gateway && python -m pytest",
+    "test:billing": "cd services/billing-service && go test ./...",
+    "test:sync": "cd services/sync-service && go test ./...",
+    "lint": "pnpm run lint:web && pnpm run lint:api && pnpm run lint:go",
+    "lint:web": "pnpm --filter @aifya/web lint",
+    "lint:api": "cd services/api-gateway && python -m ruff check app/auth/dependencies.py app/auth/keycloak.py app/config.py app/database.py app/main.py app/middleware/facility_context.py tests/conftest.py tests/test_auth_dependencies.py",
+    "lint:api:full": "cd services/api-gateway && python -m ruff check . && python -m ruff format --check .",
+    "lint:go": "cd services/billing-service && go vet ./... && cd ../sync-service && go vet ./...",
+    "typecheck": "pnpm run typecheck:shared && pnpm --filter @aifya/web typecheck",
+    "typecheck:shared": "pnpm --filter @aifya/web exec tsc --noEmit -p ../../packages/shared/tsconfig.json",
+    "typecheck:api": "cd services/api-gateway && python -m mypy app",
+    "typecheck:full": "pnpm run typecheck && pnpm run typecheck:api",
+    "db:migrate": "cd services/api-gateway && alembic upgrade head",
+    "db:revision": "cd services/api-gateway && alembic revision --autogenerate -m"
+  },
+  "packageManager": "pnpm@9.15.0",
+  "engines": {
+    "node": ">=20.0.0",
+    "pnpm": ">=9.0.0"
+  }
+}

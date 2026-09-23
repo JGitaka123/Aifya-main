@@ -1,0 +1,109 @@
+name: Production Backup
+
+on:
+  schedule:
+    - cron: "0 0 * * *"
+  workflow_dispatch:
+
+jobs:
+  backup:
+    runs-on: ubuntu-latest
+    env:
+      BACKUP_RCLONE_CONFIG_B64: ${{ secrets.BACKUP_RCLONE_CONFIG_B64 }}
+      BACKUP_ENCRYPTION_PASSPHRASE: ${{ secrets.BACKUP_ENCRYPTION_PASSPHRASE }}
+      BACKUP_RCLONE_REMOTE: ${{ vars.BACKUP_RCLONE_REMOTE || 'gdrive:aifya-backups/postgres' }}
+      BACKUP_REMOTE_RETENTION: ${{ vars.BACKUP_REMOTE_RETENTION || '30d' }}
+    steps:
+      - name: Backup production Postgres on server
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.SERVER_IP }}
+          username: ${{ secrets.SERVER_USER }}
+          key: ${{ secrets.DEPLOY_KEY }}
+          envs: BACKUP_RCLONE_CONFIG_B64,BACKUP_ENCRYPTION_PASSPHRASE,BACKUP_RCLONE_REMOTE,BACKUP_REMOTE_RETENTION
+          script: |
+            set -eu
+            cd /root/Aifya
+
+            COMPOSE="docker compose -f /root/Aifya/docker-compose.yml -f /root/Aifya/docker-compose.prod.yml"
+            postgres_user="$(sed -n 's/^POSTGRES_USER=//p' .env | tail -n 1)"
+            postgres_password="$(sed -n 's/^POSTGRES_PASSWORD=//p' .env | tail -n 1)"
+            postgres_db="$(sed -n 's/^POSTGRES_DB=//p' .env | tail -n 1)"
+            postgres_user="${postgres_user:-aifya_user}"
+            postgres_db="${postgres_db:-aifya}"
+
+            if [ -z "$postgres_password" ]; then
+              echo "POSTGRES_PASSWORD is required in /root/Aifya/.env" >&2
+              exit 1
+            fi
+
+            backup_dir="/root/Aifya/backups/postgres"
+            timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
+            backup_file="$backup_dir/aifya_${timestamp}.dump.gz"
+
+            mkdir -p "$backup_dir"
+            umask 077
+
+            $COMPOSE exec -T \
+              -u postgres \
+              -e PGPASSWORD="$postgres_password" \
+              postgres pg_dump \
+                -U "$postgres_user" \
+                -d "$postgres_db" \
+                --format=custom \
+                --no-owner \
+                --no-acl \
+              | gzip -c > "$backup_file"
+
+            gzip -t "$backup_file"
+            sha256sum "$backup_file" > "$backup_file.sha256"
+
+            find "$backup_dir" -type f -name 'aifya_*.dump.gz' -mtime +14 -delete
+            find "$backup_dir" -type f -name 'aifya_*.dump.gz.sha256' -mtime +14 -delete
+
+            echo "Created backup: $backup_file"
+
+            if [ -z "${BACKUP_RCLONE_CONFIG_B64:-}" ]; then
+              echo "BACKUP_RCLONE_CONFIG_B64 is not configured; skipping encrypted off-server upload."
+              exit 0
+            fi
+
+            if [ -z "${BACKUP_ENCRYPTION_PASSPHRASE:-}" ]; then
+              echo "BACKUP_ENCRYPTION_PASSPHRASE is required when BACKUP_RCLONE_CONFIG_B64 is configured." >&2
+              exit 1
+            fi
+
+            if ! command -v rclone >/dev/null 2>&1; then
+              if command -v apt-get >/dev/null 2>&1; then
+                apt-get update
+                DEBIAN_FRONTEND=noninteractive apt-get install -y rclone
+              else
+                echo "rclone is required for off-server backup upload." >&2
+                exit 1
+              fi
+            fi
+
+            rclone_config_dir="/root/.config/rclone"
+            mkdir -p "$rclone_config_dir"
+            umask 077
+            printf '%s' "$BACKUP_RCLONE_CONFIG_B64" | base64 -d > "$rclone_config_dir/rclone.conf"
+
+            encrypted_backup_file="$backup_file.enc"
+            openssl enc -aes-256-cbc -salt -pbkdf2 -iter 600000 -md sha256 \
+              -pass env:BACKUP_ENCRYPTION_PASSPHRASE \
+              -in "$backup_file" \
+              -out "$encrypted_backup_file"
+            openssl enc -d -aes-256-cbc -pbkdf2 -iter 600000 -md sha256 \
+              -pass env:BACKUP_ENCRYPTION_PASSPHRASE \
+              -in "$encrypted_backup_file" \
+              | gzip -t
+            sha256sum "$encrypted_backup_file" > "$encrypted_backup_file.sha256"
+
+            rclone copy "$encrypted_backup_file" "$BACKUP_RCLONE_REMOTE" --checksum --transfers 1 --checkers 4
+            rclone copy "$encrypted_backup_file.sha256" "$BACKUP_RCLONE_REMOTE" --checksum --transfers 1 --checkers 4
+            rclone delete "$BACKUP_RCLONE_REMOTE" \
+              --min-age "$BACKUP_REMOTE_RETENTION" \
+              --include 'aifya_*.dump.gz.enc' \
+              --include 'aifya_*.dump.gz.enc.sha256' || true
+
+            echo "Encrypted off-server backup uploaded to: $BACKUP_RCLONE_REMOTE"

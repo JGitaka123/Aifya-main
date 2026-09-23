@@ -1,0 +1,49 @@
+# Aifya — reverse proxy + automatic TLS for the Contabo backend.
+#
+# Runs on the host (apt install caddy). Copy this to /etc/caddy/Caddyfile
+# and `systemctl reload caddy`. The web app (www.aifyamed.com) is served by
+# Vercel and is NOT proxied here — this fronts only the backend hosts.
+#
+# It proxies to the ports docker compose publishes on host loopback:
+#   api-gateway  127.0.0.1:8000
+#   keycloak     127.0.0.1:8080
+#   minio (S3)   127.0.0.1:9000   (optional public document host)
+#
+# Caddy obtains + renews Let's Encrypt certs automatically. Make sure the
+# api / auth (and optional files) A records resolve to this host BEFORE
+# starting Caddy, or ACME HTTP-01 will fail.
+
+{
+	# Set to a real address for ACME expiry notices + recovery.
+	email admin@aifyamed.com
+}
+
+# ── API gateway ──────────────────────────────────────────────────────────
+api.aifyamed.com {
+	encode zstd gzip
+	# Cap request bodies (audio/doc uploads go to MinIO via presigned URLs,
+	# not through here); raise if you post large payloads to the API.
+	request_body {
+		max_size 25MB
+	}
+	reverse_proxy 127.0.0.1:8000
+}
+
+# ── Keycloak (auth) ──────────────────────────────────────────────────────
+auth.aifyamed.com {
+	encode zstd gzip
+	# Keycloak runs with KC_PROXY_HEADERS=xforwarded; Caddy sets them.
+	reverse_proxy 127.0.0.1:8080
+}
+
+# ── Optional: public document/object host (MinIO S3) ─────────────────────
+# Uncomment only if you serve MinIO objects on a public subdomain AND the
+# files.aifyamed.com A record exists (else ACME for it will fail).
+#
+# files.aifyamed.com {
+# 	encode zstd gzip
+# 	request_body {
+# 		max_size 100MB
+# 	}
+# 	reverse_proxy 127.0.0.1:9000
+# }

@@ -1,0 +1,173 @@
+{
+  "realm": "aifya",
+  "enabled": true,
+  "displayName": "Aifya HMIS",
+  "registrationAllowed": false,
+  "loginWithEmailAllowed": true,
+  "duplicateEmailsAllowed": false,
+  "resetPasswordAllowed": true,
+  "editUsernameAllowed": false,
+  "bruteForceProtected": true,
+  "permanentLockout": false,
+  "maxFailureWaitSeconds": 900,
+  "failureFactor": 5,
+  "accessTokenLifespan": 3600,
+  "ssoSessionIdleTimeout": 7200,
+  "ssoSessionMaxLifespan": 36000,
+  "roles": {
+    "realm": [
+      { "name": "admin", "description": "System administrator" },
+      { "name": "facility_admin", "description": "Facility administrator" },
+      { "name": "doctor", "description": "Medical doctor / clinical officer" },
+      { "name": "nurse", "description": "Registered nurse / enrolled nurse" },
+      { "name": "pharmacist", "description": "Pharmacist" },
+      { "name": "lab_tech", "description": "Laboratory technologist" },
+      { "name": "cashier", "description": "Billing / cashier" },
+      { "name": "records", "description": "Health records / registration clerk" },
+      { "name": "radiologist", "description": "Radiologist / imaging tech" },
+      { "name": "investigator", "description": "Clinical trials investigator" },
+      { "name": "research_coordinator", "description": "Clinical trials coordinator" }
+    ]
+  },
+  "clients": [
+    {
+      "clientId": "aifya-web",
+      "name": "Aifya Web Application",
+      "enabled": true,
+      "publicClient": true,
+      "directAccessGrantsEnabled": false,
+      "standardFlowEnabled": true,
+      "redirectUris": [
+        "http://localhost:3000/*",
+        "https://www.aifyamed.com/*",
+        "https://aifyamed.com/*",
+        "https://*.aifya.health/*"
+      ],
+      "webOrigins": [
+        "http://localhost:3000",
+        "https://www.aifyamed.com",
+        "https://aifyamed.com",
+        "https://*.aifya.health"
+      ],
+      "defaultClientScopes": ["openid", "profile", "email", "aifya-scope"]
+    },
+    {
+      "clientId": "aifya-api",
+      "name": "Aifya API Gateway",
+      "enabled": true,
+      "bearerOnly": true,
+      "publicClient": false,
+      "defaultClientScopes": ["openid", "profile", "email", "aifya-scope"]
+    }
+  ],
+  "clientScopes": [
+    {
+      "name": "aifya-scope",
+      "description": "Aifya custom claims (facility_id)",
+      "protocol": "openid-connect",
+      "protocolMappers": [
+        {
+          "name": "facility_id",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-usermodel-attribute-mapper",
+          "config": {
+            "user.attribute": "facility_id",
+            "claim.name": "facility_id",
+            "id.token.claim": "true",
+            "access.token.claim": "true",
+            "jsonType.label": "String"
+          }
+        },
+        {
+          "name": "aifya-api-audience",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "config": {
+            "included.client.audience": "aifya-api",
+            "id.token.claim": "false",
+            "access.token.claim": "true"
+          }
+        }
+      ]
+    }
+  ],
+  "users": [
+    {
+      "id": "00000000-0000-0000-0000-000000000011",
+      "username": "admin@aifya.health",
+      "email": "admin@aifya.health",
+      "emailVerified": true,
+      "enabled": true,
+      "firstName": "System",
+      "lastName": "Admin",
+      "attributes": {
+        "facility_id": ["00000000-0000-0000-0000-000000000001"]
+      },
+      "credentials": [
+        {
+          "type": "password",
+          "value": "admin123",
+          "temporary": true
+        }
+      ],
+      "realmRoles": ["admin", "doctor"]
+    },
+    {
+      "username": "doctor@demo.aifya.health",
+      "email": "doctor@demo.aifya.health",
+      "emailVerified": true,
+      "enabled": true,
+      "firstName": "Demo",
+      "lastName": "Doctor",
+      "attributes": {
+        "facility_id": ["00000000-0000-0000-0000-000000000001"]
+      },
+      "credentials": [
+        {
+          "type": "password",
+          "value": "demo123",
+          "temporary": true
+        }
+      ],
+      "realmRoles": ["doctor"]
+    },
+    {
+      "username": "nurse@demo.aifya.health",
+      "email": "nurse@demo.aifya.health",
+      "emailVerified": true,
+      "enabled": true,
+      "firstName": "Demo",
+      "lastName": "Nurse",
+      "attributes": {
+        "facility_id": ["00000000-0000-0000-0000-000000000001"]
+      },
+      "credentials": [
+        {
+          "type": "password",
+          "value": "demo123",
+          "temporary": true
+        }
+      ],
+      "realmRoles": ["nurse"]
+    },
+    {
+      "username": "records@demo.aifya.health",
+      "email": "records@demo.aifya.health",
+      "emailVerified": true,
+      "enabled": true,
+      "firstName": "Demo",
+      "lastName": "Records",
+      "attributes": {
+        "facility_id": ["00000000-0000-0000-0000-000000000001"]
+      },
+      "credentials": [
+        {
+          "type": "password",
+          "value": "demo123",
+          "temporary": true
+        }
+      ],
+      "realmRoles": ["records"]
+    }
+  ]
+}

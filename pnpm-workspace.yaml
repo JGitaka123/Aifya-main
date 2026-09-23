@@ -1,0 +1,6 @@
+# apps/* is the only member with a manifest. packages/shared is a plain
+# TypeScript tree consumed through the "@aifya/shared" tsconfig path alias
+# (see apps/web/tsconfig.json), so it is deliberately not a workspace
+# package and has no entry in pnpm-lock.yaml.
+packages:
+  - "apps/*"

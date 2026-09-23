@@ -1,0 +1,519 @@
+services:
+  # =============================================================================
+  # Infrastructure
+  # =============================================================================
+
+  postgres:
+    image: timescale/timescaledb:latest-pg16
+    container_name: aifya-postgres
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-aifya}
+      POSTGRES_USER: ${POSTGRES_USER:-aifya_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-aifya_dev_password}
+    ports:
+      # Host port 5433, not 5432: a native Windows PostgreSQL service already
+      # owns 5432 on this machine, so Docker cannot bind it. Containers still
+      # reach this database at postgres:5432; only host-side tools (psql,
+      # alembic) need 5433.
+      - "127.0.0.1:5433:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    container_name: aifya-redis
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  kafka:
+    image: bitnami/kafka:3.7
+    container_name: aifya-kafka
+    environment:
+      KAFKA_CFG_NODE_ID: 0
+      KAFKA_CFG_PROCESS_ROLES: controller,broker
+      KAFKA_CFG_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093
+      KAFKA_CFG_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+      KAFKA_CFG_CONTROLLER_QUORUM_VOTERS: 0@kafka:9093
+      KAFKA_CFG_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_CFG_ADVERTISED_LISTENERS: PLAINTEXT://localhost:9092
+    ports:
+      - "9092:9092"
+    restart: unless-stopped
+
+  minio:
+    image: minio/minio:latest
+    container_name: aifya-minio
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ACCESS_KEY:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY:-aifya_minio_dev_secret}
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio-data:/data
+    restart: unless-stopped
+
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: aifya-qdrant
+    ports:
+      - "6333:6333"
+      - "6334:6334"
+    volumes:
+      - qdrant-data:/qdrant/storage
+    restart: unless-stopped
+
+  keycloak:
+    image: quay.io/keycloak/keycloak:25.0
+    container_name: aifya-keycloak
+    command: start-dev --import-realm
+    environment:
+      KEYCLOAK_ADMIN: ${KEYCLOAK_ADMIN:-admin}
+      KEYCLOAK_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:-aifya_keycloak_dev_password}
+      KC_DB: postgres
+      KC_DB_URL: jdbc:postgresql://postgres:5432/${POSTGRES_DB:-aifya}
+      KC_DB_USERNAME: ${POSTGRES_USER:-aifya_user}
+      KC_DB_PASSWORD: ${POSTGRES_PASSWORD:-aifya_dev_password}
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./infrastructure/keycloak/aifya-realm.json:/opt/keycloak/data/import/aifya-realm.json:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # =============================================================================
+  # Application Services
+  # =============================================================================
+
+  # One-shot: bring the schema up to head before anything that reads it starts.
+  # Without this, "docker compose up -d" leaves an empty database and every API
+  # call fails on a missing table. Idempotent, so re-running is harmless.
+  db-migrate:
+    build:
+      context: ./services/api-gateway
+      dockerfile: Dockerfile
+    container_name: aifya-db-migrate
+    command: python -m alembic upgrade head
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-aifya_user}:${POSTGRES_PASSWORD:-aifya_dev_password}@postgres:5432/${POSTGRES_DB:-aifya}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - ./services/api-gateway:/app
+    restart: "no"
+
+  api-gateway:
+    build:
+      context: ./services/api-gateway
+      dockerfile: Dockerfile
+    container_name: aifya-api-gateway
+    environment:
+      DEBUG: "true"
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-aifya_user}:${POSTGRES_PASSWORD:-aifya_dev_password}@postgres:5432/${POSTGRES_DB:-aifya}
+      REDIS_URL: redis://redis:6379/0
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      KEYCLOAK_URL: http://keycloak:8080
+      KEYCLOAK_REALM: ${KEYCLOAK_REALM:-aifya}
+      BETA_PUBLIC_ACCESS: ${BETA_PUBLIC_ACCESS:-false}
+      KEYCLOAK_ADMIN_CLIENT_ID: ${KEYCLOAK_ADMIN_CLIENT_ID:-aifya-admin}
+      KEYCLOAK_ADMIN_CLIENT_SECRET: ${KEYCLOAK_ADMIN_CLIENT_SECRET:-}
+      FACILITY_SIGNUP_AUTO_APPROVE: ${FACILITY_SIGNUP_AUTO_APPROVE:-false}
+      AI_SERVICE_URL: http://ai-service:8010
+      VLLM_MEDGEMMA_27B_URL: http://medgemma:8004/v1
+      SECRET_KEY: ${SECRET_KEY:-dev_only_replace_with_openssl_rand_hex_32}
+      CORS_ORIGINS: http://localhost:3000
+      # Dev source IPs are not Safaricom — disable callback IP enforcement.
+      MPESA_CALLBACK_IP_ENFORCE: "false"
+      # ClaimFlow SHA claim validator.
+      CLAIMFLOW_VALIDATOR_URL: http://claimflow-validator:8030
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      db-migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+    volumes:
+      - ./services/api-gateway:/app
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=5).read()\"",
+        ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  api-worker:
+    build:
+      context: ./services/api-gateway
+      dockerfile: Dockerfile
+    container_name: aifya-api-worker
+    command: celery -A app.worker worker --loglevel=info
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-aifya_user}:${POSTGRES_PASSWORD:-aifya_dev_password}@postgres:5432/${POSTGRES_DB:-aifya}
+      REDIS_URL: redis://redis:6379/0
+      SECRET_KEY: ${SECRET_KEY:-dev_only_replace_with_openssl_rand_hex_32}
+      DEBUG: "true"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      db-migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  api-beat:
+    build:
+      context: ./services/api-gateway
+      dockerfile: Dockerfile
+    container_name: aifya-api-beat
+    command: celery -A app.worker beat --loglevel=info
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-aifya_user}:${POSTGRES_PASSWORD:-aifya_dev_password}@postgres:5432/${POSTGRES_DB:-aifya}
+      REDIS_URL: redis://redis:6379/0
+      SECRET_KEY: ${SECRET_KEY:-dev_only_replace_with_openssl_rand_hex_32}
+      DEBUG: "true"
+    depends_on:
+      redis:
+        condition: service_healthy
+      db-migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  web:
+    build:
+      context: .
+      dockerfile: apps/web/Dockerfile
+      args:
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-/api/v1}
+        API_REWRITE_URL: ${API_REWRITE_URL:-http://api-gateway:8000/api/v1}
+        NEXT_PUBLIC_BETA_PUBLIC_ACCESS: ${NEXT_PUBLIC_BETA_PUBLIC_ACCESS:-false}
+    container_name: aifya-web
+    environment:
+      NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-/api/v1}
+      API_REWRITE_URL: ${API_REWRITE_URL:-http://api-gateway:8000/api/v1}
+      NEXT_PUBLIC_BETA_PUBLIC_ACCESS: ${NEXT_PUBLIC_BETA_PUBLIC_ACCESS:-false}
+      # Server-side URLs for the /api/knowledge and /api/scribe
+      # cookie-auth proxy routes.
+      KNOWLEDGE_SERVICE_URL: http://knowledge-service:8025
+      SCRIBE_SERVICE_URL: http://scribe-service:8000
+      NEXT_PUBLIC_KEYCLOAK_URL: http://localhost:8080
+      NEXT_PUBLIC_KEYCLOAK_REALM: aifya
+      NEXT_PUBLIC_KEYCLOAK_CLIENT_ID: aifya-web
+      NEXT_PUBLIC_WS_URL: ws://localhost:8000/ws
+      KEYCLOAK_URL: http://keycloak:8080
+      KEYCLOAK_REALM: aifya
+      KEYCLOAK_CLIENT_ID: aifya-web
+      KEYCLOAK_CLIENT_SECRET: ${KEYCLOAK_CLIENT_SECRET:-}
+      NEXTAUTH_URL: http://localhost:3000
+    ports:
+      - "3000:3000"
+    depends_on:
+      api-gateway:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "node -e \"fetch('http://127.0.0.1:3000/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))\"",
+        ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  # DISABLED (see docs/AUDIT-REPORT.md C-2): billing-service has no
+  # authentication, writes the same invoices/payments tables the
+  # api-gateway owns with a racy invoice-number generator, and is broken
+  # by the tenant-RLS migration (it never sets app.current_facility_id).
+  # Nothing in the frontend calls it. Re-enable only after adding JWT
+  # auth + RLS session context, or fold its endpoints into api-gateway.
+  # billing-service:
+  #   build:
+  #     context: ./services/billing-service
+  #     dockerfile: Dockerfile
+  #   container_name: aifya-billing
+  #   environment:
+  #     DATABASE_URL: postgres://${POSTGRES_USER:-aifya_user}:${POSTGRES_PASSWORD:-aifya_dev_password}@postgres:5432/${POSTGRES_DB:-aifya}
+  #     PORT: "8020"
+  #   ports:
+  #     - "8020:8020"
+  #   depends_on:
+  #     postgres:
+  #       condition: service_healthy
+
+  # DISABLED (see docs/AUDIT-REPORT.md C-5): sync-service stores all
+  # offline-sync state in process memory (lost on restart) and has no
+  # auth; shipping it implies durable offline sync that does not exist.
+  # The web app's real offline queue lives in IndexedDB + sync-worker.
+  # sync-service:
+  #   build:
+  #     context: ./services/sync-service
+  #     dockerfile: Dockerfile
+  #   container_name: aifya-sync
+  #   environment:
+  #     PORT: "8021"
+  #   ports:
+  #     - "8021:8021"
+
+  # ClaimFlow — SHA claim rule-engine validator (121 rules). Stateless;
+  # the api-gateway calls it before submitting a claim to SHA.
+  claimflow-validator:
+    build:
+      context: ./services/ai-service/claimflow
+      dockerfile: packages/validator-service/Dockerfile
+    container_name: aifya-claimflow-validator
+    environment:
+      PORT: "8030"
+      KEYCLOAK_URL: http://keycloak:8080
+      KEYCLOAK_REALM: aifya
+      RULEPACK_DIR: /app/rulepacks
+    ports:
+      - "8030:8030"
+    depends_on:
+      keycloak:
+        condition: service_started
+    restart: unless-stopped
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "node -e \"fetch('http://127.0.0.1:8030/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))\"",
+        ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+
+  knowledge-service:
+    build:
+      context: ./services/ai-service/knowledge
+      dockerfile: Dockerfile
+    container_name: aifya-knowledge
+    environment:
+      APP_ENV: development
+      DEBUG: "true"
+      # Must match services/api-gateway/.env. The web app's /api/knowledge
+      # proxy forwards the api-gateway's HS256 access token, so the knowledge
+      # service verifies it with the same secret instead of Keycloak JWKS.
+      AUTH_PROVIDER: ${AUTH_PROVIDER:-internal}
+      SECRET_KEY: ${SECRET_KEY:?SECRET_KEY must be set in the root .env and match services/api-gateway/.env}
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-aifya_user}:${POSTGRES_PASSWORD:-aifya_dev_password}@postgres:5432/${POSTGRES_DB:-aifya}
+      KEYCLOAK_URL: http://keycloak:8080
+      KEYCLOAK_REALM: aifya
+      QDRANT_ENDPOINT: http://qdrant:6333
+      MINIO_ENDPOINT: minio:9000
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:-minioadmin}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:-aifya_minio_dev_secret}
+      MINIO_KNOWLEDGE_BUCKET: aifya-knowledge
+      MINIO_SECURE: "false"
+      # The backends are pinned explicitly here. APP_ENV=development would
+      # otherwise resolve them to the Docker-free local defaults (plain files,
+      # embedded Qdrant, inline ingestion) and the containers would ignore the
+      # MinIO / Qdrant / Redis services started below.
+      STORAGE_BACKEND: minio
+      VECTOR_BACKEND: qdrant
+      EMBEDDING_BACKEND: sentence-transformers
+      INGEST_MODE: celery
+      # LiteLLM's virtual key, when the proxy is configured to require one.
+      GENERATION_API_KEY: ${GENERATION_API_KEY:-aifya-dev-key}
+      # Managed AI: generation goes through the LiteLLM proxy. Override
+      # VLLM_BASE_URL to point at a self-hosted vLLM; GENERATION_MODEL must
+      # match a model_name in infrastructure/litellm/config.yaml.
+      VLLM_BASE_URL: ${VLLM_BASE_URL:-http://litellm:4000/v1}
+      GENERATION_MODEL: ${GENERATION_MODEL:-claude-sonnet}
+      CELERY_BROKER_URL: redis://redis:6379/3
+      CELERY_RESULT_BACKEND: redis://redis:6379/4
+      CORS_ORIGINS: http://localhost:3000
+    ports:
+      - "8025:8025"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      qdrant:
+        condition: service_started
+      minio:
+        condition: service_started
+      litellm:
+        condition: service_started
+      db-migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8025/health', timeout=5).read()\"",
+        ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  knowledge-worker:
+    build:
+      context: ./services/ai-service/knowledge
+      dockerfile: Dockerfile
+    container_name: aifya-knowledge-worker
+    command: celery -A app.tasks.celery_app worker -l info -Q knowledge -c 2
+    environment:
+      APP_ENV: development
+      # Must match services/api-gateway/.env. The web app's /api/knowledge
+      # proxy forwards the api-gateway's HS256 access token, so the knowledge
+      # service verifies it with the same secret instead of Keycloak JWKS.
+      AUTH_PROVIDER: ${AUTH_PROVIDER:-internal}
+      SECRET_KEY: ${SECRET_KEY:?SECRET_KEY must be set in the root .env and match services/api-gateway/.env}
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-aifya_user}:${POSTGRES_PASSWORD:-aifya_dev_password}@postgres:5432/${POSTGRES_DB:-aifya}
+      QDRANT_ENDPOINT: http://qdrant:6333
+      MINIO_ENDPOINT: minio:9000
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:-minioadmin}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:-aifya_minio_dev_secret}
+      MINIO_KNOWLEDGE_BUCKET: aifya-knowledge
+      MINIO_SECURE: "false"
+      # The backends are pinned explicitly here. APP_ENV=development would
+      # otherwise resolve them to the Docker-free local defaults (plain files,
+      # embedded Qdrant, inline ingestion) and the containers would ignore the
+      # MinIO / Qdrant / Redis services started below.
+      STORAGE_BACKEND: minio
+      VECTOR_BACKEND: qdrant
+      EMBEDDING_BACKEND: sentence-transformers
+      CELERY_BROKER_URL: redis://redis:6379/3
+      CELERY_RESULT_BACKEND: redis://redis:6379/4
+    depends_on:
+      redis:
+        condition: service_healthy
+      qdrant:
+        condition: service_started
+      minio:
+        condition: service_started
+      db-migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  # =============================================================================
+  # ScribeAI — Ambient Clinical Documentation
+  # =============================================================================
+
+  # The image CMD binds port 8000, so publish it as 8005 on the host and
+  # address the container on 8000 inside the compose network.
+  scribe-service:
+    build:
+      context: ./services/ai-service/scribe/backend
+      dockerfile: Dockerfile
+    container_name: aifya-scribe
+    ports:
+      - "8005:8000"
+    environment:
+      APP_ENV: development
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-aifya_user}:${POSTGRES_PASSWORD:-aifya_dev_password}@postgres:5432/${POSTGRES_DB:-aifya}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-sk-placeholder}
+      MINIO_ENDPOINT: minio:9000
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:-minioadmin}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:-aifya_minio_dev_secret}
+      MINIO_AUDIO_BUCKET: aifya-scribe-audio
+      MINIO_SECURE: "false"
+      JWT_SECRET: ${JWT_SECRET:-aifya_scribe_dev_jwt_secret}
+      # Accept platform Keycloak sessions (SSO) alongside local logins.
+      KEYCLOAK_URL: http://keycloak:8080
+      KEYCLOAK_REALM: aifya
+      # Managed AI: talk to the LiteLLM proxy (OpenAI-compatible). Override
+      # OPENAI_BASE_URL to point straight at OpenAI or a self-hosted vLLM.
+      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-http://litellm:4000/v1}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio:
+        condition: service_started
+      litellm:
+        condition: service_started
+      db-migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "curl -fsS http://127.0.0.1:8000/health >/dev/null || exit 1",
+        ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+
+  # =============================================================================
+  # LiteLLM — OpenAI-compatible proxy to managed model providers (Claude, …)
+  # One stable /v1 endpoint for ScribeAI + knowledge; swap providers or move
+  # to self-hosted vLLM later with no app change. See docs/DEPLOYMENT.md §7.
+  # Bound to host loopback (127.0.0.1) only — never reachable off-host; the
+  # provider keys live only in this container.
+  # =============================================================================
+
+  litellm:
+    image: ghcr.io/berriai/litellm:main-stable
+    container_name: aifya-litellm
+    command: ["--config", "/app/config.yaml", "--port", "4000", "--num_workers", "2"]
+    environment:
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      WHISPER_OPENAI_API_KEY: ${WHISPER_OPENAI_API_KEY:-sk-placeholder}
+    volumes:
+      - ./infrastructure/litellm/config.yaml:/app/config.yaml:ro
+    ports:
+      - "127.0.0.1:4000:4000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:4000/health/liveliness',timeout=5).status==200 else 1)"]
+      interval: 30s
+      timeout: 6s
+      retries: 5
+      start_period: 20s
+    restart: unless-stopped
+
+  # =============================================================================
+  # Observability (optional, comment out if not needed for dev)
+  # =============================================================================
+
+  # prometheus:
+  #   image: prom/prometheus:latest
+  #   container_name: aifya-prometheus
+  #   ports:
+  #     - "9090:9090"
+  #   volumes:
+  #     - ./infrastructure/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
+
+  # grafana:
+  #   image: grafana/grafana:latest
+  #   container_name: aifya-grafana
+  #   ports:
+  #     - "3001:3000"
+  #   environment:
+  #     GF_SECURITY_ADMIN_PASSWORD: admin
+
+volumes:
+  pgdata:
+  minio-data:
+  qdrant-data:

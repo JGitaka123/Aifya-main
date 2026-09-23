@@ -1,0 +1,185 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  body {
+    @apply bg-slate-50 text-slate-900 transition-colors duration-200;
+  }
+
+  .dark body,
+  body.dark {
+    @apply bg-slate-900 text-slate-100;
+  }
+
+  /* Improve focus visibility for accessibility */
+  *:focus-visible {
+    @apply outline-2 outline-offset-2 outline-medical-blue;
+  }
+
+  /* CSS custom properties for chart theming */
+  :root {
+    --chart-bg: #ffffff;
+    --chart-border: #e2e8f0;
+    --chart-text: #64748b;
+  }
+
+  .dark {
+    --chart-bg: #1e293b;
+    --chart-border: #334155;
+    --chart-text: #94a3b8;
+  }
+
+  /* Smooth scrolling */
+  html {
+    scroll-behavior: smooth;
+  }
+
+  /* Custom scrollbar */
+  ::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+  ::-webkit-scrollbar-track {
+    @apply bg-transparent;
+  }
+  ::-webkit-scrollbar-thumb {
+    @apply bg-slate-300 rounded-full;
+  }
+  .dark ::-webkit-scrollbar-thumb {
+    @apply bg-slate-600;
+  }
+}
+
+@layer components {
+  /* Card component */
+  .card {
+    @apply bg-white rounded-xl shadow-sm border border-slate-200;
+  }
+  .dark .card {
+    @apply bg-slate-800 border-slate-700;
+  }
+
+  /* Input component */
+  .input {
+    @apply px-3 py-2 border border-slate-300 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-medical-blue focus:border-transparent bg-white text-slate-900;
+  }
+  .dark .input {
+    @apply bg-slate-800 border-slate-600 text-slate-100;
+  }
+
+  /* Button primary */
+  .btn-primary {
+    @apply px-4 py-2 bg-medical-blue text-white rounded-md text-sm font-medium hover:bg-medical-blue-dark transition-colors disabled:opacity-50;
+  }
+
+  /* Button secondary */
+  .btn-secondary {
+    @apply px-4 py-2 border border-slate-300 text-slate-600 rounded-md text-sm hover:bg-slate-50 transition-colors;
+  }
+  .dark .btn-secondary {
+    @apply border-slate-600 text-slate-300 hover:bg-slate-700;
+  }
+
+  /* Badge */
+  .badge {
+    @apply px-2 py-0.5 rounded text-xs font-bold;
+  }
+
+  /* Table */
+  .table-header {
+    @apply text-xs text-slate-500 uppercase bg-slate-50 border-b;
+  }
+  .dark .table-header {
+    @apply text-slate-400 bg-slate-800/50;
+  }
+
+  .table-row {
+    @apply bg-white border-b hover:bg-slate-50 transition-colors;
+  }
+  .dark .table-row {
+    @apply bg-slate-800 border-slate-700 hover:bg-slate-700;
+  }
+}
+
+@layer utilities {
+  .animate-slide-up {
+    animation: slideUp 0.3s ease-out;
+  }
+
+  .animate-fade-in {
+    animation: fadeIn 0.2s ease-out;
+  }
+}
+
+@keyframes slideUp {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+/* Print styles for clinical notes */
+@media print {
+  header, footer, nav,
+  .print\\:hidden,
+  [data-print-hidden] {
+    display: none !important;
+  }
+
+  body {
+    background: white !important;
+    color: black !important;
+    font-size: 11pt !important;
+    line-height: 1.4 !important;
+  }
+
+  main {
+    max-width: none !important;
+    padding: 0 !important;
+    margin: 0 !important;
+  }
+
+  .card, .bg-white, [class*="rounded-xl"] {
+    border: 1px solid #ddd !important;
+    box-shadow: none !important;
+    border-radius: 4px !important;
+    break-inside: avoid;
+  }
+
+  table {
+    border-collapse: collapse !important;
+    width: 100% !important;
+  }
+
+  th, td {
+    border: 1px solid #ccc !important;
+    padding: 4px 8px !important;
+    font-size: 10pt !important;
+  }
+
+  /* Print header for clinical notes */
+  .print\\:block {
+    display: block !important;
+  }
+
+  @page {
+    margin: 1.5cm;
+    size: A4;
+  }
+
+  /* Ensure charts don't print poorly */
+  .recharts-wrapper {
+    break-inside: avoid;
+    page-break-inside: avoid;
+  }
+}

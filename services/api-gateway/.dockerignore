@@ -1,0 +1,19 @@
+# Local development state must never enter the image. Without this, COPY . .
+# bakes a large Windows virtualenv into the layer and copies .env in with it.
+# pydantic-settings reads /app/.env on boot, so those values would be picked
+# up inside the container even though compose sets its own environment.
+.env
+.env.*
+!.env.example
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+test.db
+test.db-*
+tests/
+*.log

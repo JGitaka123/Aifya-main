@@ -1,0 +1,154 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  web:
+    name: Web
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v6
+        with:
+          version: 9.15.0
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Shared typecheck
+        run: pnpm --filter @aifya/web exec tsc --noEmit -p ../../packages/shared/tsconfig.json
+
+      - name: Web typecheck
+        run: pnpm --filter @aifya/web typecheck
+
+      - name: Web lint
+        run: pnpm --filter @aifya/web lint
+
+      - name: Test
+        run: pnpm --filter @aifya/web test
+
+      - name: Build
+        env:
+          NEXT_TELEMETRY_DISABLED: "1"
+          NEXT_OUTPUT_STANDALONE: "true"
+        run: pnpm --filter @aifya/web build
+
+  api:
+    name: API Gateway
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: services/api-gateway
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev]"
+
+      - name: Ruff (full app)
+        run: ruff check app
+
+      - name: Mypy (full app)
+        run: mypy app
+
+      - name: Tests (full suite)
+        env:
+          DEBUG: "true"
+          SECRET_KEY: ci-secret-key
+          DATABASE_URL: sqlite+aiosqlite:///./test.db
+        run: python -m pytest -q
+
+  claimflow:
+    name: ClaimFlow (rule engine + validator)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: services/ai-service/claimflow
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v6
+        with:
+          # ClaimFlow is a separate workspace pinned to pnpm 10 (engines +
+          # packageManager). Read its manifest so the action doesn't pick up
+          # the repo-root packageManager (pnpm 9) and error on a mismatch.
+          package_json_file: services/ai-service/claimflow/package.json
+
+      - name: Install
+        run: pnpm install --frozen-lockfile=false
+
+      - name: Rule-engine tests
+        run: pnpm --filter @claimflow/rule-engine test
+
+      - name: Validator typecheck
+        run: pnpm --filter @claimflow/validator-service typecheck
+
+      - name: Validator tests
+        run: pnpm --filter @claimflow/validator-service test
+
+  go:
+    name: Go Services
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        service:
+          - services/billing-service
+          - services/sync-service
+    defaults:
+      run:
+        working-directory: ${{ matrix.service }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: "1.22"
+          cache-dependency-path: ${{ matrix.service }}/go.sum
+
+      - name: Format
+        run: test -z "$(gofmt -l .)"
+
+      - name: Test
+        run: go test ./...
+
+  compose:
+    name: Docker Compose
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Validate compose file
+        run: docker compose config --quiet
+
+      - name: Build core images
+        run: docker compose build web api-gateway

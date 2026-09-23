@@ -1,0 +1,102 @@
+version: '3.8'
+
+services:
+  aifya-api:
+    build: ./backend
+    ports:
+      - "8000:8000"
+    environment:
+      - APP_ENV=${APP_ENV:-development}
+      - DATABASE_URL=postgresql://aifya:${DB_PASSWORD}@aifya-db:5432/aifya
+      - QAFYA_DB_HOST=${QAFYA_DB_HOST}
+      - QAFYA_DB_PORT=${QAFYA_DB_PORT:-5432}
+      - QAFYA_DB_NAME=${QAFYA_DB_NAME}
+      - QAFYA_DB_USER=${QAFYA_DB_USER}
+      - QAFYA_DB_PASSWORD=${QAFYA_DB_PASSWORD}
+      - QAFYA_CB_THRESHOLD=${QAFYA_CB_THRESHOLD:-5}
+      - QAFYA_CB_TIMEOUT=${QAFYA_CB_TIMEOUT:-60}
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - JWT_SECRET=${JWT_SECRET}
+      - ENCRYPTION_KEY=${ENCRYPTION_KEY}
+      - ACCESS_TOKEN_EXPIRE_MINUTES=${ACCESS_TOKEN_EXPIRE_MINUTES:-15}
+      - REFRESH_TOKEN_EXPIRE_DAYS=${REFRESH_TOKEN_EXPIRE_DAYS:-7}
+      - MINIO_ENDPOINT=minio:9000
+      - MINIO_ACCESS_KEY=${MINIO_ACCESS_KEY}
+      - MINIO_SECRET_KEY=${MINIO_SECRET_KEY}
+      - MINIO_AUDIO_BUCKET=aifya-audio
+      - MINIO_SECURE=false
+      - CORS_ORIGINS=${CORS_ORIGINS:-http://localhost:3000,http://aifya-frontend:3000}
+      - RATE_LIMIT_PER_MINUTE=${RATE_LIMIT_PER_MINUTE:-100}
+    depends_on:
+      aifya-db:
+        condition: service_healthy
+      minio:
+        condition: service_started
+    restart: unless-stopped
+    healthcheck:
+      test: [ "CMD", "curl", "-f", "http://localhost:8000/health" ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+
+  aifya-db:
+    image: postgres:16
+    volumes:
+      - "aifya_pgdata:/var/lib/postgresql/data"
+      - "./backend/database/aifya_schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro"
+      - "./backend/database/seed_data.sql:/docker-entrypoint-initdb.d/02-seed.sql:ro"
+    environment:
+      - POSTGRES_DB=aifya
+      - POSTGRES_USER=aifya
+      - POSTGRES_PASSWORD=${DB_PASSWORD}
+    ports:
+      - "5433:5432"
+    restart: unless-stopped
+    healthcheck:
+      test: [ "CMD-SHELL", "pg_isready -U aifya" ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  minio:
+    image: minio/minio
+    command: server /data --console-address ":9001"
+    volumes:
+      - "minio_data:/data"
+    environment:
+      - MINIO_ROOT_USER=${MINIO_ACCESS_KEY}
+      - MINIO_ROOT_PASSWORD=${MINIO_SECRET_KEY}
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    restart: unless-stopped
+
+  aifya-frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    ports:
+      - "3000:3000"
+    environment:
+      - NEXT_PUBLIC_API_URL=http://localhost:8000/api/v1
+    depends_on:
+      - aifya-api
+    restart: unless-stopped
+
+  nginx:
+    image: nginx:alpine
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/50x.html:/usr/share/nginx/html/50x.html:ro
+    depends_on:
+      - aifya-api
+      - aifya-frontend
+    restart: unless-stopped
+
+volumes:
+  aifya_pgdata:
+  minio_data:

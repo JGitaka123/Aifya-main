@@ -1,0 +1,613 @@
+name: Keycloak Bootstrap User
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - .github/workflows/keycloak-bootstrap-user.yml
+  workflow_dispatch:
+    inputs:
+      email:
+        description: User email / username
+        required: true
+        default: jessegitaka@gmail.com
+      facility_id:
+        description: Facility UUID claim
+        required: true
+        default: 00000000-0000-0000-0000-000000000001
+      roles:
+        description: Space-separated Keycloak realm roles
+        required: true
+        default: super_admin admin facility_admin doctor
+      temporary_password:
+        description: Force password update after first login
+        required: true
+        type: choice
+        options:
+          - "true"
+          - "false"
+        default: "true"
+
+jobs:
+  bootstrap-user:
+    runs-on: ubuntu-latest
+    env:
+      BOOTSTRAP_EMAIL: ${{ inputs.email }}
+      BOOTSTRAP_FACILITY_ID: ${{ inputs.facility_id }}
+      BOOTSTRAP_ROLES: ${{ inputs.roles }}
+      BOOTSTRAP_TEMPORARY_PASSWORD: ${{ inputs.temporary_password }}
+      AIFYA_BOOTSTRAP_PASSWORD: ${{ secrets.AIFYA_BOOTSTRAP_PASSWORD }}
+
+    steps:
+      - name: Bootstrap Keycloak user
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.SERVER_IP }}
+          username: ${{ secrets.SERVER_USER }}
+          key: ${{ secrets.DEPLOY_KEY }}
+          envs: BOOTSTRAP_EMAIL,BOOTSTRAP_FACILITY_ID,BOOTSTRAP_ROLES,BOOTSTRAP_TEMPORARY_PASSWORD,AIFYA_BOOTSTRAP_PASSWORD
+          script: |
+            set -eu
+            BOOTSTRAP_EMAIL="${BOOTSTRAP_EMAIL:-jessegitaka@gmail.com}"
+            BOOTSTRAP_FACILITY_ID="${BOOTSTRAP_FACILITY_ID:-00000000-0000-0000-0000-000000000001}"
+            BOOTSTRAP_ROLES="${BOOTSTRAP_ROLES:-super_admin admin facility_admin doctor}"
+            BOOTSTRAP_TEMPORARY_PASSWORD="${BOOTSTRAP_TEMPORARY_PASSWORD:-false}"
+
+            : "${BOOTSTRAP_EMAIL:?BOOTSTRAP_EMAIL is required}"
+            : "${BOOTSTRAP_FACILITY_ID:?BOOTSTRAP_FACILITY_ID is required}"
+            : "${BOOTSTRAP_ROLES:?BOOTSTRAP_ROLES is required}"
+            : "${BOOTSTRAP_TEMPORARY_PASSWORD:?BOOTSTRAP_TEMPORARY_PASSWORD is required}"
+            : "${AIFYA_BOOTSTRAP_PASSWORD:?AIFYA_BOOTSTRAP_PASSWORD secret is required}"
+
+            cd /root/Aifya
+            COMPOSE="docker compose -f docker-compose.yml -f docker-compose.prod.yml"
+            realm="$(sed -n 's/^KEYCLOAK_REALM=//p' .env | tail -n 1)"
+            realm="${realm:-aifya}"
+            admin_user="$(sed -n 's/^KEYCLOAK_ADMIN=//p' .env | tail -n 1)"
+            admin_user="${admin_user:-admin}"
+            admin_password="$(sed -n 's/^KEYCLOAK_ADMIN_PASSWORD=//p' .env | tail -n 1)"
+            if [ -z "$admin_password" ]; then
+              echo "KEYCLOAK_ADMIN_PASSWORD is missing from /root/Aifya/.env" >&2
+              exit 1
+            fi
+
+            ensure_keycloak_oidc_configuration() {
+              $COMPOSE run --rm --no-deps -T \
+                -e KEYCLOAK_INTERNAL_URL="http://keycloak:8080" \
+                -e KEYCLOAK_ADMIN_USER="$admin_user" \
+                -e KEYCLOAK_ADMIN_PASSWORD="$admin_password" \
+                -e KEYCLOAK_REALM="$realm" \
+                -e BOOTSTRAP_FACILITY_ID="$BOOTSTRAP_FACILITY_ID" \
+                api-gateway python - <<'PY'
+            import json
+            import os
+            import urllib.error
+            import urllib.parse
+            import urllib.request
+
+
+            base_url = os.environ["KEYCLOAK_INTERNAL_URL"].rstrip("/")
+            realm = os.environ["KEYCLOAK_REALM"]
+            admin_user = os.environ["KEYCLOAK_ADMIN_USER"]
+            admin_password = os.environ["KEYCLOAK_ADMIN_PASSWORD"]
+            facility_id = os.environ["BOOTSTRAP_FACILITY_ID"]
+
+
+            def request(method, path, token=None, body=None, allowed=(200, 201, 204)):
+                data = None
+                headers = {"Accept": "application/json"}
+                if body is not None:
+                    data = json.dumps(body).encode()
+                    headers["Content-Type"] = "application/json"
+                if token:
+                    headers["Authorization"] = f"Bearer {token}"
+                req = urllib.request.Request(
+                    f"{base_url}{path}",
+                    data=data,
+                    headers=headers,
+                    method=method,
+                )
+                try:
+                    with urllib.request.urlopen(req, timeout=20) as response:
+                        payload = response.read()
+                        if response.status not in allowed:
+                            raise RuntimeError(f"{method} {path} returned {response.status}")
+                        if not payload:
+                            return None
+                        return json.loads(payload)
+                except urllib.error.HTTPError as exc:
+                    if exc.code in allowed:
+                        return None
+                    detail = exc.read().decode(errors="replace")
+                    raise RuntimeError(f"{method} {path} failed with {exc.code}: {detail}") from exc
+
+
+            def form_request(path, form):
+                data = urllib.parse.urlencode(form).encode()
+                req = urllib.request.Request(
+                    f"{base_url}{path}",
+                    data=data,
+                    headers={
+                        "Content-Type": "application/x-www-form-urlencoded",
+                        "Accept": "application/json",
+                    },
+                    method="POST",
+                )
+                with urllib.request.urlopen(req, timeout=20) as response:
+                    return json.loads(response.read())
+
+
+            token = form_request(
+                "/realms/master/protocol/openid-connect/token",
+                {
+                    "grant_type": "password",
+                    "client_id": "admin-cli",
+                    "username": admin_user,
+                    "password": admin_password,
+                },
+            )["access_token"]
+
+
+            def get_client(client_id):
+                query = urllib.parse.urlencode({"clientId": client_id})
+                clients = request("GET", f"/admin/realms/{realm}/clients?{query}", token)
+                for client in clients or []:
+                    if client.get("clientId") == client_id:
+                        return client
+                return None
+
+
+            def ensure_client(client_id, payload):
+                client = get_client(client_id)
+                if client:
+                    return client
+                request("POST", f"/admin/realms/{realm}/clients", token, payload)
+                client = get_client(client_id)
+                if not client:
+                    raise RuntimeError(f"Could not create Keycloak client {client_id}")
+                return client
+
+
+            def get_client_scope(name):
+                query = urllib.parse.urlencode({"search": name})
+                scopes = request("GET", f"/admin/realms/{realm}/client-scopes?{query}", token)
+                for scope in scopes or []:
+                    if scope.get("name") == name:
+                        return scope
+                return None
+
+
+            def ensure_client_scope(name, description=""):
+                scope = get_client_scope(name)
+                if scope:
+                    return scope
+                request(
+                    "POST",
+                    f"/admin/realms/{realm}/client-scopes",
+                    token,
+                    {
+                        "name": name,
+                        "description": description,
+                        "protocol": "openid-connect",
+                    },
+                )
+                scope = get_client_scope(name)
+                if not scope:
+                    raise RuntimeError(f"Could not create Keycloak client scope {name}")
+                return scope
+
+
+            def replace_mapper(scope_id, mapper):
+                existing = request(
+                    "GET",
+                    f"/admin/realms/{realm}/client-scopes/{scope_id}/protocol-mappers/models",
+                    token,
+                ) or []
+                for current in existing:
+                    if current.get("name") == mapper["name"]:
+                        request(
+                            "DELETE",
+                            f"/admin/realms/{realm}/client-scopes/{scope_id}/protocol-mappers/models/{current['id']}",
+                            token,
+                            allowed=(204,),
+                        )
+                request(
+                    "POST",
+                    f"/admin/realms/{realm}/client-scopes/{scope_id}/protocol-mappers/models",
+                    token,
+                    mapper,
+                )
+
+
+            def add_default_scope(client_uuid, scope_id):
+                request(
+                    "PUT",
+                    f"/admin/realms/{realm}/clients/{client_uuid}/default-client-scopes/{scope_id}",
+                    token,
+                    allowed=(204, 409),
+                )
+
+
+            def add_optional_scope(client_uuid, scope_id):
+                request(
+                    "PUT",
+                    f"/admin/realms/{realm}/clients/{client_uuid}/optional-client-scopes/{scope_id}",
+                    token,
+                    allowed=(204, 409),
+                )
+
+
+            def ensure_realm_role(role):
+                escaped = urllib.parse.quote(role, safe="")
+                try:
+                    request("GET", f"/admin/realms/{realm}/roles/{escaped}", token, allowed=(200,))
+                    return
+                except RuntimeError as exc:
+                    if "failed with 404" not in str(exc):
+                        raise
+                request("POST", f"/admin/realms/{realm}/roles", token, {"name": role}, allowed=(201, 409))
+
+
+            web_client = ensure_client(
+                "aifya-web",
+                {
+                    "clientId": "aifya-web",
+                    "name": "Aifya Web Application",
+                    "enabled": True,
+                    "protocol": "openid-connect",
+                    "publicClient": True,
+                    "standardFlowEnabled": True,
+                    "directAccessGrantsEnabled": False,
+                    "redirectUris": ["https://aifyamed.com/*", "http://localhost:3000/*"],
+                    "webOrigins": ["https://aifyamed.com", "http://localhost:3000"],
+                },
+            )
+            ensure_client(
+                "aifya-api",
+                {
+                    "clientId": "aifya-api",
+                    "name": "Aifya API Gateway",
+                    "enabled": True,
+                    "protocol": "openid-connect",
+                    "bearerOnly": True,
+                    "publicClient": False,
+                },
+            )
+
+            aifya_scope = ensure_client_scope("aifya-scope", "Aifya custom claims and API audience")
+            replace_mapper(
+                aifya_scope["id"],
+                {
+                    "name": "facility_id",
+                    "protocol": "openid-connect",
+                    "protocolMapper": "oidc-hardcoded-claim-mapper",
+                    "config": {
+                        "claim.name": "facility_id",
+                        "claim.value": facility_id,
+                        "jsonType.label": "String",
+                        "id.token.claim": "true",
+                        "access.token.claim": "true",
+                        "userinfo.token.claim": "true",
+                        "introspection.token.claim": "true",
+                    },
+                },
+            )
+            replace_mapper(
+                aifya_scope["id"],
+                {
+                    "name": "aifya-api-audience",
+                    "protocol": "openid-connect",
+                    "protocolMapper": "oidc-audience-mapper",
+                    "config": {
+                        "included.client.audience": "aifya-api",
+                        "id.token.claim": "false",
+                        "access.token.claim": "true",
+                        "introspection.token.claim": "true",
+                    },
+                },
+            )
+            replace_mapper(
+                aifya_scope["id"],
+                {
+                    "name": "aifya-user-id",
+                    "protocol": "openid-connect",
+                    "protocolMapper": "oidc-usermodel-property-mapper",
+                    "config": {
+                        "user.attribute": "id",
+                        "claim.name": "sub",
+                        "jsonType.label": "String",
+                        "id.token.claim": "false",
+                        "access.token.claim": "true",
+                        "userinfo.token.claim": "false",
+                        "introspection.token.claim": "true",
+                    },
+                },
+            )
+            replace_mapper(
+                aifya_scope["id"],
+                {
+                    "name": "aifya-email",
+                    "protocol": "openid-connect",
+                    "protocolMapper": "oidc-usermodel-property-mapper",
+                    "config": {
+                        "user.attribute": "email",
+                        "claim.name": "email",
+                        "jsonType.label": "String",
+                        "id.token.claim": "true",
+                        "access.token.claim": "true",
+                        "userinfo.token.claim": "true",
+                        "introspection.token.claim": "true",
+                    },
+                },
+            )
+            replace_mapper(
+                aifya_scope["id"],
+                {
+                    "name": "aifya-preferred-username",
+                    "protocol": "openid-connect",
+                    "protocolMapper": "oidc-usermodel-property-mapper",
+                    "config": {
+                        "user.attribute": "username",
+                        "claim.name": "preferred_username",
+                        "jsonType.label": "String",
+                        "id.token.claim": "true",
+                        "access.token.claim": "true",
+                        "userinfo.token.claim": "true",
+                        "introspection.token.claim": "true",
+                    },
+                },
+            )
+            replace_mapper(
+                aifya_scope["id"],
+                {
+                    "name": "aifya-realm-roles",
+                    "protocol": "openid-connect",
+                    "protocolMapper": "oidc-usermodel-realm-role-mapper",
+                    "config": {
+                        "claim.name": "realm_access.roles",
+                        "jsonType.label": "String",
+                        "multivalued": "true",
+                        "id.token.claim": "true",
+                        "access.token.claim": "true",
+                        "userinfo.token.claim": "true",
+                        "introspection.token.claim": "true",
+                    },
+                },
+            )
+
+            for scope_name in ("profile", "email", "roles", "aifya-scope"):
+                scope = get_client_scope(scope_name)
+                if scope:
+                    add_default_scope(web_client["id"], scope["id"])
+                    add_optional_scope(web_client["id"], scope["id"])
+
+            for role_name in ("super_admin", "admin", "facility_admin", "doctor"):
+                ensure_realm_role(role_name)
+
+            print("Keycloak OIDC scopes, mappers, audience, and roles are configured.")
+            PY
+            }
+
+            run_keycloak_bootstrap() {
+              ensure_keycloak_oidc_configuration
+
+              $COMPOSE exec -T \
+                -e admin_user="$admin_user" \
+                -e admin_password="$admin_password" \
+                -e realm="$realm" \
+                -e BOOTSTRAP_EMAIL="$BOOTSTRAP_EMAIL" \
+                -e BOOTSTRAP_FACILITY_ID="$BOOTSTRAP_FACILITY_ID" \
+                -e BOOTSTRAP_ROLES="$BOOTSTRAP_ROLES" \
+                -e BOOTSTRAP_TEMPORARY_PASSWORD="$BOOTSTRAP_TEMPORARY_PASSWORD" \
+                -e AIFYA_BOOTSTRAP_PASSWORD="$AIFYA_BOOTSTRAP_PASSWORD" \
+                keycloak sh -s <<'KEYCLOAK_SCRIPT'
+            set -eu
+            KC=/opt/keycloak/bin/kcadm.sh
+            "$KC" config credentials \
+              --server http://localhost:8080 \
+              --realm master \
+              --user "$admin_user" \
+              --password "$admin_password"
+
+            user_id="$("$KC" get users -r "$realm" -q username="$BOOTSTRAP_EMAIL" --fields id,username | sed -n 's/.*"id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1)"
+            if [ -z "$user_id" ]; then
+              cat > /tmp/aifya-user.json <<EOF
+            {
+              "username": "$BOOTSTRAP_EMAIL",
+              "email": "$BOOTSTRAP_EMAIL",
+              "enabled": true,
+              "emailVerified": true,
+              "firstName": "Jesse",
+              "lastName": "Gitaka",
+              "attributes": {
+                "facility_id": ["$BOOTSTRAP_FACILITY_ID"]
+              }
+            }
+            EOF
+              "$KC" create users -r "$realm" -f /tmp/aifya-user.json
+              rm -f /tmp/aifya-user.json
+            else
+              cat > /tmp/aifya-user-update.json <<EOF
+            {
+              "username": "$BOOTSTRAP_EMAIL",
+              "email": "$BOOTSTRAP_EMAIL",
+              "enabled": true,
+              "emailVerified": true,
+              "firstName": "Jesse",
+              "lastName": "Gitaka",
+              "attributes": {
+                "facility_id": ["$BOOTSTRAP_FACILITY_ID"]
+              }
+            }
+            EOF
+              "$KC" update "users/$user_id" -r "$realm" -f /tmp/aifya-user-update.json
+              rm -f /tmp/aifya-user-update.json
+            fi
+
+            if [ "$BOOTSTRAP_TEMPORARY_PASSWORD" = "true" ]; then
+              "$KC" set-password \
+                -r "$realm" \
+                --username "$BOOTSTRAP_EMAIL" \
+                --new-password "$AIFYA_BOOTSTRAP_PASSWORD" \
+                --temporary
+            else
+              "$KC" set-password \
+                -r "$realm" \
+                --username "$BOOTSTRAP_EMAIL" \
+                --new-password "$AIFYA_BOOTSTRAP_PASSWORD"
+            fi
+
+            for role in $BOOTSTRAP_ROLES; do
+              "$KC" add-roles -r "$realm" --uusername "$BOOTSTRAP_EMAIL" --rolename "$role" || true
+            done
+
+            "$KC" get users -r "$realm" -q username="$BOOTSTRAP_EMAIL" --fields username,email,enabled,emailVerified,attributes
+            KEYCLOAK_SCRIPT
+            }
+
+            reset_master_admin_password_from_env() {
+              postgres_user="$(sed -n 's/^POSTGRES_USER=//p' .env | tail -n 1)"
+              postgres_password="$(sed -n 's/^POSTGRES_PASSWORD=//p' .env | tail -n 1)"
+              postgres_db="$(sed -n 's/^POSTGRES_DB=//p' .env | tail -n 1)"
+              postgres_user="${postgres_user:-aifya_user}"
+              postgres_db="${postgres_db:-aifya}"
+              if [ -z "$postgres_password" ]; then
+                echo "POSTGRES_PASSWORD is missing from /root/Aifya/.env" >&2
+                exit 1
+              fi
+
+              credential_payload="$($COMPOSE exec -T \
+                -u postgres \
+                -e PGPASSWORD="$postgres_password" \
+                postgres psql \
+                  -v ON_ERROR_STOP=1 \
+                  -v admin_user="$admin_user" \
+                  -U "$postgres_user" \
+                  -d "$postgres_db" \
+                  -AtF '|' <<'SQL'
+            SELECT c.id, c.credential_data, c.secret_data
+            FROM credential c
+            JOIN user_entity u ON c.user_id = u.id
+            JOIN realm r ON u.realm_id = r.id
+            WHERE r.name = 'master'
+              AND lower(u.username) = lower(:'admin_user')
+              AND c.type = 'password'
+            ORDER BY c.created_date DESC NULLS LAST
+            LIMIT 1;
+            SQL
+              )"
+
+              credential_id="$(printf '%s' "$credential_payload" | awk -F'|' 'NR == 1 { print $1 }')"
+              credential_data="$(printf '%s' "$credential_payload" | awk -F'|' 'NR == 1 { print $2 }')"
+              secret_data="$(printf '%s' "$credential_payload" | awk -F'|' 'NR == 1 { print $3 }')"
+              if [ -z "$credential_id" ] || [ -z "$credential_data" ] || [ -z "$secret_data" ]; then
+                echo "Could not find a password credential for Keycloak master admin user '$admin_user'." >&2
+                exit 1
+              fi
+
+              generated_hash="$($COMPOSE run --rm --no-deps -T \
+                -e CREDENTIAL_DATA="$credential_data" \
+                -e SECRET_DATA="$secret_data" \
+                -e ADMIN_PASSWORD="$admin_password" \
+                api-gateway python - <<'PY'
+            import base64
+            import hashlib
+            import json
+            import os
+
+            credential_data = json.loads(os.environ["CREDENTIAL_DATA"])
+            old_secret_data = json.loads(os.environ["SECRET_DATA"])
+            password = os.environ["ADMIN_PASSWORD"].encode()
+
+            algorithm = credential_data.get("algorithm", "pbkdf2-sha256")
+            iterations = int(credential_data.get("hashIterations", 600000))
+            digest_by_algorithm = {
+                "pbkdf2": "sha1",
+                "pbkdf2-sha1": "sha1",
+                "pbkdf2-sha256": "sha256",
+                "pbkdf2-sha512": "sha512",
+            }
+            digest = digest_by_algorithm.get(algorithm)
+            if digest is None:
+                algorithm = "pbkdf2-sha256"
+                iterations = 600000
+                digest = "sha256"
+                credential_data = {
+                    "hashIterations": iterations,
+                    "algorithm": algorithm,
+                    "additionalParameters": {},
+                }
+                key_length = 32
+            else:
+                old_value = old_secret_data.get("value", "")
+                try:
+                    key_length = len(base64.b64decode(old_value))
+                except Exception:
+                    key_length = 32
+                if key_length <= 0:
+                    key_length = 32
+
+            salt = os.urandom(16)
+            value = hashlib.pbkdf2_hmac(digest, password, salt, iterations, dklen=key_length)
+            secret_data = dict(old_secret_data)
+            secret_data["salt"] = base64.b64encode(salt).decode()
+            secret_data["value"] = base64.b64encode(value).decode()
+            secret_data.setdefault("additionalParameters", {})
+
+            print(base64.b64encode(json.dumps(credential_data, separators=(",", ":")).encode()).decode())
+            print(base64.b64encode(json.dumps(secret_data, separators=(",", ":")).encode()).decode())
+            PY
+              )"
+              credential_data_b64="$(printf '%s' "$generated_hash" | sed -n '1p')"
+              secret_data_b64="$(printf '%s' "$generated_hash" | sed -n '2p')"
+              if [ -z "$credential_data_b64" ] || [ -z "$secret_data_b64" ]; then
+                echo "Failed to generate replacement Keycloak admin password hash." >&2
+                exit 1
+              fi
+
+              $COMPOSE exec -T \
+                -u postgres \
+                -e PGPASSWORD="$postgres_password" \
+                postgres psql \
+                  -v ON_ERROR_STOP=1 \
+                  -v credential_id="$credential_id" \
+                  -v credential_data_b64="$credential_data_b64" \
+                  -v secret_data_b64="$secret_data_b64" \
+                  -U "$postgres_user" \
+                  -d "$postgres_db" <<'SQL'
+            UPDATE credential
+            SET credential_data = convert_from(decode(:'credential_data_b64', 'base64'), 'UTF8'),
+                secret_data = convert_from(decode(:'secret_data_b64', 'base64'), 'UTF8')
+            WHERE id = :'credential_id';
+            SQL
+
+              $COMPOSE restart keycloak
+            }
+
+            if ! run_keycloak_bootstrap; then
+              echo "Keycloak admin login failed; syncing the master admin password to KEYCLOAK_ADMIN_PASSWORD from /root/Aifya/.env and retrying." >&2
+              reset_master_admin_password_from_env
+              keycloak_ready=false
+              for attempt in $(seq 1 30); do
+                if run_keycloak_bootstrap; then
+                  keycloak_ready=true
+                  break
+                fi
+                sleep 5
+              done
+              if [ "$keycloak_ready" != "true" ]; then
+                echo "Keycloak user bootstrap failed after admin password recovery." >&2
+                exit 1
+              fi
+            fi
+
+      - name: Summary
+        run: |
+          {
+            echo "### Keycloak user bootstrap complete"
+            echo ""
+            echo "- User: \`${BOOTSTRAP_EMAIL}\`"
+            echo "- Facility claim: \`${BOOTSTRAP_FACILITY_ID}\`"
+            echo "- Roles: \`${BOOTSTRAP_ROLES}\`"
+            echo "- Temporary password required: \`${BOOTSTRAP_TEMPORARY_PASSWORD}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
