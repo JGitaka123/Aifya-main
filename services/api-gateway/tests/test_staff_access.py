@@ -27,6 +27,11 @@ def _unique(prefix: str) -> str:
     return f"{prefix}-{uuid.uuid4().hex[:8].upper()}"
 
 
+#: The hospital named at sign-in. The API matches it against the employee's HR
+#: record, so a test that signs in has to name the facility it registered at.
+FACILITY_NAME = "Aifya Test Hospital"
+
+
 async def _create_employee(client: AsyncClient, **overrides: object):
     """
     Register an employee through the HR employee form.
@@ -117,7 +122,11 @@ async def test_login_is_created_with_the_employee(
     # The password the form carried is the one that signs in.
     login = await client.post(
         "/api/v1/auth/login",
-        json={"email": email, "password": "NursePass123"},
+        json={
+            "email": email,
+            "password": "NursePass123",
+            "facility": FACILITY_NAME,
+        },
     )
     assert login.status_code == 200
     user = login.json()["user"]
@@ -146,7 +155,11 @@ async def test_deactivating_staff_stops_the_login(client: AsyncClient) -> None:
 
     login = await client.post(
         "/api/v1/auth/login",
-        json={"email": email, "password": "LabPass1234"},
+        json={
+            "email": email,
+            "password": "LabPass1234",
+            "facility": FACILITY_NAME,
+        },
     )
     # Deactivation switches the auth account off. The correct password still
     # proves the caller owns the account, so the sign-in form is told the truth
@@ -183,7 +196,11 @@ async def test_role_change_moves_the_access(client: AsyncClient) -> None:
 
     login = await client.post(
         "/api/v1/auth/login",
-        json={"email": email, "password": "MaryPass123"},
+        json={
+            "email": email,
+            "password": "MaryPass123",
+            "facility": FACILITY_NAME,
+        },
     )
     permissions = login.json()["user"]["permissions"]
     # Registration, not the laboratory bench.

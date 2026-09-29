@@ -22,6 +22,7 @@ from app.routers import auth_session
 from app.routers.auth_session import (
     _BINDING_MESSAGES,
     _binding_detail,
+    _facility_matches,
     _resolve_tenant,
 )
 
@@ -82,9 +83,15 @@ def _staff(
 
 
 def _facility(
-    facility_id: uuid.UUID = FACILITY_ID, *, is_active: bool = True
+    facility_id: uuid.UUID = FACILITY_ID,
+    *,
+    is_active: bool = True,
+    name: str = "Nairobi General Hospital",
+    code: str = "NGH",
 ) -> object:
-    return SimpleNamespace(id=facility_id, is_active=is_active)
+    return SimpleNamespace(
+        id=facility_id, is_active=is_active, name=name, code=code
+    )
 
 
 def _rows(staff: object | None, facility: object | None):
@@ -174,3 +181,36 @@ def test_an_unrecognised_reason_still_refuses_safely() -> None:
 
     assert _binding_detail(None) == generic
     assert _binding_detail("invented_later") == generic
+
+
+def test_the_hospital_named_at_sign_in_must_be_the_one_on_the_record() -> None:
+    """A correct password at the wrong hospital must not start a session."""
+    assert _facility_matches("Nairobi General Hospital", _facility()) is True
+    assert _facility_matches("Kenyatta National Hospital", _facility()) is False
+
+
+def test_the_hospital_name_is_matched_leniently() -> None:
+    """Casing, padding and punctuation belong to the typist, not the hospital."""
+    for typed in (
+        "nairobi general hospital",
+        "  Nairobi   General   Hospital  ",
+        "Nairobi General Hospital.",
+        "NAIROBI-GENERAL-HOSPITAL",
+    ):
+        assert _facility_matches(typed, _facility()) is True
+
+
+def test_the_short_facility_code_is_accepted() -> None:
+    """Staff know their hospital by its code as often as by its full name."""
+    assert _facility_matches("ngh", _facility()) is True
+
+
+def test_a_blank_hospital_name_never_matches() -> None:
+    """A blank box must not fall through as a match."""
+    assert _facility_matches("", _facility()) is False
+    assert _facility_matches("   ", _facility()) is False
+
+
+def test_a_facility_without_a_code_still_matches_on_its_name() -> None:
+    """The code is a convenience, not a requirement."""
+    assert _facility_matches("Aifya Test Hospital", _facility(code="")) is True

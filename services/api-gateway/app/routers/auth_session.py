@@ -15,6 +15,8 @@ The flow, in the order it happens:
 2. Tenant binding. The account facility is written to the session as the
    bootstrap tenant, the staff record is read back under that policy, and
    staff.facility_id is the facility the token is issued for. See _resolve_tenant.
+   The caller must have named that same hospital on the sign-in form; a
+   mismatch is refused before any token is minted. See _facility_matches.
 3. Token. The signed token carries sub, facility_id, email, name and roles.
    Department is deliberately NOT a claim: it is resolved from the staff record
    on every request, so moving a clinician between units in HR takes effect at
@@ -25,6 +27,7 @@ The flow, in the order it happens:
 Clinical/tenant rows stay isolated by facility via row level security.
 """
 
+import re
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -59,6 +62,10 @@ router = APIRouter()
 class LoginRequest(BaseModel):
     email: str = Field(..., min_length=3, max_length=255)
     password: str = Field(..., min_length=1, max_length=128)
+    #: The hospital the employee was registered at. HR records the facility on
+    #: the staff row, so asking for it here means a correct email and password
+    #: pair still cannot open a session at the wrong hospital.
+    facility: str = Field(..., min_length=2, max_length=255)
 
 
 class RefreshRequest(BaseModel):
@@ -204,9 +211,11 @@ async def _resolve_tenant(
 
 
 #: How a refused sign-in is reported. Two of these are HR's to fix and say so;
-#: the third stays deliberately vague, because a wrong password is the one case
-#: the person can resolve themselves, and the one where naming the reason would
-#: confirm an address somebody was guessing at.
+#: `invalid_credentials` stays deliberately vague, because a wrong password is
+#: the one case the person can resolve themselves, and the one where naming the
+#: reason would confirm an address somebody was guessing at. Every other state
+#: is reported only after the password has proved the caller owns the account,
+#: so none of them can be used to enumerate staff.
 _LOGIN_REFUSALS: dict[str, tuple[int, str]] = {
     "not_registered": (
         status.HTTP_403_FORBIDDEN,
@@ -217,6 +226,11 @@ _LOGIN_REFUSALS: dict[str, tuple[int, str]] = {
         status.HTTP_403_FORBIDDEN,
         "Your Aifya access has been switched off. Please contact HR/Admin "
         "to have it restored.",
+    ),
+    "facility_mismatch": (
+        status.HTTP_403_FORBIDDEN,
+        "These details are not registered at that hospital. Check the "
+        "hospital name, or contact HR for assistance.",
     ),
     "invalid_credentials": (
         status.HTTP_401_UNAUTHORIZED,
@@ -246,6 +260,42 @@ def _login_refusal(account: AuthAccount | None, password: str) -> str | None:
     if not account.is_active:
         return "access_revoked"
     return None
+
+
+def _normalise_facility(value: str) -> str:
+    """
+    Fold a hospital name to the one form both sides are compared in.
+
+    HR types the facility once and the employee retypes it at every sign-in,
+    so the match has to survive casing, padding and the punctuation people
+    vary. ``Nairobi General Hospital`` and ``nairobi  general-hospital`` are
+    the same hospital, and the person should not be turned away over a space.
+
+    @param value: Raw facility name or code
+    @returns Lowercased, punctuation-free, whitespace-collapsed text
+    """
+    return re.sub(r"[^a-z0-9]+", " ", value.casefold()).strip()
+
+
+def _facility_matches(submitted: str, facility: Facility) -> bool:
+    """
+    Whether the hospital the caller named is the one on their staff record.
+
+    Facility is the row resolved from the account's staff record, so this is
+    the hospital the token would be issued for. Accepting the short code as
+    well as the full name is deliberate: staff know their hospital by either.
+
+    @param submitted: Hospital name or code the caller typed at sign-in
+    @param facility: Facility resolved from the signed-in staff record
+    @returns True when the two name the same hospital
+    """
+    typed = _normalise_facility(submitted)
+    if not typed:
+        return False
+    known = {_normalise_facility(facility.name or "")}
+    if facility.code:
+        known.add(_normalise_facility(facility.code))
+    return typed in known
 
 
 @router.post("/login")
@@ -281,6 +331,19 @@ async def login(data: LoginRequest, db: AsyncSession = Depends(get_db)):
             status_code=status.HTTP_403_FORBIDDEN,
             detail=_binding_detail(reason),
         )
+
+    # The hospital named at sign-in must be the one the staff record belongs
+    # to. The password has already proved the caller owns the account, so this
+    # can be said plainly rather than hidden behind the vague refusal reserved
+    # for a wrong password - and it is what keeps one hospital's valid
+    # credentials from opening another hospital's records.
+    if not _facility_matches(data.facility, facility):
+        refusal_status, detail = _LOGIN_REFUSALS["facility_mismatch"]
+        return JSONResponse(
+            status_code=refusal_status,
+            content={"code": "facility_mismatch", "detail": detail},
+        )
+
     name = (staff.first_name + " " + staff.last_name).strip()
     roles = [staff.role]
     return {

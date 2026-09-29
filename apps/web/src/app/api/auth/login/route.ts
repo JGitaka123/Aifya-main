@@ -48,7 +48,7 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
  * The tokens the API returns are stored in httpOnly cookies, so the browser
  * never sees them and JavaScript cannot exfiltrate them.
  *
- * @param request - Incoming request carrying { email, password }
+ * @param request - Incoming request carrying { email, password, facility }
  * @returns 200 with the session cookies, or an error status with a message
  */
 export async function POST(request: NextRequest): Promise<NextResponse> {
@@ -63,16 +63,20 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     );
   }
 
-  let body: { email?: string; password?: string };
+  let body: { email?: string; password?: string; facility?: string };
   try {
-    body = (await request.json()) as { email?: string; password?: string };
+    body = (await request.json()) as {
+      email?: string;
+      password?: string;
+      facility?: string;
+    };
   } catch {
     return NextResponse.json({ error: "Invalid request body." }, { status: 400 });
   }
 
-  if (!body.email || !body.password) {
+  if (!body.email || !body.password || !body.facility) {
     return NextResponse.json(
-      { error: "Email and password are required." },
+      { error: "Email, password and hospital name are required." },
       { status: 400 },
     );
   }
@@ -81,7 +85,11 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     const response = await fetch(`${getBackendApiBase()}/auth/login`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ email: body.email, password: body.password }),
+      body: JSON.stringify({
+        email: body.email,
+        password: body.password,
+        facility: body.facility,
+      }),
       cache: "no-store",
     });
 

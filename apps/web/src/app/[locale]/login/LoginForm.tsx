@@ -3,7 +3,7 @@
 import { type FormEvent, useEffect, useRef, useState } from "react";
 import { useTranslations } from "next-intl";
 import { Link } from "@/i18n/routing";
-import { Eye, EyeOff, Lock, Mail } from "lucide-react";
+import { Building2, Eye, EyeOff, Lock, Mail } from "lucide-react";
 import AuthShell, {
   AuthMiniBrand,
   AuthTabs,
@@ -111,6 +111,7 @@ export default function LoginForm({ keycloakEnabled }: LoginFormProps) {
   const [notice, setNotice] = useState<string | null>(null);
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+  const [facility, setFacility] = useState("");
   const [alert, setAlert] = useState<SignInAlert | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const emailRef = useRef<HTMLInputElement>(null);
@@ -153,7 +154,10 @@ export default function LoginForm({ keycloakEnabled }: LoginFormProps) {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         credentials: "include",
-        body: JSON.stringify({ email, password }),
+        // The hospital travels with the credentials so the API can match it
+        // against the employee's HR record: a valid password still must not
+        // open the wrong hospital's data.
+        body: JSON.stringify({ email, password, facility }),
       });
       const data = (await response.json().catch(() => ({}))) as {
         error?: string;
@@ -183,6 +187,15 @@ export default function LoginForm({ keycloakEnabled }: LoginFormProps) {
           setAlert({
             title: t("accessDeniedTitle"),
             body: t("accessRevokedBody"),
+          });
+          return;
+        }
+        if (data.code === "facility_mismatch") {
+          // The password was right but the hospital was not. The API explains
+          // which name to check, so the message travels through unchanged.
+          setAlert({
+            title: t("accessDeniedTitle"),
+            body: data.error ?? t("invalidCredentials"),
           });
           return;
         }
@@ -290,6 +303,22 @@ export default function LoginForm({ keycloakEnabled }: LoginFormProps) {
       ) : (
         <form onSubmit={handleSubmit} className={AUTH_PANEL_CLASS}>
           <div className="grid grid-cols-1 gap-3">
+            <div className="relative">
+              <Building2 className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-[#93A7B6]" />
+              <input
+                id="facility"
+                type="text"
+                name="facility"
+                value={facility}
+                onChange={(event) => setFacility(event.target.value)}
+                autoComplete="organization"
+                aria-label="Hospital name"
+                placeholder="Hospital name"
+                required
+                className={`${AUTH_INPUT_CLASS} pl-10 placeholder:font-medium placeholder:text-[#6E7E90]`}
+              />
+            </div>
+
             <div className="relative">
               <Mail className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-[#93A7B6]" />
               <input
