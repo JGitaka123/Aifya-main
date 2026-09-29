@@ -231,6 +231,11 @@ _PHARMACY = frozenset(
     }
 )
 
+# The money desk. Finance and inventory view are here because the sidebar
+# groups Billing, Finance, GL Transactions, Budgets and Inventory under one
+# "Accountant" destination set: a cashier who could see the Finance tab but
+# was refused by /api/v1/finance would read as a broken build rather than as
+# a deliberate boundary.
 _CASHIER = frozenset(
     {
         Permission.PATIENTS_VIEW,
@@ -239,6 +244,8 @@ _CASHIER = frozenset(
         Permission.BILLING_PAYMENT,
         Permission.INSURANCE_VIEW,
         Permission.INSURANCE_MANAGE,
+        Permission.FINANCE_VIEW,
+        Permission.INVENTORY_VIEW,
         Permission.REPORTS_VIEW,
         Permission.KNOWLEDGE_VIEW,
     }
@@ -261,12 +268,20 @@ _FINANCE = frozenset(
     }
 )
 
+# The HR desk owns the facility's day book as well as its staff file: the
+# appointment book, the referral queue, the analytics dashboards and the
+# communications centre are all HR destinations in the navigation, and a
+# destination is only useful if the API behind it answers.
 _HR = frozenset(
     {
         Permission.HR_VIEW,
         Permission.HR_MANAGE,
         Permission.REPORTS_VIEW,
         Permission.KNOWLEDGE_VIEW,
+        Permission.APPOINTMENTS_VIEW,
+        Permission.REFERRALS_VIEW,
+        Permission.ANALYTICS_VIEW,
+        Permission.COMMUNICATIONS_VIEW,
     }
 )
 
@@ -275,8 +290,8 @@ _HR = frozenset(
 # colleague's password is the same act as creating their account, so it sits
 # here rather than in an administrator-only set - and it also needs the facility
 # profile, because the hospital's own name and contacts are HR's to keep right.
-# An HR *officer* deliberately does not get this: they keep the records, but they
-# cannot change what anyone else can reach.
+# The Integrations and Setting destinations belong to the Human Resource role as
+# a whole, so ``hr`` and ``hr_officer`` carry it too.
 _HR_ADMIN = _HR | {Permission.SETTINGS_MANAGE}
 
 _STORES = frozenset(
@@ -336,12 +351,12 @@ ROLE_PERMISSIONS: dict[str, frozenset[str]] = {
     "receptionist": _as_strings(_FRONT_DESK),
     "records": _as_strings(_FRONT_DESK),
     "medical_records": _as_strings(_FRONT_DESK),
-    "nurse": _as_strings(_NURSING),
-    "triage_nurse": _as_strings(_NURSING),
-    "ward_nurse": _as_strings(_NURSING),
+    "nurse": _as_strings(_NURSING | {Permission.TRIALS_VIEW}),
+    "triage_nurse": _as_strings(_NURSING | {Permission.TRIALS_VIEW}),
+    "ward_nurse": _as_strings(_NURSING | {Permission.TRIALS_VIEW}),
     "midwife": _as_strings(_NURSING | {Permission.MCH_RECORD}),
-    "doctor": _as_strings(_CLINICIAN),
-    "clinician": _as_strings(_CLINICIAN),
+    "doctor": _as_strings(_CLINICIAN | {Permission.TRIALS_VIEW}),
+    "clinician": _as_strings(_CLINICIAN | {Permission.TRIALS_VIEW}),
     "specialist": _as_strings(_CLINICIAN | {Permission.THEATRE_VIEW}),
     "dentist": _as_strings(_CLINICIAN | {Permission.DENTAL_RECORD}),
     "lab_tech": _as_strings(_LABORATORY),
@@ -354,9 +369,9 @@ ROLE_PERMISSIONS: dict[str, frozenset[str]] = {
     "billing_clerk": _as_strings(_CASHIER),
     "billing_officer": _as_strings(_CASHIER | {Permission.REPORTS_VIEW}),
     "finance_admin": _as_strings(_FINANCE),
-    "hr": _as_strings(_HR),
+    "hr": _as_strings(_HR_ADMIN),
     "hr_admin": _as_strings(_HR_ADMIN),
-    "hr_officer": _as_strings(_HR),
+    "hr_officer": _as_strings(_HR_ADMIN),
     "store_keeper": _as_strings(_STORES),
     "research_coordinator": _as_strings(_RESEARCH),
     "principal_investigator": _as_strings(_RESEARCH),

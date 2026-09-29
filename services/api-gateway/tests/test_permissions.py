@@ -306,20 +306,42 @@ async def test_reception_can_still_read_the_consultation_fee(
 
 # ── The migration must not drift from the code ──────────────────────────────
 
-_MIGRATION = (
-    Path(__file__).resolve().parents[1]
-    / "alembic"
-    / "versions"
-    / "029_role_permissions.py"
-)
+_VERSIONS = Path(__file__).resolve().parents[1] / "alembic" / "versions"
+_MIGRATION = _VERSIONS / "029_role_permissions.py"
+_ALIGNMENT_MIGRATION = _VERSIONS / "039_role_tab_alignment.py"
+
+
+def _load_migration(name: str, path):
+    """Import a seed migration by path so its frozen matrix can be compared."""
+    spec = importlib.util.spec_from_file_location(name, path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 def _load_seed_migration():
     """Import migration 029 by path so its frozen matrix can be compared."""
-    spec = importlib.util.spec_from_file_location("migration_029", _MIGRATION)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
+    return _load_migration("migration_029", _MIGRATION)
+
+
+def _seeded_matrix() -> dict[str, set[str]]:
+    """
+    Rebuild the matrix the migrations leave behind in the database.
+
+    Migration 029 seeds the baseline and 039 adds the destinations that were
+    missing, so what a deployment actually holds is the union of the two.
+
+    @returns Role to the permission strings the migrations insert
+    """
+    baseline = _load_seed_migration()
+    alignment = _load_migration("migration_039", _ALIGNMENT_MIGRATION)
+
+    matrix = {
+        role: set(permissions) for role, permissions in baseline._ROLE_PERMISSIONS.items()
+    }
+    for role, permissions in alignment._ROLE_PERMISSIONS_ADDITIONS.items():
+        matrix.setdefault(role, set()).update(permissions)
+    return matrix
 
 
 def test_seed_migration_matches_the_shipped_matrix() -> None:
@@ -327,6 +349,7 @@ def test_seed_migration_matches_the_shipped_matrix() -> None:
     migration = _load_seed_migration()
 
     assert set(migration._ALL_PERMISSIONS) == set(ALL_PERMISSIONS)
-    assert set(migration._ROLE_PERMISSIONS) == set(ROLE_PERMISSIONS)
-    for role, permissions in migration._ROLE_PERMISSIONS.items():
-        assert set(permissions) == set(ROLE_PERMISSIONS[role]), role
+    seeded = _seeded_matrix()
+    assert set(seeded) == set(ROLE_PERMISSIONS)
+    for role, permissions in seeded.items():
+        assert permissions == set(ROLE_PERMISSIONS[role]), role

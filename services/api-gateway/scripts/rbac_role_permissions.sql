@@ -249,6 +249,59 @@ END
 $do$;
 
 -- ---------------------------------------------------------------------------
+-- 3b. Destination alignment (migration 039)
+-- ---------------------------------------------------------------------------
+-- The navigation gives Clinical Trials to the clinical team, Appointments,
+-- Referrals, Analytics, Communications, Integrations and Setting to HR, and the
+-- Finance destinations to the money desk. These rows add what those roles were
+-- missing so every destination the sidebar offers is one the API will answer.
+-- Additive and idempotent: re-running changes nothing.
+ALTER TABLE role_permissions DISABLE ROW LEVEL SECURITY;
+
+INSERT INTO role_permissions (facility_id, role, permission, is_allowed)
+SELECT NULL, seed.role, seed.permission, TRUE
+  FROM (VALUES
+        ('doctor',            'trials.view'),
+        ('clinician',         'trials.view'),
+        ('nurse',             'trials.view'),
+        ('triage_nurse',      'trials.view'),
+        ('ward_nurse',        'trials.view'),
+        ('hr',                'appointments.view'),
+        ('hr',                'referrals.view'),
+        ('hr',                'analytics.view'),
+        ('hr',                'communications.view'),
+        ('hr',                'settings.manage'),
+        ('hr_admin',          'appointments.view'),
+        ('hr_admin',          'referrals.view'),
+        ('hr_admin',          'analytics.view'),
+        ('hr_admin',          'communications.view'),
+        ('hr_admin',          'settings.manage'),
+        ('hr_officer',        'appointments.view'),
+        ('hr_officer',        'referrals.view'),
+        ('hr_officer',        'analytics.view'),
+        ('hr_officer',        'communications.view'),
+        ('hr_officer',        'settings.manage'),
+        ('cashier',           'finance.view'),
+        ('cashier',           'inventory.view'),
+        ('billing',           'finance.view'),
+        ('billing',           'inventory.view'),
+        ('billing_clerk',     'finance.view'),
+        ('billing_clerk',     'inventory.view'),
+        ('billing_officer',   'finance.view'),
+        ('billing_officer',   'inventory.view')
+       ) AS seed(role, permission)
+ WHERE NOT EXISTS (
+       SELECT 1 FROM role_permissions existing
+        WHERE existing.role = seed.role
+          AND existing.permission = seed.permission
+          AND existing.facility_id IS NULL
+          AND NOT existing.is_deleted
+ );
+
+ALTER TABLE role_permissions ENABLE ROW LEVEL SECURITY;
+ALTER TABLE role_permissions FORCE ROW LEVEL SECURITY;
+
+-- ---------------------------------------------------------------------------
 -- 4. See the matrix
 -- ---------------------------------------------------------------------------
 --  SELECT role, COUNT(*) AS permissions

@@ -20,7 +20,7 @@ import { useLicenseContext } from "@/components/licensing/LicenseProvider";
 import { usePermissions } from "@/hooks/usePermissions";
 import { recordModuleVisit } from "@/hooks/useTelemetry";
 import { BETA_PUBLIC_ACCESS_ENABLED } from "@/lib/auth/beta";
-import { getActiveNavigationHref, NAV_ITEMS } from "@/lib/navigation";
+import { getActiveNavigationHref, isNavigationVisible, NAV_ITEMS } from "@/lib/navigation";
 import { AifyaLogo } from "@/components/brand/AifyaLogo";
 
 interface SidebarProps {
@@ -59,7 +59,7 @@ export function Sidebar({ mobileOpen, onMobileClose }: SidebarProps) {
   const { hasModule, tier } = useLicenseContext();
   // Tier decides which modules the facility bought; permissions decide which
   // of those this person may open. Both must pass for a destination to show.
-  const { hasPermission } = usePermissions();
+  const { hasPermission, roles } = usePermissions();
   const [mounted, setMounted] = useState(false);
   const [isDesktop, setIsDesktop] = useState(false);
   useEffect(() => setMounted(true), []);
@@ -136,7 +136,7 @@ export function Sidebar({ mobileOpen, onMobileClose }: SidebarProps) {
       {/* Navigation */}
       <nav className="flex-1 overflow-y-auto px-3 pb-3">
         <ul className="space-y-0.5">
-          {NAV_ITEMS.filter((item) => hasPermission(item.permission)).map((item) => {
+          {NAV_ITEMS.filter((item) => isNavigationVisible(item, { roles, hasPermission })).map((item) => {
             const locked = item.module ? !hasModule(item.module) : false;
             const active = item.href === activeHref;
             const Icon = item.icon;

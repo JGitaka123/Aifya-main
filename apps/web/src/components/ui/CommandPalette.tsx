@@ -10,7 +10,7 @@ import {
 } from "lucide-react";
 import { apiClient } from "@/lib/api-client";
 import { cn } from "@/lib/utils";
-import { NAV_ITEMS, PRIMARY_COMMAND_HREFS } from "@/lib/navigation";
+import { isNavigationVisible, NAV_ITEMS, PRIMARY_COMMAND_HREFS } from "@/lib/navigation";
 import { useLicenseContext } from "@/components/licensing/LicenseProvider";
 import { usePermissions } from "@/hooks/usePermissions";
 import type { PatientListResponse } from "@aifya/shared";
@@ -35,7 +35,7 @@ export function CommandPalette() {
   const tc = useTranslations("common");
   const router = useRouter();
   const { hasModule } = useLicenseContext();
-  const { hasPermission } = usePermissions();
+  const { hasPermission, roles } = usePermissions();
 
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
@@ -131,7 +131,7 @@ export function CommandPalette() {
   const navigationItems: CommandItem[] = NAV_ITEMS.filter(
     (item) =>
       (!item.module || hasModule(item.module)) &&
-      hasPermission(item.permission),
+      isNavigationVisible(item, { roles, hasPermission }),
   ).map((item) => {
     const Icon = item.icon;
     return {

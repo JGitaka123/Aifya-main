@@ -8,6 +8,8 @@ import { PERMISSIONS, type PermissionString } from "@/lib/auth/permissions";
 export interface PermissionsApi {
   /** Effective permissions from the API, or undefined when not reported. */
   permissions: readonly string[] | undefined;
+  /** Roles carried by the access token, or undefined when not reported. */
+  roles: readonly string[] | undefined;
   /**
    * Whether the user holds a permission.
    *
@@ -45,6 +47,7 @@ export interface PermissionsApi {
 export function usePermissions(): PermissionsApi {
   const { user } = useAuth();
   const permissions = user?.permissions;
+  const roles = user?.roles;
 
   const granted = useMemo(
     () => (permissions ? new Set(permissions) : null),
@@ -72,6 +75,7 @@ export function usePermissions(): PermissionsApi {
 
   return {
     permissions,
+    roles,
     hasPermission,
     hasAnyPermission,
     canSeeClinical: hasPermission(PERMISSIONS.CLINICAL_VIEW),
