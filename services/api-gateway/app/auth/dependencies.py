@@ -214,6 +214,46 @@ async def _bind_keycloak_identity(current_user: CurrentUser) -> CurrentUser:
     return replace(current_user, user_id=staff_id)
 
 
+#: Why an internal sign-in that was valid when it was issued is refused now.
+#: HR owns the employee record, so switching that record off has to stop the
+#: session in flight, not only the next sign-in.
+_INTERNAL_REVOKED_MESSAGE = (
+    "Your Aifya access has been switched off. Please contact HR/Admin "
+    "to have it restored."
+)
+
+
+async def _assert_internal_account_active(current_user: CurrentUser) -> None:
+    """
+    Re-check the employee record behind an internal sign-in.
+
+    A signed, unexpired token says who signed in - it does not say whether HR
+    still wants them in. Deactivating an employee flips ``staff.is_active``, so
+    this reads that row on every request and refuses the moment it is switched
+    off. Without it a deactivated employee keeps working until their 12-hour
+    token expires.
+
+    The session is opened here rather than shared with the request so the
+    security decision never depends on FastAPI dependency ordering, matching
+    how _linked_staff handles the Keycloak path.
+
+    @param current_user: User built from the internal token
+    @raises HTTPException 403: When the staff record is gone or switched off
+    """
+    from app.database import async_session
+    from app.models.staff import Staff
+
+    async with async_session() as db:
+        await set_facility_context(db, str(current_user.facility_id))
+        staff = await db.get(Staff, current_user.user_id)
+
+    if staff is None or staff.is_deleted or not staff.is_active:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=_INTERNAL_REVOKED_MESSAGE,
+        )
+
+
 async def get_current_user(
     request: Request,
     credentials: HTTPAuthorizationCredentials | None = security_dependency,
@@ -239,6 +279,10 @@ async def get_current_user(
 
             payload = decode_internal_token(token)
             current_user = _current_user_from_payload(payload)
+            # The token proves who signed in, not that HR still wants them in.
+            # Re-read the employee record so deactivation stops an in-flight
+            # session at once rather than when the token expires.
+            await _assert_internal_account_active(current_user)
         else:
             from app.auth.keycloak import decode_token as decode_keycloak_token
 
