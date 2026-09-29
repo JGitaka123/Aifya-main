@@ -8,7 +8,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth import CurrentUser
-from app.auth.dependencies import require_roles
+from app.auth.dependencies import require_platform_roles, require_roles
 from app.config import settings
 from app.database import get_db
 from app.schemas.onboarding import (
@@ -119,7 +119,7 @@ async def facility_signup(
 async def list_pending_facilities(
     db: AsyncSession = Depends(get_db),
     current_user: CurrentUser = Depends(
-        require_roles(*settings.super_admin_role_list)
+        require_platform_roles(*settings.super_admin_role_list, "super_admin")
     ),
 ) -> list[PendingFacility]:
     """List facilities awaiting approval (super-admin only)."""
@@ -137,7 +137,7 @@ async def approve_facility(
     db: AsyncSession = Depends(get_db),
     admin_client: KeycloakAdminClient = Depends(get_keycloak_admin_client),
     current_user: CurrentUser = Depends(
-        require_roles(*settings.super_admin_role_list)
+        require_platform_roles(*settings.super_admin_role_list, "super_admin")
     ),
 ) -> ApproveFacilityResponse:
     """

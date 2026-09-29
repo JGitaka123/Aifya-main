@@ -2,7 +2,7 @@
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager, suppress
 
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
 from starlette.requests import Request
@@ -23,6 +23,7 @@ if settings.sentry_dsn:
         max_request_body_size="never",
     )
 from app.middleware.license_guard import LicenseGuardMiddleware
+from app.auth.dependencies import require_roles
 from app.bootstrap_internal import (
     ensure_all_facility_licenses,
     ensure_internal_super_admin,
@@ -76,6 +77,45 @@ _is_dev: bool = settings.debug
 _docs_url: str | None = "/api/docs" if _is_dev else None
 _redoc_url: str | None = "/api/redoc" if _is_dev else None
 _openapi_url: str | None = "/api/openapi.json" if _is_dev else None
+
+
+# --- Who may open each module --------------------------------------------
+#
+# These role lists mirror the ``roles`` on apps/web/src/lib/navigation.ts, one
+# for one, and they are enforced here rather than only drawn in the sidebar.
+# Hiding a tab was never a control: the pharmacy router answered a doctor who
+# typed the URL, the payroll router answered the ward clerk who called it from a
+# script, and the finance ledger answered anyone with a session at all. The
+# ``dependencies=[Depends(require_roles(...))]`` on each ``include_router``
+# below is the same decision the sidebar makes, taken where a hand-typed URL
+# cannot avoid it.
+#
+# Administrator roles pass every gate (see ``require_roles``), so a facility can
+# narrow a role with a ``role_permissions`` row without locking itself out of
+# the screens it administers.
+_CLINICAL = ("doctor", "clinician")
+_NURSING = ("nurse", "triage_nurse", "ward_nurse")
+_MIDWIFE = ("midwife",)
+_DENTISTS = ("dentist",)
+_SPECIALISTS = ("specialist",)
+_PHARMACY = ("pharmacist",)
+_LABORATORY = ("lab_tech", "pathologist")
+_RADIOLOGY = ("radiologist", "rad_tech")
+_FRONT_DESK = ("receptionist", "records", "medical_records")
+_HR = ("hr", "hr_admin", "hr_officer")
+_MONEY = ("finance_admin", "cashier", "billing", "billing_clerk", "billing_officer")
+_STORES = ("store_keeper",)
+_RESEARCH = ("research_coordinator", "principal_investigator")
+
+
+def _guarded(*roles: str) -> list:
+    """
+    Wrap a module's role list as a FastAPI dependency for ``include_router``.
+
+    @param roles: Roles the module belongs to
+    @returns A one-element dependency list
+    """
+    return [Depends(require_roles(*roles))]
 
 
 @asynccontextmanager
@@ -185,52 +225,200 @@ app.include_router(auth_session.router, prefix="/api/v1/auth", tags=["auth"])
 app.include_router(
     onboarding.router, prefix="/api/v1/onboarding", tags=["onboarding"]
 )
-app.include_router(cds.router, prefix="/api/v1/cds", tags=["cds"])
-app.include_router(encounters.router, prefix="/api/v1/encounters", tags=["encounters"])
+app.include_router(
+    cds.router,
+    prefix="/api/v1/cds",
+    tags=["cds"],
+    dependencies=_guarded(*_CLINICAL, *_NURSING, *_MIDWIFE, *_PHARMACY),
+)
+app.include_router(
+    encounters.router,
+    prefix="/api/v1/encounters",
+    tags=["encounters"],
+    dependencies=_guarded(
+        *_FRONT_DESK,
+        *_CLINICAL,
+        *_NURSING,
+        *_MIDWIFE,
+        *_MONEY,
+        *_PHARMACY,
+        *_SPECIALISTS,
+        *_DENTISTS,
+        *_RESEARCH,
+    ),
+)
 app.include_router(facility.router, prefix="/api/v1/facility", tags=["facility"])
 app.include_router(icd10.router, prefix="/api/v1/icd10", tags=["icd10"])
-app.include_router(pharmacy.router, prefix="/api/v1/pharmacy", tags=["pharmacy"])
-app.include_router(laboratory.router, prefix="/api/v1/laboratory", tags=["laboratory"])
-app.include_router(billing.router, prefix="/api/v1/billing", tags=["billing"])
-app.include_router(finance.router, prefix="/api/v1/finance", tags=["finance"])
-app.include_router(ipd.router, prefix="/api/v1/ipd", tags=["ipd"])
-app.include_router(radiology.router, prefix="/api/v1/radiology", tags=["radiology"])
-app.include_router(mch.router, prefix="/api/v1/mch", tags=["mch"])
-app.include_router(appointments.router, tags=["appointments"])
-app.include_router(reports.router, prefix="/api/v1/reports", tags=["reports"])
+app.include_router(
+    pharmacy.router,
+    prefix="/api/v1/pharmacy",
+    tags=["pharmacy"],
+    # The clinical roles hold ``pharmacy.view`` so a prescription screen can read
+    # the drug list from inside its own room, so they may open the module. The
+    # dispensing queue and the stock writes keep their own pharmacist and store
+    # guards behind this door.
+    dependencies=_guarded(*_PHARMACY, *_STORES, *_CLINICAL, *_NURSING, *_MIDWIFE),
+)
+app.include_router(
+    laboratory.router,
+    prefix="/api/v1/laboratory",
+    tags=["laboratory"],
+    dependencies=_guarded(*_LABORATORY, *_NURSING, *_CLINICAL, *_MIDWIFE),
+)
+app.include_router(
+    billing.router,
+    prefix="/api/v1/billing",
+    tags=["billing"],
+    dependencies=_guarded(*_MONEY, *_FRONT_DESK),
+)
+app.include_router(
+    finance.router,
+    prefix="/api/v1/finance",
+    tags=["finance"],
+    dependencies=_guarded(*_MONEY),
+)
+app.include_router(
+    ipd.router,
+    prefix="/api/v1/ipd",
+    tags=["ipd"],
+    dependencies=_guarded(*_CLINICAL, *_NURSING),
+)
+app.include_router(
+    radiology.router,
+    prefix="/api/v1/radiology",
+    tags=["radiology"],
+    dependencies=_guarded(*_RADIOLOGY, *_CLINICAL, *_NURSING),
+)
+app.include_router(
+    mch.router,
+    prefix="/api/v1/mch",
+    tags=["mch"],
+    dependencies=_guarded(*_MIDWIFE, *_CLINICAL, *_NURSING),
+)
+app.include_router(
+    appointments.router,
+    tags=["appointments"],
+    dependencies=_guarded(
+        *_HR, *_FRONT_DESK, *_CLINICAL, *_NURSING, *_MIDWIFE, *_MONEY
+    ),
+)
+app.include_router(
+    reports.router,
+    prefix="/api/v1/reports",
+    tags=["reports"],
+    dependencies=_guarded(*_HR, *_MONEY, *_CLINICAL, *_RESEARCH),
+)
 app.include_router(hr.router, prefix="/api/v1/hr", tags=["hr"])
 app.include_router(payroll.router, prefix="/api/v1/payroll", tags=["payroll"])
 app.include_router(
+    payroll.self_service_router, prefix="/api/v1/payroll", tags=["payroll"]
+)
+app.include_router(
     aifya_usage.router, prefix="/api/v1/aifya-usage", tags=["aifya-usage"]
 )
-app.include_router(emergency.router, prefix="/api/v1/emergency", tags=["emergency"])
-app.include_router(inventory.router, prefix="/api/v1/inventory", tags=["inventory"])
-app.include_router(theatre.router, prefix="/api/v1/theatre", tags=["theatre"])
-app.include_router(referral.router, prefix="/api/v1/referrals", tags=["referrals"])
-app.include_router(insurance.router, prefix="/api/v1/insurance", tags=["insurance"])
-app.include_router(dental.router, prefix="/api/v1/dental", tags=["dental"])
+app.include_router(
+    emergency.router,
+    prefix="/api/v1/emergency",
+    tags=["emergency"],
+    dependencies=_guarded(*_CLINICAL, *_NURSING, *_FRONT_DESK),
+)
+app.include_router(
+    inventory.router,
+    prefix="/api/v1/inventory",
+    tags=["inventory"],
+    dependencies=_guarded(*_STORES, *_PHARMACY, *_MONEY),
+)
+app.include_router(
+    theatre.router,
+    prefix="/api/v1/theatre",
+    tags=["theatre"],
+    dependencies=_guarded(*_SPECIALISTS, *_CLINICAL),
+)
+app.include_router(
+    referral.router,
+    prefix="/api/v1/referrals",
+    tags=["referrals"],
+    dependencies=_guarded(*_HR, *_CLINICAL, *_NURSING, *_MIDWIFE, *_FRONT_DESK),
+)
+app.include_router(
+    insurance.router,
+    prefix="/api/v1/insurance",
+    tags=["insurance"],
+    dependencies=_guarded(*_MONEY, *_FRONT_DESK),
+)
+app.include_router(
+    dental.router,
+    prefix="/api/v1/dental",
+    tags=["dental"],
+    dependencies=_guarded(*_DENTISTS, *_CLINICAL),
+)
 app.include_router(licensing.router, prefix="/api/v1/licensing", tags=["licensing"])
-app.include_router(analytics.router, prefix="/api/v1/analytics", tags=["analytics"])
+app.include_router(
+    analytics.router,
+    prefix="/api/v1/analytics",
+    tags=["analytics"],
+    dependencies=_guarded(*_HR, *_MONEY, *_RESEARCH),
+)
 app.include_router(
     communications.router,
     prefix="/api/v1/communications",
     tags=["communications"],
+    dependencies=_guarded(*_HR),
 )
-app.include_router(fhir.router, prefix="/api/v1/fhir", tags=["fhir"])
-app.include_router(dhis2.router, prefix="/api/v1/dhis2", tags=["dhis2"])
+app.include_router(
+    fhir.router,
+    prefix="/api/v1/fhir",
+    tags=["fhir"],
+    dependencies=_guarded(
+        *_CLINICAL,
+        *_NURSING,
+        *_MIDWIFE,
+        *_DENTISTS,
+        *_SPECIALISTS,
+        *_FRONT_DESK,
+        *_LABORATORY,
+        *_RADIOLOGY,
+        *_PHARMACY,
+        *_MONEY,
+        *_RESEARCH,
+    ),
+)
+app.include_router(
+    dhis2.router,
+    prefix="/api/v1/dhis2",
+    tags=["dhis2"],
+    dependencies=_guarded(*_HR, *_MONEY),
+)
 app.include_router(mpesa.router, prefix="/api/v1/mpesa", tags=["mpesa"])
-app.include_router(imaging.router, prefix="/api/v1/imaging", tags=["imaging"])
-app.include_router(agents.router, prefix="/api/v1/agents", tags=["agents"])
+app.include_router(
+    imaging.router,
+    prefix="/api/v1/imaging",
+    tags=["imaging"],
+    dependencies=_guarded(*_RADIOLOGY, *_CLINICAL),
+)
+app.include_router(
+    agents.router,
+    prefix="/api/v1/agents",
+    tags=["agents"],
+    dependencies=_guarded(*_CLINICAL, *_NURSING, *_MONEY),
+)
 app.include_router(
     clinical_trials.router,
     prefix="/api/v1/trials",
     tags=["clinical-trials"],
+    dependencies=_guarded(*_CLINICAL, *_NURSING, *_RESEARCH),
 )
-app.include_router(federated.router, prefix="/api/v1/federated", tags=["federated"])
+app.include_router(
+    federated.router,
+    prefix="/api/v1/federated",
+    tags=["federated"],
+    dependencies=_guarded(*_HR),
+)
 app.include_router(
     performance.router,
     prefix="/api/v1/performance",
     tags=["performance"],
+    dependencies=_guarded(*_HR),
 )
 app.include_router(help_bot.router, prefix="/api/v1/help", tags=["help-bot"])
 

@@ -69,6 +69,8 @@ async def update_facility(
             "facility_admin",
             "hospital_administrator",
             "hr_admin",
+            "hr",
+            "hr_officer",
         )
     ),
 ) -> FacilityResponse:

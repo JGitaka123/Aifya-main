@@ -45,7 +45,14 @@ from app.services.aifya_usage_service import (
 router = APIRouter(dependencies=[Depends(require_module("hr"))])
 
 #: Closing a month and voiding an invoice are commercial acts, not clerical.
-ADMIN_ROLES = ("admin", "facility_admin", "hospital_administrator", "hr_admin")
+ADMIN_ROLES = (
+    "admin",
+    "facility_admin",
+    "hospital_administrator",
+    "hr",
+    "hr_admin",
+    "hr_officer",
+)
 
 
 def _to_day(row: AifyaUsageDaily) -> UsageDayResponse:

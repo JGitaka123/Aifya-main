@@ -39,6 +39,9 @@ from app.services.staff_access import StaffAccessError
 
 router = APIRouter(dependencies=[Depends(require_module("hr"))])
 
+#: The HR desk, as one authority. ``hr``, ``hr_admin`` and ``hr_officer`` are
+#: the same rank wearing different job titles, so every gate names all three.
+_HR_ROLES = ("hr", "hr_admin", "hr_officer")
 
 async def _profile_with_live_balances(
     service: HRService,
@@ -77,7 +80,7 @@ async def _profile_with_live_balances(
 @router.get("/summary", response_model=HRSummary)
 async def get_summary(
     db: AsyncSession = Depends(get_db),
-    current_user: CurrentUser = Depends(get_current_user),
+    current_user: CurrentUser = Depends(require_roles(*_HR_ROLES)),
 ) -> HRSummary:
     """
     Get HR dashboard summary stats.
@@ -102,7 +105,7 @@ async def get_staff_directory(
         False, description="Include deactivated staff (admin screens)"
     ),
     db: AsyncSession = Depends(get_db),
-    current_user: CurrentUser = Depends(get_current_user),
+    current_user: CurrentUser = Depends(require_roles(*_HR_ROLES)),
 ) -> StaffDirectoryResponse:
     """
     Get staff directory with department names.
@@ -131,7 +134,7 @@ async def set_staff_active(
     data: StaffActiveUpdate,
     db: AsyncSession = Depends(get_db),
     current_user: CurrentUser = Depends(
-        require_roles("admin", "facility_admin", "hr_admin")
+        require_roles(*_HR_ROLES)
     ),
 ) -> StaffDirectoryItem:
     """
@@ -163,7 +166,7 @@ async def set_staff_active(
 @router.get("/roles", response_model=AssignableRoleListResponse)
 async def list_assignable_roles(
     current_user: CurrentUser = Depends(
-        require_roles("admin", "facility_admin", "hr_admin")
+        require_roles(*_HR_ROLES)
     ),
 ) -> AssignableRoleListResponse:
     """
@@ -186,7 +189,7 @@ async def set_staff_role(
     data: StaffRoleUpdate,
     db: AsyncSession = Depends(get_db),
     current_user: CurrentUser = Depends(
-        require_roles("admin", "facility_admin", "hr_admin")
+        require_roles(*_HR_ROLES)
     ),
 ) -> StaffDirectoryItem:
     """
@@ -230,7 +233,7 @@ async def set_staff_password(
     data: StaffPasswordUpdate,
     db: AsyncSession = Depends(get_db),
     current_user: CurrentUser = Depends(
-        require_roles("admin", "facility_admin", "hr_admin")
+        require_roles(*_HR_ROLES)
     ),
 ) -> StaffAccessResponse:
     """
@@ -281,7 +284,7 @@ async def get_staff_profile(
     staff_id: uuid.UUID,
     db: AsyncSession = Depends(get_db),
     current_user: CurrentUser = Depends(
-        require_roles("admin", "facility_admin")
+        require_roles(*_HR_ROLES)
     ),
 ) -> StaffProfileResponse:
     """
@@ -313,7 +316,7 @@ async def upsert_staff_profile(
     data: StaffProfileCreate,
     db: AsyncSession = Depends(get_db),
     current_user: CurrentUser = Depends(
-        require_roles("admin", "facility_admin")
+        require_roles(*_HR_ROLES)
     ),
 ) -> StaffProfileResponse:
     """
@@ -343,7 +346,7 @@ async def upsert_staff_profile(
 @router.get("/shifts", response_model=list[ShiftResponse])
 async def list_shifts(
     db: AsyncSession = Depends(get_db),
-    current_user: CurrentUser = Depends(get_current_user),
+    current_user: CurrentUser = Depends(require_roles(*_HR_ROLES)),
 ) -> list[ShiftResponse]:
     """
     Get all active shift definitions.
@@ -362,7 +365,7 @@ async def create_shift(
     data: ShiftCreate,
     db: AsyncSession = Depends(get_db),
     current_user: CurrentUser = Depends(
-        require_roles("admin", "facility_admin")
+        require_roles(*_HR_ROLES)
     ),
 ) -> ShiftResponse:
     """
@@ -391,7 +394,7 @@ async def list_shift_assignments(
     staff_id: uuid.UUID | None = Query(None, description="Filter by staff"),
     department_id: uuid.UUID | None = Query(None, description="Filter by department"),
     db: AsyncSession = Depends(get_db),
-    current_user: CurrentUser = Depends(get_current_user),
+    current_user: CurrentUser = Depends(require_roles(*_HR_ROLES)),
 ) -> ShiftAssignmentListResponse:
     """
     Get shift assignments with staff and shift names.
@@ -455,7 +458,7 @@ async def list_leave_requests(
     staff_id: uuid.UUID | None = Query(None, description="Filter by staff"),
     leave_status: str | None = Query(None, alias="status", description="Filter by status"),
     db: AsyncSession = Depends(get_db),
-    current_user: CurrentUser = Depends(get_current_user),
+    current_user: CurrentUser = Depends(require_roles(*_HR_ROLES)),
 ) -> LeaveRequestListResponse:
     """
     Get leave requests with staff names.
@@ -516,7 +519,7 @@ async def process_leave_request(
     data: LeaveApprovalRequest,
     db: AsyncSession = Depends(get_db),
     current_user: CurrentUser = Depends(
-        require_roles("admin", "facility_admin")
+        require_roles(*_HR_ROLES)
     ),
 ) -> LeaveRequestResponse:
     """
@@ -551,7 +554,7 @@ async def list_attendance(
     target_date: date | None = Query(None, alias="date", description="Filter by date"),
     staff_id: uuid.UUID | None = Query(None, description="Filter by staff"),
     db: AsyncSession = Depends(get_db),
-    current_user: CurrentUser = Depends(get_current_user),
+    current_user: CurrentUser = Depends(require_roles(*_HR_ROLES)),
 ) -> AttendanceListResponse:
     """
     Get attendance records.

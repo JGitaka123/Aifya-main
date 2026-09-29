@@ -25,7 +25,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from structlog import get_logger
 
-from app.auth import CurrentUser, get_current_user
+from app.auth import CurrentUser, get_current_user, require_roles
 from app.models.billing import Invoice
 from app.config import settings
 from app.database import get_db
@@ -43,6 +43,21 @@ from app.services.service_billing import build_service_reference
 logger = get_logger(__name__)
 
 router = APIRouter()
+
+#: The till. Collecting money over M-Pesa is the front desk's work and the
+#: money desk's, so those two ranks may reach the payment endpoints. The Daraja
+#: callbacks further down stay open, because Safaricom calls them with no
+#: session at all - their authenticity is the shared secret, not a role.
+_PAYMENT_ROLES = (
+    "finance_admin",
+    "cashier",
+    "billing",
+    "billing_clerk",
+    "billing_officer",
+    "receptionist",
+    "records",
+    "medical_records",
+)
 
 
 # Safaricom Daraja documented production callback source ranges (CIDR).
@@ -192,7 +207,7 @@ class MPesaStatusResponse(BaseModel):
 async def initiate_stk_push(
     request: STKPushApiRequest,
     db: AsyncSession = Depends(get_db),
-    current_user: CurrentUser = Depends(get_current_user),
+    current_user: CurrentUser = Depends(require_roles(*_PAYMENT_ROLES)),
 ) -> STKPushResponse:
     """
     Initiate M-Pesa STK Push (Lipa Na M-Pesa Online) to collect payment.
@@ -279,7 +294,7 @@ async def initiate_stk_push(
 @router.get("/stk-status/{checkout_request_id}")
 async def query_stk_status(
     checkout_request_id: str,
-    current_user: CurrentUser = Depends(get_current_user),
+    current_user: CurrentUser = Depends(require_roles(*_PAYMENT_ROLES)),
 ) -> TransactionStatus:
     """
     Query the status of an STK Push transaction.
@@ -306,7 +321,7 @@ async def query_stk_status(
 async def get_stk_request(
     checkout_request_id: str,
     db: AsyncSession = Depends(get_db),
-    current_user: CurrentUser = Depends(get_current_user),
+    current_user: CurrentUser = Depends(require_roles(*_PAYMENT_ROLES)),
 ) -> STKRequestStatusResponse:
     """
     Read the local state of an STK Push the till started.
@@ -339,7 +354,7 @@ async def get_stk_request(
 async def reconcile_stk_request(
     checkout_request_id: str,
     db: AsyncSession = Depends(get_db),
-    current_user: CurrentUser = Depends(get_current_user),
+    current_user: CurrentUser = Depends(require_roles(*_PAYMENT_ROLES)),
 ) -> STKRequestStatusResponse:
     """
     Ask Safaricom what happened and post the money if it was received.
@@ -581,7 +596,7 @@ async def c2b_confirmation(
 
 @router.get("/status")
 async def mpesa_status(
-    current_user: CurrentUser = Depends(get_current_user),
+    current_user: CurrentUser = Depends(require_roles(*_PAYMENT_ROLES)),
 ) -> MPesaStatusResponse:
     """
     Check M-Pesa Daraja configuration status.

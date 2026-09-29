@@ -31,6 +31,26 @@ router = APIRouter(
     dependencies=[Depends(require_module("appointments"))],
 )
 
+#: Who may book, move or check in an appointment. The desk that owns the
+#: appointment book (HR and the front desk) and the clinical team the patient is
+#: being booked to see. Appointments is an HR destination in the navigation, so
+#: without HR here the tab would open onto a 403.
+_APPOINTMENT_WRITERS = (
+    "hr",
+    "hr_admin",
+    "hr_officer",
+    "receptionist",
+    "records",
+    "medical_records",
+    "doctor",
+    "clinician",
+    "specialist",
+    "nurse",
+    "triage_nurse",
+    "ward_nurse",
+    "midwife",
+)
+
 
 # ── Summary ──────────────────────────────────────────────────────────────────
 
@@ -242,7 +262,7 @@ async def create_appointment(
     data: AppointmentCreate,
     db: AsyncSession = Depends(get_db),
     current_user: CurrentUser = Depends(
-        require_roles("doctor", "nurse", "receptionist", "admin", "facility_admin")
+        require_roles(*_APPOINTMENT_WRITERS)
     ),
 ) -> AppointmentResponse:
     """
@@ -295,7 +315,7 @@ async def update_appointment(
     data: AppointmentUpdate,
     db: AsyncSession = Depends(get_db),
     current_user: CurrentUser = Depends(
-        require_roles("doctor", "nurse", "receptionist", "admin", "facility_admin")
+        require_roles(*_APPOINTMENT_WRITERS)
     ),
 ) -> AppointmentResponse:
     """
@@ -328,7 +348,7 @@ async def check_in_appointment(
     data: AppointmentCheckIn,
     db: AsyncSession = Depends(get_db),
     current_user: CurrentUser = Depends(
-        require_roles("nurse", "receptionist", "admin", "facility_admin")
+        require_roles(*_APPOINTMENT_WRITERS)
     ),
 ) -> AppointmentResponse:
     """

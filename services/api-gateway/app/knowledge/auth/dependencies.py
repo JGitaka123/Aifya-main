@@ -157,6 +157,15 @@ async def get_current_user(
     )
 
 
+#: Administrator roles hold every module, so they pass every role gate. The
+#: list matches ``app.auth.permissions.SUPERUSER_ROLES``; the two must stay in
+#: step, or an administrator could open the Knowledge tab in the shell and be
+#: refused by the service behind it.
+_ADMIN_ROLES: frozenset[str] = frozenset(
+    {"super_admin", "admin", "facility_admin", "hospital_administrator"}
+)
+
+
 def require_roles(*required_roles: str):
     """
     Factory for role-based access control dependency.
@@ -165,6 +174,8 @@ def require_roles(*required_roles: str):
     @param required_roles: One or more role names — user must have at least one
     @returns Dependency function that validates roles
     """
+
+    wanted = {role.strip().lower() for role in required_roles}
 
     async def role_checker(
         current_user: CurrentUser = Depends(get_current_user),
@@ -176,7 +187,8 @@ def require_roles(*required_roles: str):
         @returns CurrentUser if authorized
         @raises HTTPException 403: If user lacks required roles
         """
-        if not any(role in current_user.roles for role in required_roles):
+        held = {role.strip().lower() for role in current_user.roles}
+        if not (held & _ADMIN_ROLES or held & wanted):
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail=f"Requires one of roles: {', '.join(required_roles)}",

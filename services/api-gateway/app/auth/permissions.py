@@ -285,16 +285,42 @@ _HR = frozenset(
     }
 )
 
-# The HR administrator is the person who issues access: they add the employee,
-# choose the role, set the password and switch the account on or off. Setting a
-# colleague's password is the same act as creating their account, so it sits
-# here rather than in an administrator-only set - and it also needs the facility
-# profile, because the hospital's own name and contacts are HR's to keep right.
-# Only the HR administrator carries it. The Setting and Integrations
-# destinations are the facility's own configuration, so an HR officer keeps the
-# staff records, the appointment book and the payroll without gaining the power
-# to rewrite the hospital's settings or the integration keys behind them.
-_HR_ADMIN = _HR | {Permission.SETTINGS_MANAGE}
+# HR is one desk, however its rank is spelled. ``hr``, ``hr_admin`` and
+# ``hr_officer`` are the same authority wearing different job titles: the person
+# who registers the employee, chooses the role, sets the password and switches
+# the account on or off. Setting a colleague's password is the same act as
+# creating their account, and the facility's own name and contacts are HR's to
+# keep right, so ``settings.manage`` - which backs the Setting and Integrations
+# destinations - sits with all three ranks rather than with one of them.
+#
+# An earlier cut gave it to ``hr_admin`` alone. That read the ranks as a
+# hierarchy the hospital never agreed to: an HR officer who could add an
+# employee, assign them any role and reset their password, but who could not
+# correct the hospital's own phone number, was a distinction without a
+# difference. If a facility wants to narrow one rank it can do so with a
+# ``role_permissions`` override row, which is what the table is for.
+_HR_DESK = _HR | {Permission.SETTINGS_MANAGE}
+
+# The maternal room. A midwife runs antenatal, delivery and child-health
+# clinics, so she keeps the patient record, triage and the MCH workspace, and
+# reads the laboratory and pharmacy lists from inside it. She does not carry the
+# OPD, ward or emergency rooms: those are the nurse's and the doctor's tabs, and
+# holding a permission no tab offers is how a role ends up with an API that
+# answers a call its sidebar would never make.
+_MIDWIFE = frozenset(
+    {
+        Permission.PATIENTS_VIEW,
+        Permission.PATIENTS_UPDATE,
+        Permission.TRIAGE_RECORD,
+        Permission.MCH_VIEW,
+        Permission.MCH_RECORD,
+        Permission.LABORATORY_VIEW,
+        Permission.PHARMACY_VIEW,
+        Permission.APPOINTMENTS_VIEW,
+        Permission.REFERRALS_VIEW,
+        Permission.KNOWLEDGE_VIEW,
+    }
+)
 
 _STORES = frozenset(
     {
@@ -356,7 +382,7 @@ ROLE_PERMISSIONS: dict[str, frozenset[str]] = {
     "nurse": _as_strings(_NURSING | {Permission.TRIALS_VIEW}),
     "triage_nurse": _as_strings(_NURSING | {Permission.TRIALS_VIEW}),
     "ward_nurse": _as_strings(_NURSING | {Permission.TRIALS_VIEW}),
-    "midwife": _as_strings(_NURSING | {Permission.MCH_RECORD}),
+    "midwife": _as_strings(_MIDWIFE),
     "doctor": _as_strings(_CLINICIAN | {Permission.TRIALS_VIEW}),
     "clinician": _as_strings(_CLINICIAN | {Permission.TRIALS_VIEW}),
     "specialist": _as_strings(_CLINICIAN | {Permission.THEATRE_VIEW}),
@@ -371,9 +397,9 @@ ROLE_PERMISSIONS: dict[str, frozenset[str]] = {
     "billing_clerk": _as_strings(_CASHIER),
     "billing_officer": _as_strings(_CASHIER | {Permission.REPORTS_VIEW}),
     "finance_admin": _as_strings(_FINANCE),
-    "hr": _as_strings(_HR),
-    "hr_admin": _as_strings(_HR_ADMIN),
-    "hr_officer": _as_strings(_HR),
+    "hr": _as_strings(_HR_DESK),
+    "hr_admin": _as_strings(_HR_DESK),
+    "hr_officer": _as_strings(_HR_DESK),
     "store_keeper": _as_strings(_STORES),
     "research_coordinator": _as_strings(_RESEARCH),
     "principal_investigator": _as_strings(_RESEARCH),
@@ -711,9 +737,9 @@ def require_permission(*required: str, any_of: bool = False):
 #: Destinations that are not listed here are not role-owned: patients, the
 #: dashboard and the user guide stay open to any signed-in employee.
 DESTINATION_ROLES: dict[str, frozenset[str]] = {
-    "consultation": frozenset({"nurse", "triage_nurse", "ward_nurse", "midwife"}),
+    "consultation": frozenset({"nurse", "triage_nurse", "ward_nurse"}),
     "clinical": frozenset(
-        {"doctor", "clinician", "nurse", "triage_nurse", "ward_nurse", "midwife"}
+        {"doctor", "clinician", "nurse", "triage_nurse", "ward_nurse"}
     ),
     "pharmacy": frozenset({"pharmacist"}),
     "laboratory": frozenset({"lab_tech", "pathologist"}),
@@ -736,7 +762,9 @@ DESTINATION_ROLES: dict[str, frozenset[str]] = {
         {"finance_admin", "cashier", "billing", "billing_clerk", "billing_officer"}
     ),
     "hr": frozenset({"hr_admin", "hr", "hr_officer"}),
-    "settings": frozenset({"hr_admin"}),
+    # HR is one desk: all three ranks hold ``settings.manage`` for the same
+    # reason they hold every other HR permission, so all three own the room.
+    "settings": frozenset({"hr_admin", "hr", "hr_officer"}),
 }
 
 

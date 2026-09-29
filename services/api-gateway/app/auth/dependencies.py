@@ -302,10 +302,62 @@ current_user_dependency = Depends(get_current_user)
 
 
 def require_roles(*required_roles: str):
+    """
+    Build a dependency that admits the named roles, and every administrator.
+
+    Role names are compared case-insensitively, so ``Lab_Tech`` on a staff
+    record and ``lab_tech`` in a token are the same role. Administrator roles
+    always pass: an administrator owns every module, and without that bypass a
+    ``super_admin`` was refused by the endpoints that name ``admin`` and
+    ``facility_admin`` - the platform owner was locked out of more of the
+    hospital than a nurse was.
+
+    Vendor-only endpoints, which no hospital administrator may reach, use
+    ``require_platform_roles`` instead; that gate has no bypass.
+
+    @param required_roles: Role names the endpoint belongs to
+    @returns A FastAPI dependency returning the authenticated user
+    """
+    from app.auth.permissions import SUPERUSER_ROLES, normalise_role
+
+    wanted = {normalise_role(role) for role in required_roles}
+
     async def role_checker(
         current_user: CurrentUser = current_user_dependency,
     ) -> CurrentUser:
-        if not any(role in current_user.roles for role in required_roles):
+        held = {normalise_role(role) for role in current_user.roles}
+        if held & wanted or held & SUPERUSER_ROLES:
+            return current_user
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Requires one of roles: {', '.join(required_roles)}",
+        )
+
+    return role_checker
+
+
+def require_platform_roles(*required_roles: str):
+    """
+    Build a dependency that admits only the named roles, with no exceptions.
+
+    ``require_roles`` lets an administrator through anywhere; this gate does
+    not, because the endpoints it guards act on the platform rather than on one
+    hospital - issuing licences, publishing application updates, approving a
+    facility's onboarding. A ``facility_admin`` holds every permission inside
+    their own facility and none of these.
+
+    @param required_roles: Role names the endpoint is restricted to
+    @returns A FastAPI dependency returning the authenticated user
+    """
+    from app.auth.permissions import normalise_role
+
+    wanted = {normalise_role(role) for role in required_roles}
+
+    async def role_checker(
+        current_user: CurrentUser = current_user_dependency,
+    ) -> CurrentUser:
+        held = {normalise_role(role) for role in current_user.roles}
+        if not (held & wanted):
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail=f"Requires one of roles: {', '.join(required_roles)}",

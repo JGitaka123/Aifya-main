@@ -11,7 +11,12 @@ import uuid
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.auth.dependencies import CurrentUser, get_current_user, require_roles
+from app.auth.dependencies import (
+    CurrentUser,
+    get_current_user,
+    require_platform_roles,
+    require_roles,
+)
 from app.database import get_db
 from app.schemas.licensing import (
     AppUpdateCreate,
@@ -179,7 +184,7 @@ async def validate_export(
 async def create_license(
     data: LicenseCreate,
     db: AsyncSession = Depends(get_db),
-    current_user: CurrentUser = Depends(require_roles("super_admin")),
+    current_user: CurrentUser = Depends(require_platform_roles("super_admin")),
 ) -> LicenseResponse:
     """
     Issue a new license for a facility (Aifya admin only).
@@ -217,7 +222,7 @@ async def upgrade_license(
     facility_id: uuid.UUID,
     data: LicenseUpgrade,
     db: AsyncSession = Depends(get_db),
-    current_user: CurrentUser = Depends(require_roles("super_admin")),
+    current_user: CurrentUser = Depends(require_platform_roles("super_admin")),
 ) -> LicenseResponse:
     """
     Upgrade a facility to a higher tier (Aifya admin only).
@@ -256,7 +261,7 @@ async def upgrade_license(
 @router.get("/admin/summary")
 async def admin_summary(
     db: AsyncSession = Depends(get_db),
-    current_user: CurrentUser = Depends(require_roles("super_admin")),
+    current_user: CurrentUser = Depends(require_platform_roles("super_admin")),
 ) -> dict:
     """
     Get aggregate licensing summary (Aifya admin dashboard).
@@ -273,7 +278,7 @@ async def admin_summary(
 async def publish_update(
     data: AppUpdateCreate,
     db: AsyncSession = Depends(get_db),
-    current_user: CurrentUser = Depends(require_roles("super_admin")),
+    current_user: CurrentUser = Depends(require_platform_roles("super_admin")),
 ) -> AppUpdateResponse:
     """
     Publish a new application update (Aifya admin only).

@@ -310,6 +310,7 @@ _VERSIONS = Path(__file__).resolve().parents[1] / "alembic" / "versions"
 _MIGRATION = _VERSIONS / "029_role_permissions.py"
 _ALIGNMENT_MIGRATION = _VERSIONS / "039_role_tab_alignment.py"
 _REVOCATION_MIGRATION = _VERSIONS / "040_hr_officer_settings.py"
+_SCOPE_MIGRATION = _VERSIONS / "041_hr_is_one_and_midwife_scope.py"
 
 
 def _load_migration(name: str, path):
@@ -329,14 +330,17 @@ def _seeded_matrix() -> dict[str, set[str]]:
     """
     Rebuild the matrix the migrations leave behind in the database.
 
-    Migration 029 seeds the baseline and 039 adds the destinations that were
-    missing, so what a deployment actually holds is the union of the two.
+    Migration 029 seeds the baseline, 039 adds the destinations that were
+    missing, 040 takes ``settings.manage`` back off two HR ranks, and 041 puts
+    it back while narrowing the midwife to the maternal room. What a deployment
+    actually holds is the four applied in order.
 
     @returns Role to the permission strings the migrations insert
     """
     baseline = _load_seed_migration()
     alignment = _load_migration("migration_039", _ALIGNMENT_MIGRATION)
     revocation = _load_migration("migration_040", _REVOCATION_MIGRATION)
+    scope = _load_migration("migration_041", _SCOPE_MIGRATION)
 
     matrix = {
         role: set(permissions) for role, permissions in baseline._ROLE_PERMISSIONS.items()
@@ -344,6 +348,10 @@ def _seeded_matrix() -> dict[str, set[str]]:
     for role, permissions in alignment._ROLE_PERMISSIONS_ADDITIONS.items():
         matrix.setdefault(role, set()).update(permissions)
     for role, permissions in revocation._ROLE_PERMISSIONS_REVOKED.items():
+        matrix.setdefault(role, set()).difference_update(permissions)
+    for role, permissions in scope._ROLE_PERMISSIONS_ADDITIONS.items():
+        matrix.setdefault(role, set()).update(permissions)
+    for role, permissions in scope._ROLE_PERMISSIONS_REVOKED.items():
         matrix.setdefault(role, set()).difference_update(permissions)
     return matrix
 

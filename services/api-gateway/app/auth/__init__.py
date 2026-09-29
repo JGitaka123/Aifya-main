@@ -2,6 +2,7 @@ from app.auth.dependencies import (
     CurrentUser,
     get_current_user,
     require_patient_read,
+    require_platform_roles,
     require_roles,
 )
 from app.auth.permissions import (
@@ -31,6 +32,7 @@ __all__ = [
     "permissions_for_roles",
     "require_destination",
     "require_patient_read",
+    "require_platform_roles",
     "require_permission",
     "require_roles",
     "resolve_permissions",

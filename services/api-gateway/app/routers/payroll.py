@@ -110,6 +110,7 @@ LEAVE_MANAGER_ROLES: frozenset[str] = frozenset(
     {
         "admin",
         "facility_admin",
+        "hr",
         "hr_admin",
         "hr_officer",
         "manager",
@@ -117,7 +118,24 @@ LEAVE_MANAGER_ROLES: frozenset[str] = frozenset(
     }
 )
 
-router = APIRouter(dependencies=[Depends(require_module("hr"))])
+#: The payroll desk. HR owns the staff register a run is built from and finance
+#: owns the ledger it posts to, so both ranks may open the module. The narrow
+#: guards inside still separate the two: approving a run is finance's work,
+#: setting a salary is HR's.
+_PAYROLL_ROLES = ("hr", "hr_admin", "hr_officer", "finance_admin")
+
+router = APIRouter(
+    dependencies=[
+        Depends(require_module("hr")),
+        Depends(require_roles(*_PAYROLL_ROLES)),
+    ]
+)
+
+#: Self-service leave. Every employee may see the leave types their facility
+#: offers, read their own balance and file their own request, so these routes
+#: sit outside the payroll gate. The handlers scope a caller without a manager
+#: role to their own payroll row, which is what keeps them safe to leave open.
+self_service_router = APIRouter(dependencies=[Depends(require_module("hr"))])
 
 
 # ── Employees ──────────────────────────────────────────────────────────────
@@ -1370,7 +1388,7 @@ async def list_nssf_tiers(
 # ── Leave ──────────────────────────────────────────────────────────────────
 
 
-@router.get("/leave-types", response_model=list[LeaveTypeResponse])
+@self_service_router.get("/leave-types", response_model=list[LeaveTypeResponse])
 async def list_leave_types(
     db: AsyncSession = Depends(get_db),
     current_user: CurrentUser = Depends(get_current_user),
@@ -1434,7 +1452,7 @@ async def create_leave_type(
     return LeaveTypeResponse.model_validate(leave_type)
 
 
-@router.get("/leave-requests", response_model=LeaveRequestListResponse)
+@self_service_router.get("/leave-requests", response_model=LeaveRequestListResponse)
 async def list_leave_requests(
     employee_id: uuid.UUID | None = Query(None),
     status: str | None = Query(None),
@@ -1509,7 +1527,7 @@ async def list_leave_requests(
     return LeaveRequestListResponse(items=items, total=len(items))
 
 
-@router.get("/leave-balance", response_model=LeaveBalanceResponse)
+@self_service_router.get("/leave-balance", response_model=LeaveBalanceResponse)
 async def get_my_leave_balance(
     db: AsyncSession = Depends(get_db),
     current_user: CurrentUser = Depends(get_current_user),
@@ -1575,7 +1593,7 @@ async def get_my_leave_balance(
     )
 
 
-@router.post(
+@self_service_router.post(
     "/leave-requests",
     response_model=LeaveRequestResponse,
     status_code=status.HTTP_201_CREATED,
