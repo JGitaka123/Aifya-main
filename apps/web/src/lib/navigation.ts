@@ -148,6 +148,69 @@ export function isNavigationVisible(
   return roles.some((role) => allowed.includes(role));
 }
 
+/**
+ * Whether the viewer may open a destination's own page.
+ *
+ * The sidebar uses the same test to decide whether to draw a tab. Asking it
+ * again for a link drawn elsewhere keeps a home tile or a hand-off button from
+ * offering a door the signed-in role cannot walk through.
+ *
+ * @param href - Destination href, e.g. "/pharmacy"
+ * @param viewer - The signed-in user's roles and permission test
+ * @param items - Navigation catalog to search
+ * @returns True when the destination may be opened
+ */
+export function canOpenDestination(
+  href: string,
+  viewer: NavigationAudience,
+  items: readonly NavItem[] = NAV_ITEMS,
+): boolean {
+  const item = items.find((candidate) => candidate.href === href);
+  return !item || isNavigationVisible(item, viewer);
+}
+
+/**
+ * The destination a pathname belongs to, if any.
+ *
+ * @param pathname - Current localized or locale-independent pathname
+ * @param items - Navigation catalog to search
+ * @returns The destination, or undefined when the path is nobody's tab
+ */
+export function getDestinationForPath(
+  pathname: string,
+  items: readonly NavItem[] = NAV_ITEMS,
+): NavItem | undefined {
+  const href = getActiveNavigationHref(pathname, items);
+  return href ? items.find((item) => item.href === href) : undefined;
+}
+
+/**
+ * Whether the viewer may open a pathname at all.
+ *
+ * A record inside a room - a lab result, an imaging report, an appointment, an
+ * invoice - needs the room's permission but not its roles, because the room
+ * that raised it links straight to it: a doctor opens the result the OPD screen
+ * handed on without working the bench. The room's own page needs both, so a
+ * typed URL gets no further than the sidebar would have allowed. The API
+ * refuses the same call again on the server.
+ *
+ * @param pathname - Current localized or locale-independent pathname
+ * @param viewer - The signed-in user's roles and permission test
+ * @param items - Navigation catalog to search
+ * @returns True when the path may be rendered
+ */
+export function isPathAllowed(
+  pathname: string,
+  viewer: NavigationAudience,
+  items: readonly NavItem[] = NAV_ITEMS,
+): boolean {
+  const item = getDestinationForPath(pathname, items);
+  if (!item) return true;
+  if (!viewer.hasPermission(item.permission)) return false;
+  if (normalizeNavigationPath(pathname) !== item.href) return true;
+  return isNavigationVisible(item, viewer);
+}
+
 /** Canonical navigation catalog for every user-facing Aifya module. */
 export const NAV_ITEMS: readonly NavItem[] = [
   { key: "dashboard", href: "/", icon: LayoutDashboard },

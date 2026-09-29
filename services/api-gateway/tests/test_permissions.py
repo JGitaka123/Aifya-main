@@ -309,6 +309,7 @@ async def test_reception_can_still_read_the_consultation_fee(
 _VERSIONS = Path(__file__).resolve().parents[1] / "alembic" / "versions"
 _MIGRATION = _VERSIONS / "029_role_permissions.py"
 _ALIGNMENT_MIGRATION = _VERSIONS / "039_role_tab_alignment.py"
+_REVOCATION_MIGRATION = _VERSIONS / "040_hr_officer_settings.py"
 
 
 def _load_migration(name: str, path):
@@ -335,12 +336,15 @@ def _seeded_matrix() -> dict[str, set[str]]:
     """
     baseline = _load_seed_migration()
     alignment = _load_migration("migration_039", _ALIGNMENT_MIGRATION)
+    revocation = _load_migration("migration_040", _REVOCATION_MIGRATION)
 
     matrix = {
         role: set(permissions) for role, permissions in baseline._ROLE_PERMISSIONS.items()
     }
     for role, permissions in alignment._ROLE_PERMISSIONS_ADDITIONS.items():
         matrix.setdefault(role, set()).update(permissions)
+    for role, permissions in revocation._ROLE_PERMISSIONS_REVOKED.items():
+        matrix.setdefault(role, set()).difference_update(permissions)
     return matrix
 
 

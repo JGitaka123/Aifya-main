@@ -24,6 +24,8 @@ import {
   useNotifyCritical,
 } from "@/hooks/useLaboratory";
 import { useStaffDirectory } from "@/hooks/useHR";
+import { usePermissions } from "@/hooks/usePermissions";
+import { canOpenDestination } from "@/lib/navigation";
 import { formatDateTime } from "@/lib/utils";
 import { cn } from "@/lib/utils";
 import type { LabResultDetail, StaffDirectoryItem } from "@aifya/shared";
@@ -68,6 +70,7 @@ export default function LabOrderDetailPage({
   const verifyResult = useVerifyResult();
   const notifyCritical = useNotifyCritical();
   const { data: staffDirectory } = useStaffDirectory("doctor");
+  const viewer = usePermissions();
 
   const {
     register,
@@ -134,13 +137,15 @@ export default function LabOrderDetailPage({
   if (isLoading || !data) {
     return (
       <div className="mx-auto max-w-4xl p-6">
-        <Link
-          href="/laboratory"
-          className="flex items-center gap-1 text-sm text-primary hover:underline"
-        >
-          <ArrowLeft className="h-4 w-4" />
-          {tc("back")}
-        </Link>
+        {canOpenDestination("/laboratory", viewer) && (
+          <Link
+            href="/laboratory"
+            className="flex items-center gap-1 text-sm text-primary hover:underline"
+          >
+            <ArrowLeft className="h-4 w-4" />
+            {tc("back")}
+          </Link>
+        )}
         <p className="mt-4 text-muted-foreground">{tc("loading")}</p>
       </div>
     );
@@ -154,13 +159,15 @@ export default function LabOrderDetailPage({
   return (
     <div className="mx-auto max-w-4xl animate-[fade-in_0.3s_ease-out] p-6 lg:p-8">
       {/* Back link */}
-      <Link
-        href="/laboratory"
-        className="mb-4 inline-flex items-center gap-1 text-sm text-primary hover:underline"
-      >
-        <ArrowLeft className="h-4 w-4" />
-        {t("worklist")}
-      </Link>
+      {canOpenDestination("/laboratory", viewer) && (
+        <Link
+          href="/laboratory"
+          className="mb-4 inline-flex items-center gap-1 text-sm text-primary hover:underline"
+        >
+          <ArrowLeft className="h-4 w-4" />
+          {t("worklist")}
+        </Link>
+      )}
 
       {/* Header */}
       <div className="mb-6 flex items-center gap-3">

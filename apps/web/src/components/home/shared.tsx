@@ -3,6 +3,8 @@
 import { useTranslations } from "next-intl";
 import { ArrowRight, Clock } from "lucide-react";
 import { Link } from "@/i18n/routing";
+import { usePermissions } from "@/hooks/usePermissions";
+import { canOpenDestination } from "@/lib/navigation";
 import { cn } from "@/lib/utils";
 
 /**
@@ -12,7 +14,7 @@ import { cn } from "@/lib/utils";
  * @param icon - Lucide icon component
  * @param label - Action label
  * @param color - Icon background/text color classes
- * @returns Quick action card
+ * @returns Quick action card, or nothing when the destination belongs to another role
  */
 export function QuickAction({
   href,
@@ -25,6 +27,10 @@ export function QuickAction({
   label: string;
   color: string;
 }) {
+  const viewer = usePermissions();
+  // A tile is a door: do not offer one the signed-in role cannot open.
+  if (!canOpenDestination(href, viewer)) return null;
+
   return (
     <Link
       href={href}

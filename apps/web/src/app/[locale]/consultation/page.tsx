@@ -17,6 +17,7 @@ import { useCallNext, useClinicalWorklist } from "@/hooks/useEncounters";
 import { usePermissions } from "@/hooks/usePermissions";
 import { isServerUnavailable } from "@/lib/api-client";
 import { PERMISSIONS } from "@/lib/auth/permissions";
+import { canOpenDestination } from "@/lib/navigation";
 import { cn, formatDateTime } from "@/lib/utils";
 import { PageHeader } from "@/components/ui/PageHeader";
 import { Avatar } from "@/components/ui/Avatar";
@@ -66,7 +67,8 @@ export default function ConsultationRoomPage() {
   const router = useRouter();
   const [callError, setCallError] = useState("");
 
-  const { canSeeClinical, hasPermission } = usePermissions();
+  const permissions = usePermissions();
+  const { canSeeClinical, hasPermission } = permissions;
   const canConsult = hasPermission(PERMISSIONS.CLINICAL_CONSULT);
 
   // Without clinical.view the API answers 403; do not ask and then show an
@@ -163,13 +165,15 @@ export default function ConsultationRoomPage() {
         actions={
           <>
             {canConsult && callNextButton}
-            <Link
-              href="/patients/register"
-              className="flex items-center gap-2 rounded-lg border border-border bg-card px-4 py-2 text-sm font-medium text-foreground shadow-sm transition-colors hover:bg-muted"
-            >
-              <Plus className="h-4 w-4" />
-              {tq("newEncounter")}
-            </Link>
+            {canOpenDestination("/patients/register", permissions) && (
+              <Link
+                href="/patients/register"
+                className="flex items-center gap-2 rounded-lg border border-border bg-card px-4 py-2 text-sm font-medium text-foreground shadow-sm transition-colors hover:bg-muted"
+              >
+                <Plus className="h-4 w-4" />
+                {tq("newEncounter")}
+              </Link>
+            )}
           </>
         }
       />

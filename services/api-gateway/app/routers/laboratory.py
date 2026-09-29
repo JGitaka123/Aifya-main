@@ -3,7 +3,12 @@ import uuid
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.auth import CurrentUser, get_current_user, require_roles
+from app.auth import (
+    CurrentUser,
+    get_current_user,
+    require_destination,
+    require_roles,
+)
 from app.auth.license_check import require_module
 from app.database import get_db
 from app.schemas.lab import (
@@ -49,7 +54,13 @@ async def get_lab_catalog(
 # ── Worklist ──────────────────────────────────────────────────────────────────
 
 
-@router.get("/worklist", response_model=LabWorklistResponse)
+# The bench worklist is the laboratory's room. The test catalogue stays open
+# because the consultation screen orders from it.
+@router.get(
+    "/worklist",
+    response_model=LabWorklistResponse,
+    dependencies=[Depends(require_destination("laboratory"))],
+)
 async def get_worklist(
     status_filter: str | None = Query(
         None,

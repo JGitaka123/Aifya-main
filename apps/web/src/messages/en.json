@@ -1,4 +1,9 @@
 {
+  "accessDenied": {
+    "code": "403",
+    "title": "Access denied",
+    "description": "This part of Aifya belongs to another role. Ask HR/Admin if you need access to it."
+  },
   "serviceCharge": {
     "paid": "Paid",
     "partial": "Part paid",

@@ -290,8 +290,10 @@ _HR = frozenset(
 # colleague's password is the same act as creating their account, so it sits
 # here rather than in an administrator-only set - and it also needs the facility
 # profile, because the hospital's own name and contacts are HR's to keep right.
-# The Integrations and Setting destinations belong to the Human Resource role as
-# a whole, so ``hr`` and ``hr_officer`` carry it too.
+# Only the HR administrator carries it. The Setting and Integrations
+# destinations are the facility's own configuration, so an HR officer keeps the
+# staff records, the appointment book and the payroll without gaining the power
+# to rewrite the hospital's settings or the integration keys behind them.
 _HR_ADMIN = _HR | {Permission.SETTINGS_MANAGE}
 
 _STORES = frozenset(
@@ -369,9 +371,9 @@ ROLE_PERMISSIONS: dict[str, frozenset[str]] = {
     "billing_clerk": _as_strings(_CASHIER),
     "billing_officer": _as_strings(_CASHIER | {Permission.REPORTS_VIEW}),
     "finance_admin": _as_strings(_FINANCE),
-    "hr": _as_strings(_HR_ADMIN),
+    "hr": _as_strings(_HR),
     "hr_admin": _as_strings(_HR_ADMIN),
-    "hr_officer": _as_strings(_HR_ADMIN),
+    "hr_officer": _as_strings(_HR),
     "store_keeper": _as_strings(_STORES),
     "research_coordinator": _as_strings(_RESEARCH),
     "principal_investigator": _as_strings(_RESEARCH),
@@ -693,3 +695,86 @@ def require_permission(*required: str, any_of: bool = False):
         return current_user
 
     return permission_checker
+
+# --- Destinations ---------------------------------------------------------
+
+#: The roles that own each navigation destination, mirroring the ``roles`` list
+#: on ``apps/web/src/lib/navigation.ts``. The sidebar reads it to decide which
+#: tabs to draw; ``require_destination`` reads it to decide which calls to
+#: answer, so a tab no worker can see is also a room no other worker can open.
+#:
+#: This answers a different question from ``require_permission``. A doctor holds
+#: ``pharmacy.view`` because the consultation screen reads the drug catalogue -
+#: that is an action inside the doctor's own room. The pharmacy dispensing queue
+#: is not an action, it is a room, and it belongs to the pharmacist.
+#:
+#: Destinations that are not listed here are not role-owned: patients, the
+#: dashboard and the user guide stay open to any signed-in employee.
+DESTINATION_ROLES: dict[str, frozenset[str]] = {
+    "consultation": frozenset({"nurse", "triage_nurse", "ward_nurse", "midwife"}),
+    "clinical": frozenset(
+        {"doctor", "clinician", "nurse", "triage_nurse", "ward_nurse", "midwife"}
+    ),
+    "pharmacy": frozenset({"pharmacist"}),
+    "laboratory": frozenset({"lab_tech", "pathologist"}),
+    "radiology": frozenset({"radiologist", "rad_tech"}),
+    "theatre": frozenset({"specialist"}),
+    "dental": frozenset({"dentist"}),
+    "mch": frozenset({"midwife"}),
+    "trials": frozenset(
+        {
+            "doctor",
+            "clinician",
+            "nurse",
+            "triage_nurse",
+            "ward_nurse",
+            "research_coordinator",
+            "principal_investigator",
+        }
+    ),
+    "finance": frozenset(
+        {"finance_admin", "cashier", "billing", "billing_clerk", "billing_officer"}
+    ),
+    "hr": frozenset({"hr_admin", "hr", "hr_officer"}),
+    "settings": frozenset({"hr_admin"}),
+}
+
+
+def require_destination(*destinations: str):
+    """
+    Build a dependency that admits only the roles a destination belongs to.
+
+    Administrator roles always pass, so a facility that has narrowed a role can
+    never lock itself out of a module it owns.
+
+    @param destinations: Destination keys from ``DESTINATION_ROLES``
+    @returns A FastAPI dependency returning the authenticated user
+    @raises ValueError: When a key is not a known destination
+    @raises HTTPException 403: When none of the caller's roles own the room
+    """
+    for destination in destinations:
+        if destination not in DESTINATION_ROLES:
+            raise ValueError(f"unknown destination: {destination}")
+
+    async def destination_checker(
+        current_user: CurrentUser = current_user_dependency,
+    ) -> CurrentUser:
+        if is_superuser(current_user.roles):
+            return current_user
+
+        allowed: set[str] = set()
+        for destination in destinations:
+            allowed |= DESTINATION_ROLES[destination]
+
+        held = {normalise_role(role) for role in current_user.roles}
+        if not (held & allowed):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=(
+                    "This part of Aifya belongs to another role. "
+                    "Ask HR/Admin if you need access."
+                ),
+            )
+        return current_user
+
+    return destination_checker

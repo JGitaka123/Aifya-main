@@ -23,6 +23,8 @@ import {
   useNotifyCriticalImaging,
 } from "@/hooks/useRadiology";
 import { useStaffDirectory } from "@/hooks/useHR";
+import { usePermissions } from "@/hooks/usePermissions";
+import { canOpenDestination } from "@/lib/navigation";
 import { formatDateTime } from "@/lib/utils";
 import { cn } from "@/lib/utils";
 
@@ -55,6 +57,7 @@ export default function ImagingOrderDetailPage() {
 
   // Clinicians that can be notified about a critical finding
   const { data: staffDirectory } = useStaffDirectory("doctor");
+  const viewer = usePermissions();
   const clinicians = staffDirectory?.items.filter((staff) => staff.is_active) ?? [];
 
   // Schedule form state
@@ -92,9 +95,11 @@ export default function ImagingOrderDetailPage() {
     return (
       <div className="flex flex-col items-center justify-center py-24 text-muted-foreground">
         <p>{t("orderNotFound")}</p>
-        <Link href="/radiology" className="mt-4 text-primary hover:underline">
-          {t("backToWorklist")}
-        </Link>
+        {canOpenDestination("/radiology", viewer) && (
+          <Link href="/radiology" className="mt-4 text-primary hover:underline">
+            {t("backToWorklist")}
+          </Link>
+        )}
       </div>
     );
   }
@@ -166,13 +171,15 @@ export default function ImagingOrderDetailPage() {
   return (
     <div className="mx-auto max-w-4xl animate-[fade-in_0.3s_ease-out] p-6 lg:p-8">
       {/* Back link */}
-      <Link
-        href="/radiology"
-        className="mb-4 inline-flex items-center gap-1 text-sm text-muted-foreground hover:text-foreground"
-      >
-        <ArrowLeft className="h-4 w-4" />
-        {t("backToWorklist")}
-      </Link>
+      {canOpenDestination("/radiology", viewer) && (
+        <Link
+          href="/radiology"
+          className="mb-4 inline-flex items-center gap-1 text-sm text-muted-foreground hover:text-foreground"
+        >
+          <ArrowLeft className="h-4 w-4" />
+          {t("backToWorklist")}
+        </Link>
+      )}
 
       {/* Order header */}
       <div className="mb-6 rounded-xl border border-border bg-card p-6 shadow-[var(--shadow-card)]">

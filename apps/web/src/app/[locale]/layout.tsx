@@ -9,6 +9,7 @@ import { AuthProvider } from "@/components/providers/AuthProvider";
 import { SyncProvider } from "@/components/providers/SyncProvider";
 import { ToastProvider } from "@/components/ui/Toast";
 import { RouteOverlays } from "@/components/layout/RouteOverlays";
+import { DestinationGuard } from "@/components/layout/DestinationGuard";
 import { Shell } from "@/components/layout/Shell";
 import { TourProvider } from "@/components/help/TourProvider";
 import "@/app/globals.css";
@@ -53,7 +54,9 @@ export default async function RootLayout({
                 <SyncProvider>
                   <ToastProvider>
                     <TourProvider>
-                      <Shell>{children}</Shell>
+                      <Shell>
+                        <DestinationGuard>{children}</DestinationGuard>
+                      </Shell>
                       <RouteOverlays />
                     </TourProvider>
                   </ToastProvider>

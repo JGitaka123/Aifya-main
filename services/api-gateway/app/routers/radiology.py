@@ -3,7 +3,12 @@ import uuid
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.auth import CurrentUser, get_current_user, require_roles
+from app.auth import (
+    CurrentUser,
+    get_current_user,
+    require_destination,
+    require_roles,
+)
 from app.auth.license_check import require_module
 from app.database import get_db
 from app.schemas.radiology import (
@@ -27,7 +32,13 @@ router = APIRouter(dependencies=[Depends(require_module("radiology"))])
 # ── Summary ──────────────────────────────────────────────────────────────────
 
 
-@router.get("/summary", response_model=RadiologySummary)
+# The department dashboard is the imaging room. The worklist stays open because
+# the consultation screen orders imaging and reads results from it.
+@router.get(
+    "/summary",
+    response_model=RadiologySummary,
+    dependencies=[Depends(require_destination("radiology"))],
+)
 async def get_summary(
     db: AsyncSession = Depends(get_db),
     current_user: CurrentUser = Depends(get_current_user),

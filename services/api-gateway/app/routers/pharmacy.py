@@ -3,7 +3,12 @@ import uuid
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.auth import CurrentUser, get_current_user, require_roles
+from app.auth import (
+    CurrentUser,
+    get_current_user,
+    require_destination,
+    require_roles,
+)
 from app.auth.license_check import require_module
 from app.database import get_db
 from app.schemas.pharmacy import (
@@ -27,7 +32,13 @@ router = APIRouter(dependencies=[Depends(require_module("pharmacy"))])
 # ── Pharmacy Queue ─────────────────────────────────────────────────────────
 
 
-@router.get("/queue", response_model=PharmacyQueueResponse)
+# The dispensing queue is the pharmacist's room. A doctor holds pharmacy.view to
+# read the drug catalogue inside a consultation, not to work the queue.
+@router.get(
+    "/queue",
+    response_model=PharmacyQueueResponse,
+    dependencies=[Depends(require_destination("pharmacy"))],
+)
 async def get_pharmacy_queue(
     db: AsyncSession = Depends(get_db),
     current_user: CurrentUser = Depends(get_current_user),
@@ -272,7 +283,11 @@ async def adjust_stock(
 # ── Alerts ─────────────────────────────────────────────────────────────────
 
 
-@router.get("/alerts", response_model=list[StockAlert])
+@router.get(
+    "/alerts",
+    response_model=list[StockAlert],
+    dependencies=[Depends(require_destination("pharmacy"))],
+)
 async def get_stock_alerts(
     db: AsyncSession = Depends(get_db),
     current_user: CurrentUser = Depends(get_current_user),

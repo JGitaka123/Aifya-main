@@ -60,6 +60,7 @@ import { PageSkeleton } from "@/components/ui/Skeleton";
 import { ConsultationFeePanel } from "@/components/billing/ConsultationFeePanel";
 import { EncounterServiceCharges } from "@/components/billing/EncounterServiceCharges";
 import { PERMISSIONS } from "@/lib/auth/permissions";
+import { canOpenDestination } from "@/lib/navigation";
 import { cn, formatDateTime } from "@/lib/utils";
 import type {
   DiagnosisCreate,
@@ -262,7 +263,8 @@ export default function EncounterDetailPage() {
   const completeAssessment = useCompleteAssessment(encounterId);
   // Moving an encounter through waiting -> in_consultation -> completed is a
   // clinical act, so the API admits only clinical.consult or triage.record.
-  const { hasAnyPermission, hasPermission } = usePermissions();
+  const permissions = usePermissions();
+  const { hasAnyPermission, hasPermission } = permissions;
   const canUpdateStatus = hasAnyPermission([
     PERMISSIONS.CLINICAL_CONSULT,
     PERMISSIONS.TRIAGE_RECORD,
@@ -972,12 +974,13 @@ export default function EncounterDetailPage() {
                       {rx.instructions && <p className="mt-0.5 text-xs italic text-muted-foreground">{rx.instructions}</p>}
                     </div>
                     <div className="flex items-center gap-2 flex-shrink-0">
-                      {rx.status !== "dispensed" && (
-                        <Link href={`/pharmacy?encounter_id=${encounterId}&drug=${encodeURIComponent(rx.drug_name)}&qty=${rx.quantity ?? ""}`}
-                          className="inline-flex items-center gap-1 rounded-full bg-green-600 px-3 py-1 text-xs font-semibold text-white shadow animate-pulse hover:animate-none hover:bg-green-700 transition-all">
-                          {t("dispense")}
-                        </Link>
-                      )}
+                      {rx.status !== "dispensed" &&
+                        canOpenDestination("/pharmacy", permissions) && (
+                          <Link href={`/pharmacy?encounter_id=${encounterId}&drug=${encodeURIComponent(rx.drug_name)}&qty=${rx.quantity ?? ""}`}
+                            className="inline-flex items-center gap-1 rounded-full bg-green-600 px-3 py-1 text-xs font-semibold text-white shadow animate-pulse hover:animate-none hover:bg-green-700 transition-all">
+                            {t("dispense")}
+                          </Link>
+                        )}
                       <span className={cn("rounded px-2 py-0.5 text-xs font-medium",
                         rx.status === "dispensed" ? "bg-green-100 text-green-700 dark:bg-green-900 dark:text-green-300" :
                         "bg-yellow-100 text-yellow-700 dark:bg-yellow-900 dark:text-yellow-300"
@@ -1299,11 +1302,13 @@ export default function EncounterDetailPage() {
             <button onClick={() => setActiveTab("imaging")} className="flex items-center gap-1.5 rounded-lg border border-border px-4 py-2 text-sm font-medium text-muted-foreground hover:bg-muted transition-colors">
               {t("backImaging")}
             </button>
-            <Link href="/billing"
-              className="inline-flex items-center gap-2 rounded-lg bg-primary px-4 py-2 text-sm font-semibold text-primary-foreground shadow animate-pulse hover:animate-none hover:bg-primary/90 transition-all">
-              <CreditCard className="h-4 w-4" />
-              {t("viewPayInvoice")}
-            </Link>
+            {canOpenDestination("/billing", permissions) && (
+              <Link href="/billing"
+                className="inline-flex items-center gap-2 rounded-lg bg-primary px-4 py-2 text-sm font-semibold text-primary-foreground shadow animate-pulse hover:animate-none hover:bg-primary/90 transition-all">
+                <CreditCard className="h-4 w-4" />
+                {t("viewPayInvoice")}
+              </Link>
+            )}
           </div>
         </div>
       )}

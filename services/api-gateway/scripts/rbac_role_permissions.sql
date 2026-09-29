@@ -270,7 +270,6 @@ SELECT NULL, seed.role, seed.permission, TRUE
         ('hr',                'referrals.view'),
         ('hr',                'analytics.view'),
         ('hr',                'communications.view'),
-        ('hr',                'settings.manage'),
         ('hr_admin',          'appointments.view'),
         ('hr_admin',          'referrals.view'),
         ('hr_admin',          'analytics.view'),
@@ -280,7 +279,6 @@ SELECT NULL, seed.role, seed.permission, TRUE
         ('hr_officer',        'referrals.view'),
         ('hr_officer',        'analytics.view'),
         ('hr_officer',        'communications.view'),
-        ('hr_officer',        'settings.manage'),
         ('cashier',           'finance.view'),
         ('cashier',           'inventory.view'),
         ('billing',           'finance.view'),
@@ -297,6 +295,14 @@ SELECT NULL, seed.role, seed.permission, TRUE
           AND existing.facility_id IS NULL
           AND NOT existing.is_deleted
  );
+
+-- HR officers keep the staff file, the appointment book and the payroll, but
+-- not the facility's own settings or the integration keys behind them. Only
+-- hr_admin and the administrator roles may rewrite those (migration 040).
+DELETE FROM role_permissions
+ WHERE facility_id IS NULL
+   AND role IN ('hr', 'hr_officer')
+   AND permission = 'settings.manage';
 
 ALTER TABLE role_permissions ENABLE ROW LEVEL SECURITY;
 ALTER TABLE role_permissions FORCE ROW LEVEL SECURITY;

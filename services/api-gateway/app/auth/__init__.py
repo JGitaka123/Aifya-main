@@ -13,6 +13,7 @@ from app.auth.permissions import (
     is_assignable_role,
     is_allowed,
     permissions_for_roles,
+    require_destination,
     require_permission,
     resolve_permissions,
 )
@@ -28,6 +29,7 @@ __all__ = [
     "is_assignable_role",
     "is_allowed",
     "permissions_for_roles",
+    "require_destination",
     "require_patient_read",
     "require_permission",
     "require_roles",

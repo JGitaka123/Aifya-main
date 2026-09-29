@@ -1,4 +1,9 @@
 {
+  "accessDenied": {
+    "code": "403",
+    "title": "Ufikiaji umekataliwa",
+    "description": "Sehemu hii ya Aifya ni ya jukumu lingine. Omba HR/Utawala ikiwa unahitaji ufikiaji."
+  },
   "serviceCharge": {
     "paid": "Imelipwa",
     "partial": "Imelipwa kiasi",
