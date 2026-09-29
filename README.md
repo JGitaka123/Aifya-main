@@ -197,14 +197,14 @@ corepack enable
 pnpm install
 pnpm dev
 
-REM 4. Knowledge service - in a third window, leave it running
-REM    The Knowledge tab proxies every request to this process on port 8025.
-REM    Without it, uploads and search return "Knowledge service unavailable".
-REM    It needs no Docker: uploads are written under
-REM    services\ai-service\knowledge\data\files and the embeddings live in the
+REM 4. Knowledge - nothing extra to run
+REM    Institutional Knowledge is part of the api-gateway now
+REM    (services/api-gateway/app/knowledge) and is served at
+REM    http://localhost:8000/api/v1/knowledge. It authenticates with the same
+REM    session cookie as every other module, so there is no separate service,
+REM    no 8025 port and no proxy. Uploads are written under
+REM    services/api-gateway/data/knowledge/files and the embeddings live in the
 REM    same PostgreSQL the API uses.
-cd ..\..
-powershell -ExecutionPolicy Bypass -File scripts\start-knowledge.ps1
 
 REM Open http://localhost:3000
 ```
@@ -216,8 +216,9 @@ the folder (a stopped `uvicorn` and OneDrive sync are the usual causes), delete
 If `uvicorn` fails with `uv trampoline failed to canonicalize script path` or
 `No Python at '...python.exe'`, the interpreter the venv was built from has
 been uninstalled. Delete `services\api-gateway\.venv` and run `uv sync` again -
-uv will fetch a fresh Python. Check `scripts\start-knowledge.ps1` output if the
-Knowledge tab still reports 502.
+uv will fetch a fresh Python. If the Knowledge tab still reports a server
+error, it is served by the same API process now - confirm it with
+`curl.exe http://localhost:8000/api/v1/knowledge/health`.
 
 ### AI Services (Optional)
 

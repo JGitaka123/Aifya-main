@@ -18,8 +18,15 @@ from app.schemas.report import (
     ReportTemplateListItem,
     ReportTemplateResponse,
     TopDiagnosis,
+    UsageBillingReport,
+    UsageBillingTrend,
 )
 from app.services.reports_service import ReportsService
+from app.services.usage_billing_service import (
+    MAX_TREND_MONTHS,
+    UsageBillingService,
+    current_month,
+)
 
 router = APIRouter(dependencies=[Depends(require_module("reports"))])
 
@@ -274,3 +281,112 @@ async def get_generated_report(
             detail="Generated report not found",
         )
     return GeneratedReportResponse.model_validate(report)
+
+
+# ── Facility Usage Billing ──────────────────────────────────────────────────
+
+#: Billing month is a calendar month, written YYYY-MM.
+_MONTH_PATTERN = r"^\d{4}-(0[1-9]|1[0-2])$"
+
+
+@router.get("/usage-billing", response_model=UsageBillingReport)
+async def get_usage_billing(
+    month: str | None = Query(
+        None,
+        pattern=_MONTH_PATTERN,
+        description="Billing month as YYYY-MM; defaults to the current month",
+    ),
+    rate_cents: int | None = Query(
+        None,
+        ge=0,
+        le=1_000_000,
+        description=(
+            "Charge per patient-day in KES cents; defaults to the rate the "
+            "facility is billed at"
+        ),
+    ),
+    db: AsyncSession = Depends(get_db),
+    current_user: CurrentUser = Depends(get_current_user),
+) -> UsageBillingReport:
+    """
+    Explain what the facility owes for one billing month.
+
+    Aifya charges the hospital per patient-day: a patient seen at reception, a
+    patient who arrived through emergency, and every day an inpatient spends on
+    a ward - admission day and discharge day included. A patient who comes
+    through more than one of those doors in a day is charged once.
+
+    The figures are the same ones the HR Aifya Usage screen shows, read from the
+    same ledger. The rate can be overridden so the page doubles as a what-if
+    calculator, but the default is the rate the facility is actually billed at.
+
+    @param month: Billing month as YYYY-MM
+    @param rate_cents: Optional rate override in KES cents
+    @param db: Database session
+    @param current_user: Authenticated user from JWT
+    @returns The priced usage report for the month
+    """
+    service = UsageBillingService(db)
+    try:
+        return await service.build_report(
+            facility_id=current_user.facility_id,
+            month=month or current_month(),
+            rate_cents=rate_cents,
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)
+        ) from exc
+
+
+@router.get("/usage-billing/monthly", response_model=UsageBillingTrend)
+async def get_usage_billing_trend(
+    months: int = Query(
+        12,
+        ge=1,
+        le=MAX_TREND_MONTHS,
+        description="Number of months to look back",
+    ),
+    end_month: str | None = Query(
+        None,
+        pattern=_MONTH_PATTERN,
+        description="Last month to include as YYYY-MM; defaults to this month",
+    ),
+    rate_cents: int | None = Query(
+        None,
+        ge=0,
+        le=1_000_000,
+        description=(
+            "Charge per patient-day in KES cents; defaults to the rate the "
+            "facility is billed at"
+        ),
+    ),
+    db: AsyncSession = Depends(get_db),
+    current_user: CurrentUser = Depends(get_current_user),
+) -> UsageBillingTrend:
+    """
+    Show the facility's usage charge month by month.
+
+    This is the month-end demand view: the same three patient-day channels,
+    totalled for each month so the trend and the running total are visible at a
+    glance, using the same figures as the HR Aifya Usage screen.
+
+    @param months: Number of months to include
+    @param end_month: Last month to include as YYYY-MM
+    @param rate_cents: Optional rate override in KES cents
+    @param db: Database session
+    @param current_user: Authenticated user from JWT
+    @returns Rolling usage charges, oldest month first
+    """
+    service = UsageBillingService(db)
+    try:
+        return await service.build_trend(
+            facility_id=current_user.facility_id,
+            months=months,
+            rate_cents=rate_cents,
+            end_month=end_month,
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)
+        ) from exc

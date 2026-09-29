@@ -22,8 +22,10 @@ from app.schemas.radiology import (
 from app.services.service_billing import (
     IMAGING_ORDER,
     ServiceBillingService,
+    charge_status,
     post_service_charge,
 )
+from app.services.worklist_context import staff_display_names
 
 
 class RadiologyService:
@@ -182,9 +184,19 @@ class RadiologyService:
         result = await self.db.execute(query)
         rows = result.all()
 
+        # The department must know who ordered the study and whether this
+        # specific request has been paid for before it books the room.
+        charges = await ServiceBillingService(self.db).charges_for_encounters(
+            [order.encounter_id for order, *_rest in rows], facility_id
+        )
+        names = await staff_display_names(
+            self.db, [order.ordered_by for order, *_rest in rows]
+        )
+
         items: list[ImagingWorklistItem] = []
         for order, first_name, last_name, mrn, result_status, is_critical in rows:
             patient_name = f"{first_name or ''} {last_name or ''}".strip() or None
+            charge = charges.get((IMAGING_ORDER, order.id))
             items.append(
                 ImagingWorklistItem(
                     id=order.id,
@@ -195,16 +207,24 @@ class RadiologyService:
                     patient_name=patient_name,
                     patient_mrn=mrn,
                     ordered_by=order.ordered_by,
+                    ordered_by_name=names.get(order.ordered_by),
                     modality=order.modality,
                     body_part=order.body_part,
                     laterality=order.laterality,
                     study_description=order.study_description,
                     priority=order.priority,
                     status=order.status,
+                    clinical_indication=order.clinical_indication,
                     contrast_required=order.contrast_required,
                     has_result=result_status is not None,
                     result_status=result_status,
                     is_critical=is_critical if is_critical is not None else False,
+                    charge_total_cents=charge.total_cents if charge else None,
+                    charge_paid_cents=charge.paid_cents if charge else None,
+                    charge_balance_cents=(
+                        charge.balance_cents if charge else None
+                    ),
+                    charge_status=charge_status(charge),
                     scheduled_at=order.scheduled_at,
                     room=order.room,
                     created_at=order.created_at,

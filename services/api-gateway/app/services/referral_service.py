@@ -92,16 +92,65 @@ class ReferralService:
             )
             referring_facility_name = facility_result.scalar_one_or_none()
 
+        # Address the referral to a register facility when the sender only
+        # typed the name. The receiving hospital finds referrals through
+        # receiving_facility_id, so a name-only referral never arrives.
+        receiving_facility_id = data.receiving_facility_id
+        if data.direction == "outgoing" and receiving_facility_id is None:
+            wanted_name = (data.receiving_facility_name or "").strip()
+            wanted_mfl = (data.receiving_facility_mfl or "").strip()
+            if wanted_name or wanted_mfl:
+                match_stmt = select(Facility.id).where(
+                    Facility.is_active == True,  # noqa: E712
+                )
+                if wanted_name and wanted_mfl:
+                    match_stmt = match_stmt.where(
+                        or_(
+                            func.lower(Facility.name) == wanted_name.lower(),
+                            Facility.mfl_code == wanted_mfl,
+                        )
+                    )
+                elif wanted_name:
+                    match_stmt = match_stmt.where(
+                        func.lower(Facility.name) == wanted_name.lower()
+                    )
+                else:
+                    match_stmt = match_stmt.where(
+                        Facility.mfl_code == wanted_mfl
+                    )
+                matched_id = (
+                    await self.db.execute(match_stmt.limit(1))
+                ).scalar_one_or_none()
+                if matched_id is not None and matched_id != facility_id:
+                    receiving_facility_id = matched_id
+
         now = datetime.now(UTC)
         date_part = now.strftime("%Y%m%d")
-        count_result = await self.db.execute(
-            select(func.count(Referral.id)).where(
-                Referral.facility_id == facility_id,
-                Referral.referral_number.like(f"REF-{date_part}-%"),
-                Referral.is_deleted == False,  # noqa: E712
+        # The unique key covers voided referrals too, so counting the live ones
+        # would hand back a number a soft-deleted row still holds - and the
+        # insert then fails outright. The highest number already used today is
+        # the only safe starting point, deleted or not.
+        highest = (
+            await self.db.execute(
+                select(func.max(Referral.referral_number)).where(
+                    Referral.facility_id == facility_id,
+                    Referral.referral_number.like(f"REF-{date_part}-%"),
+                )
             )
-        )
-        seq = (count_result.scalar() or 0) + 1
+        ).scalar_one_or_none()
+        try:
+            seq = int(highest.rsplit("-", 1)[1]) + 1 if highest else 1
+        except (AttributeError, IndexError, ValueError):
+            # Any number that does not fit the dated pattern cannot be compared
+            # against; fall back to the count so a referral is still created.
+            seq = (
+                await self.db.execute(
+                    select(func.count(Referral.id)).where(
+                        Referral.facility_id == facility_id,
+                        Referral.referral_number.like(f"REF-{date_part}-%"),
+                    )
+                )
+            ).scalar_one() + 1
         referral_number = f"REF-{date_part}-{seq:04d}"
 
         referral = Referral(
@@ -117,7 +166,7 @@ class ReferralService:
             referring_facility_name=referring_facility_name,
             receiving_doctor_id=data.receiving_doctor_id,
             receiving_department_id=data.receiving_department_id,
-            receiving_facility_id=data.receiving_facility_id,
+            receiving_facility_id=receiving_facility_id,
             receiving_facility_name=data.receiving_facility_name,
             receiving_facility_mfl=data.receiving_facility_mfl,
             reason=data.reason,
@@ -166,7 +215,7 @@ class ReferralService:
                 Patient.first_name.label("p_first"),
                 Patient.last_name.label("p_last"),
             )
-            .join(Patient, Referral.patient_id == Patient.id)
+            .outerjoin(Patient, Referral.patient_id == Patient.id)
             .where(
                 Referral.is_deleted == False,  # noqa: E712
                 or_(
@@ -203,6 +252,7 @@ class ReferralService:
                 referring_facility_name=r.referring_facility_name,
                 receiving_facility_name=r.receiving_facility_name,
                 referral_date=r.referral_date,
+                emergency_visit_id=r.emergency_visit_id,
                 status=r.status,
             )
             for r, pf, pl in rows

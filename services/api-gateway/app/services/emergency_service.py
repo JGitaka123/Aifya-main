@@ -4,6 +4,7 @@ from datetime import UTC, date, datetime
 from sqlalchemy import case, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.services.numbering import highest_sequence
 from app.models.base import EventBase
 from app.models.emergency import EmergencyVisit
 from app.models.encounter import Encounter
@@ -19,6 +20,7 @@ from app.schemas.emergency import (
     EmergencyListItem,
     EmergencySummary,
     EmergencyVisitCreate,
+    StageRequest,
     TriageRequest,
 )
 from app.schemas.ipd import AdmissionCreate, TransferToEmergencyRequest
@@ -33,6 +35,52 @@ TRIAGE_COLORS = {
     "standard": "yellow",
     "non_urgent": "green",
     "dead": "blue",
+}
+
+# SATS category -> queue priority. Kept identical to EncounterService so an
+# emergency patient is ordered the same way in the clinician's worklist.
+TRIAGE_PRIORITY = {
+    "emergency": 5,
+    "urgent": 4,
+    "standard": 3,
+    "non_urgent": 2,
+    "dead": 1,
+}
+
+# Emergency disposition -> how the shared encounter ends. The encounter is the
+# record the Clinical tab reads, so an emergency episode has to close it too.
+ENCOUNTER_DISPOSITION = {
+    "discharge": "discharged",
+    "admit": "admitted",
+    "transfer": "referred",
+    "deceased": "deceased",
+    "left_ama": "discharged",
+}
+ENCOUNTER_STATUS_BY_DISPOSITION = {
+    "discharge": "completed",
+    "transfer": "completed",
+    "deceased": "completed",
+    "left_ama": "completed",
+}
+
+# Emergency visit statuses that close the episode. Nothing moves a visit out
+# of one of these; a new visit is registered if the patient comes back.
+TERMINAL_STATUSES: tuple[str, ...] = (
+    "admitted",
+    "discharged",
+    "transferred",
+    "deceased",
+    "left_against_advice",
+)
+
+# The ED pathway, stage by stage. A visit only reaches a stage by being moved
+# there, so the ward board never shows a patient in Observation who was never
+# put in Observation, and assigning a doctor is not recorded as treatment.
+ALLOWED_STAGE_TRANSITIONS: dict[str, tuple[str, ...]] = {
+    "arrived": ("triaged",),
+    "triaged": ("in_treatment",),
+    "in_treatment": ("observation",),
+    "observation": ("in_treatment",),
 }
 
 
@@ -72,14 +120,18 @@ class EmergencyService:
         """
         now = datetime.now(UTC)
         date_part = now.strftime("%Y%m%d")
-        count_result = await self.db.execute(
-            select(func.count(EmergencyVisit.id)).where(
-                EmergencyVisit.facility_id == facility_id,
-                EmergencyVisit.visit_number.like(f"ER-{date_part}-%"),
-                EmergencyVisit.is_deleted == False,  # noqa: E712
+        # The unique key covers retired rows too, so counting only the live ones
+        # hands back a number already in use. Start from the highest number
+        # issued, deleted or not.
+        highest = (
+            await self.db.execute(
+                select(highest_sequence(EmergencyVisit.visit_number)).where(
+                    EmergencyVisit.facility_id == facility_id,
+                    EmergencyVisit.visit_number.like(f"ER-{date_part}-%"),
+                )
             )
-        )
-        seq = (count_result.scalar() or 0) + 1
+        ).scalar_one_or_none()
+        seq = (highest or 0) + 1
         visit_number = f"ER-{date_part}-{seq:04d}"
 
         if encounter_id is None:
@@ -305,6 +357,7 @@ class EmergencyService:
         if data.notes:
             visit.notes = (visit.notes or "") + f"\n[Triage] {data.notes}"
         visit.updated_by = triaged_by
+        await self._push_triage_to_encounter(visit, triaged_by)
         await self.db.flush()
         await self.db.refresh(visit)
         return visit
@@ -319,6 +372,10 @@ class EmergencyService:
         """
         Assign a doctor to an emergency visit.
 
+        Assignment names the clinician who owns the patient. It deliberately
+        does not change the visit's stage: treatment starts when someone starts
+        it, not when a name is attached.
+
         @param visit_id: Visit UUID
         @param data: Assignment data
         @param facility_id: Facility UUID
@@ -330,9 +387,62 @@ class EmergencyService:
             return None
 
         visit.assigned_doctor_id = data.doctor_id
-        visit.status = "in_treatment"
-        visit.treatment_started_at = datetime.now(UTC)
         visit.updated_by = assigned_by
+        await self._claim_encounter_for_doctor(visit, data.doctor_id, assigned_by)
+        await self.db.flush()
+        await self.db.refresh(visit)
+        return visit
+
+    async def set_stage(
+        self,
+        visit_id: uuid.UUID,
+        data: StageRequest,
+        facility_id: uuid.UUID,
+        moved_by: uuid.UUID,
+    ) -> EmergencyVisit | None:
+        """
+        Move an emergency visit to the next stage of the ED pathway.
+
+        The pathway runs Arrived -> Triaged -> In treatment <-> Observation ->
+        Admitted / Discharged. Every step is recorded on its own, so a visit
+        never displays a stage it has not reached and can never skip one.
+
+        @param visit_id: Visit UUID
+        @param data: Target stage and an optional note
+        @param facility_id: Facility UUID
+        @param moved_by: Staff UUID moving the patient
+        @returns Updated visit or None
+        @raises ValueError: When the move is not this visit's next stage
+        """
+        visit = await self._get_visit(visit_id, facility_id)
+        if not visit:
+            return None
+
+        if visit.status in TERMINAL_STATUSES:
+            raise ValueError(
+                f"{visit.visit_number} is {visit.status}; the emergency episode "
+                "is closed and cannot be moved to another stage."
+            )
+
+        allowed = ALLOWED_STAGE_TRANSITIONS.get(visit.status, ())
+        if data.status not in allowed:
+            next_step = ", ".join(allowed) if allowed else "no further stage"
+            raise ValueError(
+                f"{visit.visit_number} is {visit.status} and can only move to "
+                f"{next_step}."
+            )
+
+        now = datetime.now(UTC)
+        visit.status = data.status
+        if data.status == "in_treatment":
+            visit.treatment_started_at = visit.treatment_started_at or now
+            if visit.treatment_area == "observation":
+                visit.treatment_area = None
+        else:
+            visit.treatment_area = "observation"
+        if data.notes:
+            visit.notes = (visit.notes or "") + f"\n[{data.status}] {data.notes}"
+        visit.updated_by = moved_by
         await self.db.flush()
         await self.db.refresh(visit)
         return visit
@@ -395,6 +505,9 @@ class EmergencyService:
         elif data.admitted_to_ward_id:
             visit.admitted_to_ward_id = data.admitted_to_ward_id
         visit.updated_by = disposed_by
+        await self._close_encounter_after_disposition(
+            visit, data, now, disposed_by
+        )
         await self.db.flush()
         await self.db.refresh(visit)
 
@@ -414,6 +527,104 @@ class EmergencyService:
         )
         self.db.add(event)
         return visit
+
+    async def _emergency_encounter(
+        self, visit: EmergencyVisit
+    ) -> Encounter | None:
+        """
+        The shared encounter behind an emergency visit.
+
+        Emergency and Clinical are two views of one episode. Everything the
+        clinician's worklist reads - triage, priority, the attending doctor and
+        the final disposition - lives on the encounter, so it has to be kept in
+        step with the emergency record.
+
+        @param visit: Emergency visit
+        @returns The linked encounter, or None for a visit without one
+        """
+        if visit.encounter_id is None:
+            return None
+        return await self.db.get(Encounter, visit.encounter_id)
+
+    async def _push_triage_to_encounter(
+        self, visit: EmergencyVisit, triaged_by: uuid.UUID
+    ) -> None:
+        """
+        Mirror SATS triage onto the shared encounter.
+
+        Without this the clinician's worklist cannot order an emergency patient
+        by severity, and the OPD arrival check never sees them as triaged.
+
+        @param visit: Triaged emergency visit
+        @param triaged_by: Staff UUID who triaged
+        """
+        encounter = await self._emergency_encounter(visit)
+        if encounter is None:
+            return
+        encounter.triage_category = visit.triage_category
+        encounter.priority = max(
+            encounter.priority or 0,
+            TRIAGE_PRIORITY.get(visit.triage_category, 2),
+        )
+        encounter.triaged_at = visit.triage_time
+        if not encounter.chief_complaint and visit.chief_complaint:
+            encounter.chief_complaint = visit.chief_complaint
+        encounter.updated_by = triaged_by
+
+    async def _claim_encounter_for_doctor(
+        self,
+        visit: EmergencyVisit,
+        doctor_id: uuid.UUID,
+        assigned_by: uuid.UUID,
+    ) -> None:
+        """
+        Put the assigned emergency doctor on the shared encounter.
+
+        This is what makes the patient appear under "My Patients" in the
+        Clinical tab instead of only inside the emergency queue.
+
+        @param visit: Emergency visit being assigned
+        @param doctor_id: Staff UUID of the doctor taking the patient
+        @param assigned_by: Staff UUID making the assignment
+        """
+        encounter = await self._emergency_encounter(visit)
+        if encounter is None:
+            return
+        encounter.attending_doctor_id = doctor_id
+        encounter.status = "in_consultation"
+        encounter.updated_by = assigned_by
+
+    async def _close_encounter_after_disposition(
+        self,
+        visit: EmergencyVisit,
+        data: DispositionRequest,
+        now: datetime,
+        disposed_by: uuid.UUID,
+    ) -> None:
+        """
+        Close the shared encounter when the emergency visit ends.
+
+        A discharged or transferred patient has left the clinician's day, so the
+        encounter moves to a terminal status and drops off the worklist. An
+        admission keeps "admitted", which the IPD service owns.
+
+        @param visit: Emergency visit being dispositioned
+        @param data: Disposition data
+        @param now: Disposition time
+        @param disposed_by: Staff UUID recording the disposition
+        """
+        encounter = await self._emergency_encounter(visit)
+        if encounter is None:
+            return
+        encounter.disposition = ENCOUNTER_DISPOSITION.get(
+            data.disposition, "discharged"
+        )
+        terminal_status = ENCOUNTER_STATUS_BY_DISPOSITION.get(data.disposition)
+        if terminal_status is not None:
+            encounter.status = terminal_status
+            encounter.discharge_date = now
+            encounter.discharge_summary = data.disposition_notes
+        encounter.updated_by = disposed_by
 
     async def _admit_from_emergency(
         self,

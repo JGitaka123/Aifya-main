@@ -226,3 +226,57 @@ class ReportsSummary(BaseModel):
     moh_templates: int = 0
     generated_today: int = 0
     generated_month: int = 0
+
+
+# ── Facility Usage Billing ──────────────────────────────────────────────────
+
+
+class UsageBillingLine(BaseModel):
+    """One metered event type on the facility's monthly usage charge."""
+
+    key: str
+    label: str
+    quantity: int
+    rate_cents: int
+    amount_cents: int
+
+
+class UsageBillingReport(BaseModel):
+    """
+    What the facility owes Aifya for one billing month.
+
+    Every quantity is metered independently, then multiplied by the same flat
+    rate, so the total is readable line by line rather than as a lump sum.
+    """
+
+    facility_id: uuid.UUID
+    month: str
+    date_from: date
+    date_to: date
+    currency: str
+    rate_cents: int
+    lines: list[UsageBillingLine]
+    total_quantity: int
+    total_cents: int
+    due_date: date
+    generated_at: datetime
+
+
+class UsageBillingMonth(BaseModel):
+    """One month in the rolling usage-billing trend."""
+
+    month: str
+    reception_registrations: int
+    emergency_registrations: int
+    ipd_bed_days: int
+    total_quantity: int
+    total_cents: int
+
+
+class UsageBillingTrend(BaseModel):
+    """Rolling monthly usage charges, oldest first."""
+
+    currency: str
+    rate_cents: int
+    months: list[UsageBillingMonth]
+    total_cents: int

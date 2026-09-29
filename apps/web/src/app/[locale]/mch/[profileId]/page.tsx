@@ -54,6 +54,11 @@ export default function ANCProfileDetailPage() {
   const t = useTranslations("mch");
   const tc = useTranslations("common");
 
+  // Values rendered below come from the database. Fall back to a readable
+  // label when a value has no translation instead of raising MISSING_MESSAGE.
+  const mchLabel = (key: string) =>
+    t.has(key) ? t(key as Parameters<typeof t>[0]) : key.replace(/_/g, " ");
+
   const { data: detail, isLoading } = useANCProfileDetail(profileId);
   const addVisit = useAddANCVisit();
   const recordDelivery = useRecordDelivery();
@@ -278,7 +283,7 @@ export default function ANCProfileDetailPage() {
                   : "bg-green-100 text-green-800 dark:bg-green-950 dark:text-green-200"
             )}
           >
-            {t(`risk_${profile.risk_level}` as "risk_low" | "risk_moderate" | "risk_high")}
+            {mchLabel(`risk_${profile.risk_level}`)}
           </span>
         </div>
 
@@ -318,7 +323,7 @@ export default function ANCProfileDetailPage() {
             <div>
               <span className="text-muted-foreground">{t("hivStatus")}:</span>{" "}
               <span className={cn("text-foreground", profile.hiv_status === "positive" && "text-red-600 dark:text-red-400")}>
-                {t(`hiv_${profile.hiv_status}` as "hiv_positive" | "hiv_negative" | "hiv_unknown")}
+                {mchLabel(`hiv_${profile.hiv_status}`)}
               </span>
               {profile.on_art && (
                 <span className="ml-1 text-xs text-green-600 dark:text-green-400">({t("onART")})</span>
@@ -350,16 +355,20 @@ export default function ANCProfileDetailPage() {
             </div>
             <div>
               <span className="text-muted-foreground">{t("modeOfDelivery")}:</span>{" "}
-              <span className="text-foreground">{t(`delivery_${delivery.mode_of_delivery}` as "delivery_svd" | "delivery_elective_cs" | "delivery_emergency_cs")}</span>
+              <span className="text-foreground">
+                {mchLabel(`delivery_${delivery.mode_of_delivery}`)}
+              </span>
             </div>
             <div>
               <span className="text-muted-foreground">{t("babyOutcome")}:</span>{" "}
-              <span className="text-foreground">{t(`outcome_${delivery.baby_outcome}` as "outcome_live_birth" | "outcome_fresh_stillbirth")}</span>
+              <span className="text-foreground">
+                {mchLabel(`outcome_${delivery.baby_outcome}`)}
+              </span>
             </div>
             {delivery.baby_sex && (
               <div>
                 <span className="text-muted-foreground">{t("babySex")}:</span>{" "}
-                <span className="text-foreground">{t(delivery.baby_sex as "male" | "female")}</span>
+                <span className="text-foreground">{mchLabel(delivery.baby_sex)}</span>
               </div>
             )}
             {delivery.birth_weight_grams && (
@@ -558,7 +567,7 @@ export default function ANCProfileDetailPage() {
               <select value={deliveryMode} onChange={(e) => setDeliveryMode(e.target.value)}
                 className="w-full rounded-lg border border-input bg-background px-3 py-2 text-sm text-foreground">
                 <option value="svd">{t("delivery_svd")}</option>
-                <option value="assisted_vaginal">{t("delivery_assisted")}</option>
+                <option value="assisted_vaginal">{t("delivery_assisted_vaginal")}</option>
                 <option value="elective_cs">{t("delivery_elective_cs")}</option>
                 <option value="emergency_cs">{t("delivery_emergency_cs")}</option>
                 <option value="breech">{t("delivery_breech")}</option>
@@ -676,7 +685,7 @@ export default function ANCProfileDetailPage() {
                   </span>
                 )}
                 {visit.fetal_presentation && (
-                  <span>{t("presentation")}: {t(visit.fetal_presentation as "cephalic" | "breech")}</span>
+                  <span>{t("presentation")}: {mchLabel(visit.fetal_presentation)}</span>
                 )}
               </div>
               {/* Interventions */}

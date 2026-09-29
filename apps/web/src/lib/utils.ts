@@ -24,6 +24,23 @@ export function formatKES(cents: number): string {
 }
 
 /**
+ * Today as YYYY-MM-DD in the facility timezone (Africa/Nairobi).
+ *
+ * `new Date().toISOString()` is UTC, so between 00:00 and 03:00 East
+ * African time it reports yesterday - wrong for a night-shift desk.
+ *
+ * @returns ISO date string, e.g. "2026-09-24"
+ */
+export function todayISO(): string {
+  return new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Africa/Nairobi",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(new Date());
+}
+
+/**
  * Format a date to Africa/Nairobi timezone.
  * @param date - ISO date string or Date object
  * @returns Formatted date string

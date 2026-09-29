@@ -4,6 +4,7 @@ from datetime import UTC, date, datetime
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.services.numbering import highest_sequence
 from app.models.clinical_trial import (
     ClinicalTrial,
     TrialAdverseEvent,
@@ -140,13 +141,17 @@ class ClinicalTrialService:
         @param created_by: Staff UUID
         @returns Created trial
         """
-        count = await self.db.execute(
-            select(func.count(ClinicalTrial.id)).where(
-                ClinicalTrial.facility_id == facility_id,
-                ClinicalTrial.is_deleted == False,  # noqa: E712
+        # The unique key covers retired rows too, so counting only the live ones
+        # hands back a number already in use. Start from the highest number
+        # issued, deleted or not.
+        highest = (
+            await self.db.execute(
+                select(highest_sequence(ClinicalTrial.trial_code)).where(
+                    ClinicalTrial.facility_id == facility_id,
+                )
             )
-        )
-        seq = (count.scalar() or 0) + 1
+        ).scalar_one_or_none()
+        seq = (highest or 0) + 1
         trial_code = f"TRL-{seq:04d}"
 
         trial = ClinicalTrial(

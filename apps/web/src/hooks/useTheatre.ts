@@ -100,7 +100,14 @@ export function useUpdateCaseStatus(caseId: string) {
         idempotentApiFetch(`/api/v1/theatre/cases/${caseId}/status?status=${data.status}`, { method: "PATCH" }),
       onSuccess: () => qc.invalidateQueries({ queryKey: THEATRE_KEYS.all }),
     },
-    { url: `${API_URL}/theatre/cases/${caseId}/status`, method: "PATCH" }
+    {
+      // The status travels as a query parameter, so the queued replay has to
+      // carry it too - otherwise an offline update comes back 422 and is lost.
+      url: (data: { status: string }) =>
+        `${API_URL}/theatre/cases/${caseId}/status?status=${encodeURIComponent(data.status)}`,
+      method: "PATCH",
+      body: () => ({}),
+    }
   );
 }
 

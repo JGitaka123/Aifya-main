@@ -68,16 +68,25 @@ export interface ImagingWorklistItem {
   patient_name: string | null;
   patient_mrn: string | null;
   ordered_by: string;
+  /** Display name of the clinician who ordered the study. */
+  ordered_by_name: string | null;
   modality: ImagingModality;
   body_part: string;
   laterality: Laterality | null;
   study_description: string;
   priority: ImagingPriority;
   status: ImagingOrderStatus;
+  /** Clinician's reason for the study, shown to the department. */
+  clinical_indication: string | null;
   contrast_required: boolean;
   has_result: boolean;
   result_status: ImagingResultStatus | null;
   is_critical: boolean;
+  charge_total_cents: number | null;
+  charge_paid_cents: number | null;
+  charge_balance_cents: number | null;
+  /** not_charged when the study never reached the bill (free/uncatalogued). */
+  charge_status: "not_charged" | "paid" | "partial" | "unpaid";
   scheduled_at: string | null;
   room: string | null;
   created_at: string;

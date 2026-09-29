@@ -1,15 +1,20 @@
 "use client";
 
-import { useQueryClient } from "@tanstack/react-query";
+import { useQueryClient, type QueryClient } from "@tanstack/react-query";
 import { apiClient } from "@/lib/api-client";
 import { useOfflineQuery } from "@/hooks/useOfflineQuery";
 import { useOfflineMutation } from "@/hooks/useOfflineMutation";
 import { generateId } from "@/lib/utils";
 import type {
+  AssignableRoleListResponse,
   HRSummary,
+  StaffAccessResponse,
+  StaffDirectoryItem,
   StaffDirectoryResponse,
+  StaffPasswordUpdate,
   StaffProfileResponse,
   StaffProfileCreate,
+  StaffRoleUpdate,
   ShiftResponse,
   ShiftCreate,
   ShiftAssignmentListResponse,
@@ -48,21 +53,25 @@ export function useHRSummary() {
  * @param role - Optional role filter
  * @param departmentId - Optional department filter
  * @param search - Optional search query
+ * @param includeInactive - Include deactivated staff (needed by the access screen
+ *   so an employee HR switched off can be switched back on)
  * @returns Query result with staff directory
  */
 export function useStaffDirectory(
   role?: string,
   departmentId?: string,
-  search?: string
+  search?: string,
+  includeInactive = false
 ) {
   const params = new URLSearchParams();
   if (role) params.set("role", role);
   if (departmentId) params.set("department_id", departmentId);
   if (search) params.set("search", search);
+  if (includeInactive) params.set("include_inactive", "true");
   const qs = params.toString();
 
   return useOfflineQuery<StaffDirectoryResponse>({
-    queryKey: ["hr", "staff", role, departmentId, search],
+    queryKey: ["hr", "staff", role, departmentId, search, includeInactive],
     queryFn: () =>
       apiClient.get<StaffDirectoryResponse>(
         `/hr/staff${qs ? `?${qs}` : ""}`
@@ -109,6 +118,120 @@ export function useUpsertProfile(staffId: string) {
       },
     },
     { url: `/api/v1/hr/staff/${staffId}/profile`, method: "PUT" },
+  );
+}
+
+// Staff access (role + login)
+
+/**
+ * Refresh every screen that lists staff.
+ *
+ * The HR directory and Settings -> Team render the same people under different
+ * query keys, so an access change made through one of them has to invalidate
+ * both, or the other screen keeps showing the state from before the edit.
+ *
+ * @param qc - Query client from the calling hook
+ */
+function invalidateStaffLists(qc: QueryClient): void {
+  qc.invalidateQueries({ queryKey: ["hr", "staff"] });
+  qc.invalidateQueries({ queryKey: ["settings", "staff"] });
+}
+
+/**
+ * Hook for fetching the roles HR may assign.
+ *
+ * The picker is built from this list rather than a hardcoded one, so it can
+ * never offer a role the API would refuse.
+ *
+ * @returns Query result with the assignable roles and their access
+ */
+export function useAssignableRoles() {
+  return useOfflineQuery<AssignableRoleListResponse>({
+    queryKey: ["hr", "roles"],
+    queryFn: () => apiClient.get<AssignableRoleListResponse>("/hr/roles"),
+    // The catalogue changes only with a release; no need to poll it.
+    staleTime: 60 * 60 * 1000,
+  });
+}
+
+/**
+ * Hook for switching a staff member's sign-in on or off.
+ *
+ * Deactivating them takes their login away with it, so this is how HR revokes
+ * access when someone leaves.
+ *
+ * @returns Mutation taking the staff id and the desired active state
+ */
+export function useSetStaffActive() {
+  const qc = useQueryClient();
+  return useOfflineMutation<
+    StaffDirectoryItem,
+    { staffId: string; isActive: boolean }
+  >(
+    {
+      mutationFn: ({ staffId, isActive }) =>
+        apiClient.patch<StaffDirectoryItem>(
+          `/hr/staff/${staffId}/active`,
+          { is_active: isActive },
+          generateId(),
+        ),
+      onSuccess: () => {
+        invalidateStaffLists(qc);
+      },
+    },
+    { url: "/api/v1/hr/staff/active", method: "PATCH" },
+  );
+}
+
+/**
+ * Hook for changing which role a staff member holds.
+ *
+ * @returns Mutation taking the staff id and the new role
+ */
+export function useSetStaffRole() {
+  const qc = useQueryClient();
+  return useOfflineMutation<
+    StaffDirectoryItem,
+    { staffId: string; data: StaffRoleUpdate }
+  >(
+    {
+      mutationFn: ({ staffId, data }) =>
+        apiClient.patch<StaffDirectoryItem>(
+          `/hr/staff/${staffId}/role`,
+          data,
+          generateId(),
+        ),
+      onSuccess: () => {
+        invalidateStaffLists(qc);
+      },
+    },
+    { url: "/api/v1/hr/staff/role", method: "PATCH" },
+  );
+}
+
+/**
+ * Hook for setting or resetting a staff member's password.
+ *
+ * @returns Mutation taking the staff id and the new password
+ */
+export function useSetStaffPassword() {
+  const qc = useQueryClient();
+  return useOfflineMutation<
+    StaffAccessResponse,
+    { staffId: string; data: StaffPasswordUpdate }
+  >(
+    {
+      mutationFn: ({ staffId, data }) =>
+        apiClient.post<StaffAccessResponse>(
+          `/hr/staff/${staffId}/password`,
+          data,
+          generateId(),
+        ),
+      onSuccess: () => {
+        invalidateStaffLists(qc);
+      },
+    },
+    { url: "/api/v1/hr/staff/password", method: "POST" },
   );
 }
 

@@ -13,6 +13,7 @@ from app.schemas.patient import (
     DuplicateCheckResponse,
     DuplicateMatch,
     PatientCreate,
+    PatientHistoryResponse,
     PatientListResponse,
     PatientResponse,
     PatientUpdate,
@@ -225,3 +226,44 @@ async def get_patient_timeline(
         items=[EventResponse.model_validate(e) for e in events],
         total=total,
     )
+
+
+@router.get("/{patient_id}/history", response_model=PatientHistoryResponse)
+async def get_patient_history(
+    patient_id: uuid.UUID,
+    exclude_encounter_id: uuid.UUID | None = Query(
+        None,
+        description="Encounter to omit, so the current visit is not repeated",
+    ),
+    limit: int = Query(10, ge=1, le=50),
+    db: AsyncSession = Depends(get_db),
+    current_user: CurrentUser = Depends(require_patient_read),
+) -> PatientHistoryResponse:
+    """
+    Get a patient's clinical history for the point of care.
+
+    Returns allergies, chronic conditions, blood group and the previous
+    visits with their diagnoses and prescriptions. A clinician who has just
+    been handed a redirected patient calls this to see prior care without
+    leaving the consultation screen.
+
+    @param patient_id: Patient UUID
+    @param exclude_encounter_id: Encounter to omit (the one being worked on)
+    @param limit: Max previous visits to return
+    @param db: Database session
+    @param current_user: Authenticated user from JWT
+    @returns Clinical history
+    """
+    service = PatientService(db)
+    history = await service.get_clinical_history(
+        patient_id=patient_id,
+        facility_id=current_user.facility_id,
+        exclude_encounter_id=exclude_encounter_id,
+        limit=limit,
+    )
+    if history is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Patient not found",
+        )
+    return history

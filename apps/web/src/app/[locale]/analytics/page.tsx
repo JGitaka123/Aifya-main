@@ -44,7 +44,7 @@ function urgencyVariant(
       return "error";
     case "high":
       return "warning";
-    case "medium":
+    case "moderate":
       return "info";
     case "low":
       return "success";
@@ -59,11 +59,9 @@ function urgencyVariant(
  */
 function riskBarColor(level: RiskLevel): string {
   switch (level) {
-    case "critical":
-      return "bg-red-500 dark:bg-red-400";
     case "high":
       return "bg-orange-500 dark:bg-orange-400";
-    case "medium":
+    case "moderate":
       return "bg-amber-500 dark:bg-amber-400";
     case "low":
       return "bg-green-500 dark:bg-green-400";
@@ -80,11 +78,9 @@ function riskVariant(
   level: RiskLevel
 ): "error" | "warning" | "info" | "success" {
   switch (level) {
-    case "critical":
-      return "error";
     case "high":
       return "warning";
-    case "medium":
+    case "moderate":
       return "info";
     case "low":
       return "success";
@@ -116,12 +112,13 @@ function formatKES(cents: number): string {
  */
 export default function AnalyticsPage() {
   const t = useTranslations("analytics");
-  const { data: dashboard, isLoading } = useAnalyticsDashboard();
+  const { data: dashboard, isLoading, isError, refetch } =
+    useAnalyticsDashboard();
 
   // Derived summary stats
   const readmissionAlertCount =
     dashboard?.readmission_risks?.filter(
-      (r) => r.risk_level === "high" || r.risk_level === "critical"
+      (r) => r.risk_level === "high" || r.risk_level === "moderate"
     ).length ?? 0;
 
   const avgOccupancy =
@@ -169,7 +166,7 @@ export default function AnalyticsPage() {
     const urgencyOrder: Record<string, number> = {
       critical: 0,
       high: 1,
-      medium: 2,
+      moderate: 2,
       low: 3,
     };
     return (urgencyOrder[a.urgency] ?? 4) - (urgencyOrder[b.urgency] ?? 4);
@@ -188,6 +185,26 @@ export default function AnalyticsPage() {
         subtitle={t("subtitle")}
         breadcrumbs={[{ label: t("title") }]}
       />
+
+      {/* Without this, a failed or unlicensed request would silently render
+          every figure as zero, which looks like real data. */}
+      {isError && (
+        <div className="flex flex-col gap-3 rounded-lg border border-red-300 bg-red-50 px-4 py-3 dark:border-red-800 dark:bg-red-950 sm:flex-row sm:items-center sm:justify-between">
+          <div className="flex items-center gap-2">
+            <AlertTriangle className="h-4 w-4 shrink-0 text-red-600 dark:text-red-400" />
+            <p className="text-sm text-red-800 dark:text-red-200">
+              {t("loadFailed")}
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={() => refetch()}
+            className="inline-flex items-center justify-center rounded-lg border border-red-300 bg-white px-3 py-1.5 text-sm font-medium text-red-700 transition-colors hover:bg-red-100 dark:border-red-800 dark:bg-red-900/40 dark:text-red-100 dark:hover:bg-red-900/70"
+          >
+            {t("tryAgain")}
+          </button>
+        </div>
+      )}
 
       {/* Summary stat cards */}
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
@@ -459,7 +476,7 @@ export default function AnalyticsPage() {
                 >
                   <div className="flex items-center justify-between">
                     <p className="text-sm font-medium text-foreground">
-                      {risk.patient_name}
+                      {risk.patient_name ?? risk.patient_id.slice(0, 8)}
                     </p>
                     <StatusBadge
                       variant={riskVariant(risk.risk_level)}

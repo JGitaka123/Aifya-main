@@ -1,42 +1,25 @@
 // ── Predictive Analytics Types ──────────────────────────────────────────────
 
 /** Risk level for readmission prediction. */
-export type RiskLevel = "low" | "medium" | "high" | "critical";
+export type RiskLevel = "low" | "moderate" | "high";
 
 /** Urgency level for stockout predictions. */
-export type StockoutUrgency = "low" | "medium" | "high" | "critical";
-
-/** Recommended action for no-show predictions. */
-export type NoShowAction =
-  | "standard_reminder"
-  | "phone_call"
-  | "double_book"
-  | "reschedule";
+export type StockoutUrgency = "low" | "moderate" | "high" | "critical";
 
 // ── Readmission Risk ────────────────────────────────────────────────────────
-
-/** Contributing factor to readmission risk. */
-export interface ContributingFactor {
-  /** Factor name (e.g., "prior_admissions", "chronic_condition") */
-  factor: string;
-  /** Impact weight 0.0–1.0 */
-  weight: number;
-  /** Human-readable description */
-  description: string;
-}
 
 /** AI-predicted readmission risk for a patient. */
 export interface ReadmissionRisk {
   /** Patient UUID */
   patient_id: string;
-  /** Patient name for display */
-  patient_name: string;
+  /** Patient display name (null when the patient record is unavailable) */
+  patient_name: string | null;
   /** Risk score 0.0–1.0 */
   risk_score: number;
   /** Categorical risk level */
   risk_level: RiskLevel;
   /** Factors contributing to the risk score */
-  contributing_factors: ContributingFactor[];
+  contributing_factors: string[];
   /** AI-recommended interventions to reduce readmission */
   recommended_interventions: string[];
 }
@@ -69,14 +52,14 @@ export interface NoShowPrediction {
   appointment_id: string;
   /** Patient UUID */
   patient_id: string;
-  /** Patient name for display */
-  patient_name: string;
+  /** Patient display name (optional; not returned by every endpoint) */
+  patient_name?: string | null;
   /** No-show probability 0.0–1.0 */
   no_show_probability: number;
   /** Factors contributing to no-show risk */
   risk_factors: string[];
   /** Recommended action to mitigate no-show */
-  recommended_action: NoShowAction;
+  recommended_action: string;
 }
 
 // ── Stockout Prediction ─────────────────────────────────────────────────────
@@ -101,14 +84,6 @@ export interface StockoutPrediction {
 
 // ── Revenue Forecast ────────────────────────────────────────────────────────
 
-/** Revenue component breakdown. */
-export interface RevenueComponent {
-  /** Component name (e.g., "consultation", "pharmacy", "lab") */
-  name: string;
-  /** Predicted revenue in KES cents */
-  amount_cents: number;
-}
-
 /** AI-predicted revenue for a future period. */
 export interface RevenueForecast {
   /** Period label (e.g., "2026-05", "2026-06") */
@@ -119,8 +94,8 @@ export interface RevenueForecast {
   confidence_lower: number;
   /** Upper bound of confidence interval in KES cents */
   confidence_upper: number;
-  /** Revenue breakdown by component */
-  components: RevenueComponent[];
+  /** Revenue breakdown by department name (KES cents) */
+  components: Record<string, number>;
 }
 
 // ── Analytics Dashboard ─────────────────────────────────────────────────────

@@ -1,3 +1,8 @@
+from app.models.aifya_usage import (
+    AifyaUsageConfig,
+    AifyaUsageDaily,
+    AifyaUsageInvoice,
+)
 from app.models.appointment import Appointment, DoctorSchedule
 from app.models.auth_account import AuthAccount
 from app.models.base import AuditMixin, EventBase
@@ -50,7 +55,7 @@ from app.models.inventory import (
     PurchaseOrderItem,
     Supplier,
 )
-from app.models.ipd import Admission, Bed, NursingNote, Ward
+from app.models.ipd import Admission, AdmissionOrder, Bed, NursingNote, Ward
 from app.models.lab import LabOrder, LabResult
 from app.models.licensing import (
     AppUpdate,
@@ -93,23 +98,29 @@ from app.models.pharmacy import (
     PharmacyItem,
     StockTransaction,
 )
+from app.models.point_of_care import PointOfCareTest
 from app.models.prescription import Prescription
 from app.models.radiology import ImagingOrder, ImagingResult
 from app.models.referral import Referral
 from app.models.referral_template import ReferralTemplate
 from app.models.report import GeneratedReport, ReportTemplate
+from app.models.role_permission import RolePermission
 from app.models.sms import SmsCampaign, SmsDeliveryLog
 from app.models.staff import Department, Staff
 from app.models.theatre import OperatingTheatre, SurgicalCase
 from app.models.vital import VitalSign
 
 __all__ = [
+    "AifyaUsageConfig",
+    "AifyaUsageDaily",
+    "AifyaUsageInvoice",
     "ANCProfile",
     "ANCVisit",
     # Finance
     "Account",
     "AccountingPeriod",
     "Admission",
+    "AdmissionOrder",
     "AppUpdate",
     "Appointment",
     "Attendance",
@@ -179,6 +190,7 @@ __all__ = [
     "PharmacyItem",
     "PostingRule",
     "PreAuthorization",
+    "PointOfCareTest",
     "Prescription",
     "PurchaseOrder",
     "PurchaseOrderItem",
@@ -186,6 +198,7 @@ __all__ = [
     "Referral",
     "ReferralTemplate",
     "ReportTemplate",
+    "RolePermission",
     "Shift",
     "ShiftAssignment",
     "SmsCampaign",

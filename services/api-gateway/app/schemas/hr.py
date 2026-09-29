@@ -87,8 +87,17 @@ class StaffDirectoryItem(BaseModel):
     email: str
     is_active: bool
     license_number: str | None
+    #: Whether this person currently has a sign-in. Their access is the role
+    #: above; this only says whether the credentials exist yet.
+    has_login: bool = False
 
     model_config = {"from_attributes": True}
+
+
+class StaffActiveUpdate(BaseModel):
+    """Schema for activating or deactivating a staff member."""
+
+    is_active: bool
 
 
 class StaffDirectoryResponse(BaseModel):
@@ -96,6 +105,46 @@ class StaffDirectoryResponse(BaseModel):
 
     items: list[StaffDirectoryItem]
     total: int
+
+
+# Staff access (role + login)
+
+
+class AssignableRoleItem(BaseModel):
+    """One role HR may assign, with the access it carries."""
+
+    role: str
+    label: str
+    description: str
+    permissions: list[str]
+
+
+class AssignableRoleListResponse(BaseModel):
+    """The role catalogue the HR picker is built from."""
+
+    items: list[AssignableRoleItem]
+    total: int
+
+
+class StaffRoleUpdate(BaseModel):
+    """Schema for changing which role a staff member holds."""
+
+    role: str = Field(..., min_length=2, max_length=64)
+
+
+class StaffPasswordUpdate(BaseModel):
+    """Schema for setting or resetting a staff member's password."""
+
+    password: str = Field(..., min_length=8, max_length=128)
+
+
+class StaffAccessResponse(BaseModel):
+    """Result of a staff access change, for the toast the HR screen shows."""
+
+    staff_id: uuid.UUID
+    role: str
+    has_login: bool
+    message: str
 
 
 # ── Shifts ──────────────────────────────────────────────────────────────────

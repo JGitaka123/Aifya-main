@@ -1,6 +1,7 @@
 "use client";
 
 import type { ReactNode } from "react";
+import { useTranslations } from "next-intl";
 import { HeartPulse } from "lucide-react";
 import { Link } from "@/i18n/routing";
 
@@ -74,7 +75,18 @@ const VERTICAL_PHRASES = [
   "Because You Matter",
 ];
 
+/**
+ * The Login / Register-facility switch above both auth forms.
+ *
+ * The second tab registers a hospital or clinic, not a person: Aifya has no
+ * self-registration, so the label says what the tab actually does rather than
+ * inviting a new hire to create an account they cannot create.
+ *
+ * @param props.mode - Which of the two tabs is active
+ * @returns The segmented switch
+ */
 function AuthTabs({ mode }: { mode: "login" | "signup" }) {
+  const t = useTranslations("auth");
   const tabLink = (target: "login" | "signup", label: string) => (
     <Link
       href={`/${target}`}
@@ -90,8 +102,8 @@ function AuthTabs({ mode }: { mode: "login" | "signup" }) {
   return (
     <div className="rounded-full border border-[#E2EAF0] bg-[#F1F5F8] p-1">
       <div className="grid grid-cols-2 gap-1.5">
-        {tabLink("login", "Login")}
-        {tabLink("signup", "Create Account")}
+        {tabLink("login", t("loginTab"))}
+        {tabLink("signup", t("signupTab"))}
       </div>
     </div>
   );

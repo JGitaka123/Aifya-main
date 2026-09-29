@@ -13,10 +13,12 @@ import {
   AlertTriangle,
   ChevronDown,
   ChevronUp,
+  Printer,
 } from "lucide-react";
 import { useEncounterVitals, useRecordVitals } from "@/hooks/useEncounters";
 import { useEvaluateVitals } from "@/hooks/useCDS";
 import { CDSAlertBanner } from "@/components/opd/CDSAlertBanner";
+import { receiptHref } from "@/lib/utils";
 import type { CDSAlert, VitalSignCreate } from "@aifya/shared";
 
 const vitalsSchema = z.object({
@@ -231,6 +233,36 @@ export function VitalsPanel({ encounterId, patientId }: VitalsPanelProps) {
             </div>
           ) : (
             <p className="mb-3 text-sm text-muted-foreground">{t("noVitals")}</p>
+          )}
+
+          {/* The numbered report this recording produced. It is what the
+              patient's history lists and what the nurse hands over, so the
+              print action sits with the values it describes. */}
+          {latestVital?.report_url && (
+            <div className="mb-3 flex flex-wrap items-center justify-between gap-2 rounded-lg border border-green-400 bg-green-50 px-3 py-2 dark:border-green-700 dark:bg-green-950">
+              <div className="min-w-0">
+                <p className="text-xs font-semibold text-green-800 dark:text-green-200">
+                  {t("reportIssued")}: {latestVital.report_number}
+                </p>
+                {latestVital.summary && (
+                  <p className="mt-0.5 truncate text-xs text-green-800/80 dark:text-green-200/80">
+                    {latestVital.summary}
+                  </p>
+                )}
+                <p className="mt-0.5 text-[11px] text-green-800/70 dark:text-green-200/70">
+                  {t("reportKept")}
+                </p>
+              </div>
+              <a
+                href={receiptHref(latestVital.report_url)}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="flex flex-shrink-0 items-center gap-1.5 rounded-lg border border-green-600 px-3 py-1.5 text-xs font-semibold text-green-800 hover:bg-green-100 dark:text-green-200"
+              >
+                <Printer className="h-3.5 w-3.5" />
+                {t("printReport")}
+              </a>
+            </div>
           )}
 
           {/* Add vitals button / form */}

@@ -15,6 +15,7 @@ from app.schemas.emergency import (
     EmergencySummary,
     EmergencyVisitCreate,
     EmergencyVisitResponse,
+    StageRequest,
     TriageRequest,
 )
 from app.services.emergency_service import EmergencyService
@@ -237,6 +238,49 @@ async def assign_doctor(
 
 
 # ── Disposition ──────────────────────────────────────────────────────────────
+
+
+@router.post("/visits/{visit_id}/stage", response_model=EmergencyVisitResponse)
+async def set_stage(
+    visit_id: uuid.UUID,
+    data: StageRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: CurrentUser = Depends(
+        require_roles("admin", "facility_admin", "doctor", "nurse")
+    ),
+) -> EmergencyVisitResponse:
+    """
+    Move an emergency visit to the next stage of care.
+
+    The pathway is Arrived -> Triaged -> In treatment <-> Observation ->
+    Admitted / Discharged. Each step is its own action, so a patient only ever
+    shows the stage they have actually reached.
+
+    @param visit_id: Visit UUID
+    @param data: Target stage
+    @param db: Database session
+    @param current_user: Authenticated clinical staff
+    @returns Updated visit
+    """
+    service = EmergencyService(db)
+    try:
+        visit = await service.set_stage(
+            visit_id=visit_id,
+            data=data,
+            facility_id=current_user.facility_id,
+            moved_by=current_user.user_id,
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
+    if not visit:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Emergency visit not found",
+        )
+    return EmergencyVisitResponse.model_validate(visit)
 
 
 @router.post("/visits/{visit_id}/disposition", response_model=EmergencyVisitResponse)

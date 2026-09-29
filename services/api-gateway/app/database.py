@@ -35,13 +35,29 @@ async def get_db(request: Request) -> AsyncGenerator[AsyncSession, None]:
     """
     Dependency that yields an async database session.
 
+    FastAPI may resolve the authentication dependency before or after this one,
+    so when the caller has already been identified the acting user is published
+    along with the tenant. Seeding the tenant alone would blank the
+    ``app.current_user_*`` settings that the clinical audit trigger reads, and
+    every recorded change would be attributed to nobody.
+
+    Request state is read defensively rather than by importing CurrentUser, so
+    this module never has to depend on the auth package.
+
     @returns AsyncSession for database operations
     """
     async with async_session() as session:
         request.state.db = session
         facility_id = getattr(request.state, "facility_id", None)
         if facility_id:
-            await set_facility_context(session, str(facility_id))
+            current_user = getattr(request.state, "current_user", None)
+            await set_facility_context(
+                session,
+                str(facility_id),
+                user_id=getattr(current_user, "user_id", None),
+                email=getattr(current_user, "email", None),
+                roles=getattr(current_user, "roles", None),
+            )
 
         try:
             yield session

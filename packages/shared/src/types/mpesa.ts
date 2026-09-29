@@ -16,7 +16,8 @@ export interface STKPushApiRequest {
   /** Account reference shown on the M-Pesa SMS (defaults to the invoice). */
   reference?: string | null;
   description?: string;
-  /** Ordered service being paid for: lab_order, imaging_order, prescription. */
+  /** Ordered service being paid for: lab_order, imaging_order, prescription,
+   *  point_of_care. */
   reference_type?: string | null;
   /** UUID of the lab order, imaging order or prescription being paid for. */
   reference_id?: string | null;

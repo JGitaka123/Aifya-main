@@ -11,6 +11,7 @@ import {
 } from "lucide-react";
 import { Link } from "@/i18n/routing";
 import { ScheduledAppointments } from "@/components/appointments/ScheduledAppointments";
+import { ServiceChargeBadge } from "@/components/billing/ServiceChargeBadge";
 import { useLabWorklist } from "@/hooks/useLaboratory";
 import { formatDateTime } from "@/lib/utils";
 import { cn } from "@/lib/utils";
@@ -40,6 +41,7 @@ const STATUS_STYLES: Record<string, string> = {
 export default function LabWorklistPage() {
   const t = useTranslations("lab");
   const tc = useTranslations("common");
+  const tsc = useTranslations("serviceCharge");
   // Default to every status so a resulted order never disappears from the list.
   const [statusFilter, setStatusFilter] = useState<string>("all");
 
@@ -152,6 +154,18 @@ export default function LabWorklistPage() {
                 </div>
               </div>
 
+              {/* Who ordered it, and the clinician's instruction */}
+              {(order.ordered_by_name || order.clinical_info) && (
+                <p className="mt-1 truncate text-xs text-muted-foreground">
+                  {order.ordered_by_name
+                    ? tsc("orderedBy") + ": " + order.ordered_by_name
+                    : ""}
+                  {order.ordered_by_name && order.clinical_info ? " \u2014 " : ""}
+                  {order.clinical_info
+                    ? tsc("clinicalInfo") + ": " + order.clinical_info
+                    : ""}
+                </p>
+              )}
               {/* Test counts */}
               <div className="hidden flex-shrink-0 items-center gap-3 text-xs sm:flex">
                 <span className="flex items-center gap-1 text-muted-foreground">
@@ -171,6 +185,14 @@ export default function LabWorklistPage() {
                   </span>
                 )}
               </div>
+
+              {/* Whether this specific request has been paid for */}
+              <ServiceChargeBadge
+                status={order.charge_status}
+                totalCents={order.charge_total_cents}
+                balanceCents={order.charge_balance_cents}
+                className="flex-shrink-0"
+              />
 
               {/* Priority badge */}
               <span

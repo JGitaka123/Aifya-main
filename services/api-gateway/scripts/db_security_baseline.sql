@@ -1,5 +1,24 @@
 -- ============================================================================
--- Aifya DB  Phase B  -  security baseline / hardening  (COMPLETE VERSION)
+-- Aifya DB  Phase B  -  security baseline / hardening  (SUPERSEDED)
+-- ----------------------------------------------------------------------------
+-- STATUS: NOT applied to the live database. Kept for reference only.
+-- Everything the application relies on is now versioned in Alembic:
+--   * tenant RLS on every facility-scoped table ... migrations 008 / 018
+--     (104 tables are ENABLE + FORCE, each with USING and WITH CHECK)
+--   * clinical audit trail + care-team assignment history ... migration 026
+--     (audit_logs, encounter_assignments, audit_clinical_change trigger)
+--   * patients / encounters policies ... migrations 008 / 025
+--
+-- The live database is AIFYA-MAIN and the runtime login is aifya_user
+-- (NOSUPERUSER, NOBYPASSRLS, member of aifya_app_role). The examples and
+-- RUN ORDER below still say `-d aifya`, which is a stale database name:
+-- running this file as written would write to the wrong database and would
+-- replace the versioned policies with a narrower TO aifya_app_role variant.
+--
+-- Deliberately NOT used by the app (no migration provides them): extensions
+-- uuid-ossp / pgcrypto, encrypt_pii / decrypt_pii (PII is encrypted in the
+-- API before it reaches the database - see the `enc:v1:` prefix), and
+-- set_facility_context() (the API calls set_config() directly).
 -- ----------------------------------------------------------------------------
 -- WHAT THIS DOES
 --   1. Creates (if missing) roles aifya_app_role / aifya_user and re-grants

@@ -1,15 +1,29 @@
-/** Staff role */
+/**
+ * A role a staff record can hold.
+ *
+ * This mirrors the API's permission matrix, so it includes the roles an
+ * existing record may already carry (the administrators) as well as the ones
+ * HR is allowed to assign today (see AssignableRole).
+ */
 export type StaffRole =
   | "doctor"
+  | "specialist"
+  | "dentist"
   | "nurse"
+  | "midwife"
   | "pharmacist"
   | "lab_tech"
   | "radiologist"
-  | "admin"
-  | "cashier"
-  | "records"
   | "receptionist"
-  | "midwife";
+  | "records"
+  | "cashier"
+  | "finance_admin"
+  | "hr_admin"
+  | "store_keeper"
+  | "research_coordinator"
+  | "staff"
+  | "admin"
+  | "facility_admin";
 
 /** Employment type */
 export type EmploymentType =
@@ -63,12 +77,51 @@ export interface StaffDirectoryItem {
   email: string;
   is_active: boolean;
   license_number: string | null;
+  /** Whether this person has a sign-in yet. Access is the role above. */
+  has_login: boolean;
 }
 
 /** Staff directory response */
 export interface StaffDirectoryResponse {
   items: StaffDirectoryItem[];
   total: number;
+}
+
+/**
+ * A role HR may assign to a staff member.
+ *
+ * The API serves this list and only accepts these values back, so the picker
+ * cannot offer - and an employee cannot invent - a role outside it.
+ */
+export interface AssignableRole {
+  role: StaffRole;
+  label: string;
+  description: string;
+  permissions: string[];
+}
+
+/** Response for the assignable-role catalogue. */
+export interface AssignableRoleListResponse {
+  items: AssignableRole[];
+  total: number;
+}
+
+/** Change which role a staff member holds. */
+export interface StaffRoleUpdate {
+  role: StaffRole;
+}
+
+/** Set or reset a staff member's sign-in password. */
+export interface StaffPasswordUpdate {
+  password: string;
+}
+
+/** Result of a staff access change. */
+export interface StaffAccessResponse {
+  staff_id: string;
+  role: StaffRole;
+  has_login: boolean;
+  message: string;
 }
 
 /** Staff profile response */

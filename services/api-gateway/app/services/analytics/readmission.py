@@ -244,6 +244,7 @@ async def predict_readmission_risk(
 
     return ReadmissionRisk(
         patient_id=patient_id,
+        patient_name=f"{patient.first_name} {patient.last_name}",
         risk_score=round(score, 4),
         risk_level=risk_level,
         contributing_factors=contributing_factors,

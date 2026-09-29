@@ -13,7 +13,12 @@ from app.schemas.lab import (
     LabResultEntry,
     LabWorklistItem,
 )
-from app.services.service_billing import LAB_ORDER, ServiceBillingService
+from app.services.service_billing import (
+    LAB_ORDER,
+    ServiceBillingService,
+    charge_status,
+)
+from app.services.worklist_context import staff_display_names
 
 _logger = logging.getLogger(__name__)
 
@@ -295,8 +300,18 @@ class LabService:
         result = await self.db.execute(stmt)
         rows = result.all()
 
+        # The department must know who ordered the work and whether this
+        # specific request has been paid for before it releases the specimen.
+        charges = await ServiceBillingService(self.db).charges_for_encounters(
+            [order.encounter_id for order, *_rest in rows], facility_id
+        )
+        names = await staff_display_names(
+            self.db, [order.ordered_by for order, *_rest in rows]
+        )
+
         items: list[LabWorklistItem] = []
         for order, patient, test_count, pending_count, critical_count in rows:
+            charge = charges.get((LAB_ORDER, order.id))
             items.append(
                 LabWorklistItem(
                     id=order.id,
@@ -306,6 +321,7 @@ class LabService:
                     patient_name=f"{patient.first_name} {patient.last_name}",
                     patient_mrn=patient.mrn,
                     ordered_by=order.ordered_by,
+                    ordered_by_name=names.get(order.ordered_by),
                     priority=order.priority,
                     status=order.status,
                     specimen_type=order.specimen_type,
@@ -314,6 +330,12 @@ class LabService:
                     test_count=test_count,
                     pending_count=pending_count,
                     critical_count=critical_count,
+                    charge_total_cents=charge.total_cents if charge else None,
+                    charge_paid_cents=charge.paid_cents if charge else None,
+                    charge_balance_cents=(
+                        charge.balance_cents if charge else None
+                    ),
+                    charge_status=charge_status(charge),
                     created_at=order.created_at,
                 )
             )

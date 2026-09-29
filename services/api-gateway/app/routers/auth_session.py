@@ -7,12 +7,28 @@ token and reuses the shared current_user dependency.
 
 Passwords live in the platform-level auth_accounts table (not RLS-scoped, by
 design - it is the identity lookup that maps an email to a staff member).
-Clinical/tenant rows stay isolated by facility via row-level security.
+
+The flow, in the order it happens:
+
+1. Credentials. auth_accounts is read by email across every facility, which is
+   only possible because it sits outside row level security.
+2. Tenant binding. The account facility is written to the session as the
+   bootstrap tenant, the staff record is read back under that policy, and
+   staff.facility_id is the facility the token is issued for. See _resolve_tenant.
+3. Token. The signed token carries sub, facility_id, email, name and roles.
+   Department is deliberately NOT a claim: it is resolved from the staff record
+   on every request, so moving a clinician between units in HR takes effect at
+   once instead of at their next login.
+4. Every later request. The middleware republishes facility_id to the session,
+   so row level security confines each query to that one facility.
+
+Clinical/tenant rows stay isolated by facility via row level security.
 """
 
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -23,13 +39,19 @@ from app.auth.internal_tokens import (
     issue_access_token,
     issue_refresh_token,
 )
+from app.auth.permissions import (
+    ALL_PERMISSIONS,
+    ROLE_PERMISSIONS,
+    effective_role_permissions,
+    resolve_permissions,
+)
 from app.config import settings
 from app.database import get_db
 from app.middleware.facility_context import set_facility_context
 from app.models.auth_account import AuthAccount
 from app.models.facility import Facility
-from app.models.staff import Staff
-from app.utils.passwords import verify_password
+from app.models.staff import Department, Staff
+from app.utils.passwords import hash_password, verify_password
 
 router = APIRouter()
 
@@ -43,26 +65,187 @@ class RefreshRequest(BaseModel):
     refresh_token: str = Field(..., min_length=1)
 
 
-def _public_user(staff: Staff, facility: Facility) -> dict:
-    """Map a Staff row + Facility to the camelCase shape the web app uses."""
+class ChangePasswordRequest(BaseModel):
+    current_password: str = Field(..., min_length=1, max_length=128)
+    new_password: str = Field(..., min_length=8, max_length=128)
+
+
+async def _staff_unit(
+    db: AsyncSession, staff: Staff
+) -> tuple[uuid.UUID | None, str | None]:
+    """
+    Resolve the unit a staff member is rostered to.
+
+    The department is what narrows a clinician's queue to their own patients,
+    so the web app needs it to explain an empty worklist.
+
+    @param db: Database session
+    @param staff: Staff row
+    @returns Tuple of (department UUID, department name)
+    """
+    department_id = staff.department_id or staff.primary_department_id
+    if department_id is None:
+        return None, None
+    name = await db.scalar(
+        select(Department.name).where(Department.id == department_id)
+    )
+    return department_id, name
+
+
+async def _public_user(
+    db: AsyncSession, staff: Staff, facility: Facility
+) -> dict:
+    """
+    Map a Staff row + Facility to the camelCase shape the web app uses.
+
+    The effective permissions travel with the user object so the sidebar can
+    hide what this person may not open. The API enforces the same list again on
+    every endpoint - this copy is a convenience for the navigation, never the
+    control itself.
+
+    @param db: Database session
+    @param staff: Staff row
+    @param facility: Facility row
+    @returns The user object the web app keeps in its auth context
+    """
     name = (staff.first_name + " " + staff.last_name).strip()
+    department_id, department_name = await _staff_unit(db, staff)
+    permissions = await resolve_permissions(
+        db,
+        CurrentUser(
+            user_id=staff.id,
+            facility_id=facility.id,
+            email=staff.email,
+            roles=[staff.role],
+            name=name,
+        ),
+    )
     return {
         "id": str(staff.id),
         "email": staff.email,
         "name": name or staff.email,
         "roles": [staff.role],
         "facilityId": str(facility.id),
+        "departmentId": str(department_id) if department_id else None,
+        "departmentName": department_name,
+        "permissions": sorted(permissions),
     }
 
 
-async def _load_staff_and_facility(
+#: Why an account could not be bound to a facility. One shared "not active at
+#: an approved facility" for every case leaves the hospital nothing to act on;
+#: these say which record to go and fix.
+_BINDING_MESSAGES: dict[str, str] = {
+    "no_staff": (
+        "Your sign-in is not linked to a staff record at this facility. "
+        "Ask an administrator to check your account."
+    ),
+    "facility_mismatch": (
+        "Your account and your staff record name different facilities. "
+        "Ask an administrator to correct your facility."
+    ),
+    "inactive_staff": (
+        "Your staff record is inactive. Ask an administrator to re-activate it."
+    ),
+    "no_facility": "Your facility could not be found.",
+    "inactive_facility": "Your facility is not active.",
+}
+
+
+def _binding_detail(reason: str | None) -> str:
+    """
+    Explain, for the signed-in user, why the binding did not hold.
+
+    @param reason: Reason code from _resolve_tenant
+    @returns A message naming the record that needs correcting
+    """
+    return _BINDING_MESSAGES.get(
+        reason or "", "Your account is not active at an approved facility."
+    )
+
+
+async def _resolve_tenant(
     db: AsyncSession, account: AuthAccount
-) -> tuple[Staff, Facility]:
-    """Point RLS at the account's facility, then load staff + facility."""
+) -> tuple[Staff | None, Facility | None, str | None]:
+    """
+    Bind an authenticated account to exactly one facility.
+
+    auth_accounts carries a facility so a bootstrap tenant exists before the
+    staff row can be read at all - row level security would otherwise hide it.
+    The binding that counts is the one on the staff record, so the facility that
+    reaches the token is read back from staff.facility_id rather than assumed
+    from the account, and the two are compared so drift is reported as drift
+    instead of surfacing as a generic refusal.
+
+    @param db: Database session
+    @param account: Verified auth account
+    @returns (staff, facility, reason); reason is None when the binding holds
+    """
     await set_facility_context(db, str(account.facility_id))
+
     staff = await db.get(Staff, account.staff_id)
-    facility = await db.get(Facility, account.facility_id)
-    return staff, facility
+    if staff is None or staff.is_deleted:
+        # Under RLS a staff row belonging to another facility is
+        # indistinguishable from a missing one. Either way the account cannot
+        # be bound, and this is the case worth naming out loud.
+        return None, None, "no_staff"
+    if staff.facility_id != account.facility_id:
+        return None, None, "facility_mismatch"
+    if not staff.is_active:
+        return None, None, "inactive_staff"
+
+    facility = await db.get(Facility, staff.facility_id)
+    if facility is None:
+        return None, None, "no_facility"
+    if not facility.is_active:
+        return None, None, "inactive_facility"
+
+    return staff, facility, None
+
+
+#: How a refused sign-in is reported. Two of these are HR's to fix and say so;
+#: the third stays deliberately vague, because a wrong password is the one case
+#: the person can resolve themselves, and the one where naming the reason would
+#: confirm an address somebody was guessing at.
+_LOGIN_REFUSALS: dict[str, tuple[int, str]] = {
+    "not_registered": (
+        status.HTTP_403_FORBIDDEN,
+        "Your employee account has not been registered by HR. "
+        "Please contact HR for assistance.",
+    ),
+    "access_revoked": (
+        status.HTTP_403_FORBIDDEN,
+        "Your Aifya access has been switched off. Please contact HR/Admin "
+        "to have it restored.",
+    ),
+    "invalid_credentials": (
+        status.HTTP_401_UNAUTHORIZED,
+        "Invalid email or password.",
+    ),
+}
+
+
+def _login_refusal(account: AuthAccount | None, password: str) -> str | None:
+    """
+    Decide why these credentials cannot start a session.
+
+    The order is deliberate. An unknown address is answered first, because there
+    is no account to check anything else against. A wrong password is answered
+    second, and the account's own state is only reported once the password has
+    proved the caller owns it - otherwise the sign-in form would answer
+    questions about accounts anyone could enumerate by typing guessed addresses.
+
+    @param account: The account for the submitted address, or None
+    @param password: Submitted plaintext password
+    @returns A key of ``_LOGIN_REFUSALS``, or None when the credentials pass
+    """
+    if account is None:
+        return "not_registered"
+    if not verify_password(password, account.password_hash):
+        return "invalid_credentials"
+    if not account.is_active:
+        return "access_revoked"
+    return None
 
 
 @router.post("/login")
@@ -76,26 +259,27 @@ async def login(data: LoginRequest, db: AsyncSession = Depends(get_db)):
     account = await db.scalar(
         select(AuthAccount).where(func.lower(AuthAccount.email) == email)
     )
-    if (
-        account is None
-        or not account.is_active
-        or not verify_password(data.password, account.password_hash)
-    ):
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid email or password.",
+
+    # Aifya has no self-registration: an account exists only because HR created
+    # the employee and issued a password. The three ways this can fail are
+    # therefore not the same failure, and only one of them is the person's to
+    # fix - so each gets its own answer rather than one blanket "invalid email or
+    # password" that sends a new hire round in circles. The code travels with
+    # the message so the sign-in screen can word it, and escalate it, without
+    # parsing prose.
+    refusal = _login_refusal(account, data.password)
+    if refusal is not None:
+        refusal_status, detail = _LOGIN_REFUSALS[refusal]
+        return JSONResponse(
+            status_code=refusal_status,
+            content={"code": refusal, "detail": detail},
         )
-    staff, facility = await _load_staff_and_facility(db, account)
-    if (
-        staff is None
-        or staff.is_deleted
-        or not staff.is_active
-        or facility is None
-        or not facility.is_active
-    ):
+
+    staff, facility, reason = await _resolve_tenant(db, account)
+    if reason is not None:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="Your account is not active at an approved facility.",
+            detail=_binding_detail(reason),
         )
     name = (staff.first_name + " " + staff.last_name).strip()
     roles = [staff.role]
@@ -116,7 +300,7 @@ async def login(data: LoginRequest, db: AsyncSession = Depends(get_db)):
         ),
         "token_type": "bearer",
         "expires_in": 12 * 60 * 60,
-        "user": _public_user(staff, facility),
+        "user": await _public_user(db, staff, facility),
     }
 
 
@@ -142,14 +326,10 @@ async def refresh(data: RefreshRequest, db: AsyncSession = Depends(get_db)):
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Session expired.",
         )
-    staff, facility = await _load_staff_and_facility(db, account)
-    if (
-        staff is None
-        or staff.is_deleted
-        or not staff.is_active
-        or facility is None
-        or not facility.is_active
-    ):
+    # A renewal only needs to know whether the binding still holds; the reason
+    # is already on the login screen, so this stays deliberately opaque.
+    staff, facility, reason = await _resolve_tenant(db, account)
+    if reason is not None:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Session expired.",
@@ -172,12 +352,34 @@ async def refresh(data: RefreshRequest, db: AsyncSession = Depends(get_db)):
             roles=roles,
         ),
         "expires_in": 12 * 60 * 60,
-        "user": _public_user(staff, facility),
+        "user": await _public_user(db, staff, facility),
     }
 
 
 @router.get("/me")
-async def me(current_user: CurrentUser = current_user_dependency):
+async def me(
+    current_user: CurrentUser = current_user_dependency,
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Report the signed-in user, with the permissions the role carries.
+
+    Permissions are resolved fresh on every call, so an edit to
+    ``role_permissions`` or to the staff record takes effect at the next page
+    load instead of waiting for the access token to expire.
+
+    @param current_user: Authenticated user from JWT
+    @param db: Database session
+    @returns The user object including department and effective permissions
+    """
+    permissions = await resolve_permissions(db, current_user)
+
+    department_id: uuid.UUID | None = None
+    department_name: str | None = None
+    staff = await db.get(Staff, current_user.user_id)
+    if staff is not None and not staff.is_deleted:
+        department_id, department_name = await _staff_unit(db, staff)
+
     return {
         "authenticated": True,
         "user": {
@@ -186,5 +388,82 @@ async def me(current_user: CurrentUser = current_user_dependency):
             "name": current_user.name,
             "roles": current_user.roles,
             "facilityId": str(current_user.facility_id),
+            "departmentId": str(department_id) if department_id else None,
+            "departmentName": department_name,
+            "permissions": sorted(permissions),
         },
     }
+
+
+@router.get("/roles")
+async def list_roles(
+    current_user: CurrentUser = current_user_dependency,
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Report the role-to-permission matrix in force at this facility.
+
+    Reads the shipped baseline and then applies this facility's own
+    ``role_permissions`` rows on top, so the Settings -> Roles screen shows
+    what actually applies here rather than what ships by default.
+
+    @param current_user: Authenticated user from JWT
+    @param db: Database session
+    @returns Roles with their effective permissions, plus the full permission list
+    """
+    roles = []
+    for role in sorted(ROLE_PERMISSIONS):
+        granted = await effective_role_permissions(db, current_user.facility_id, role)
+        roles.append({"role": role, "permissions": sorted(granted)})
+
+    return {
+        "roles": roles,
+        "all_permissions": sorted(ALL_PERMISSIONS),
+        "total_permissions": len(ALL_PERMISSIONS),
+    }
+
+
+@router.post("/change-password")
+async def change_password(
+    data: ChangePasswordRequest,
+    current_user: CurrentUser = current_user_dependency,
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Change the signed-in user's own password.
+
+    HR sets an initial password when it creates the account; this is how the
+    employee replaces it with one only they know. The current password is
+    required so that a borrowed session cannot be used to lock the owner out.
+
+    @param data: Current and new password
+    @param current_user: Authenticated user from JWT
+    @param db: Database session
+    @returns Confirmation that the password changed
+    @raises HTTPException 401: When the current password is wrong
+    @raises HTTPException 404: When the account has no login
+    """
+    if settings.auth_provider != "internal":
+        raise HTTPException(
+            status_code=status.HTTP_405_METHOD_NOT_ALLOWED,
+            detail="Password login is disabled. Use the OIDC provider.",
+        )
+
+    account = await db.scalar(
+        select(AuthAccount).where(AuthAccount.staff_id == current_user.user_id)
+    )
+    if account is None or not account.is_active:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Your account does not have an active sign-in.",
+        )
+    if not verify_password(data.current_password, account.password_hash):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Your current password is not correct.",
+        )
+
+    account.password_hash = hash_password(data.new_password)
+    await db.flush()
+    return {"changed": True, "message": "Your password has been changed."}
+

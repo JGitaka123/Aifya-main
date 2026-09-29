@@ -5,8 +5,17 @@ import { useTranslations } from "next-intl";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
-import { UserPlus, CheckCircle2 } from "lucide-react";
+import {
+  UserPlus,
+  CheckCircle2,
+  Users,
+  Loader2,
+  ShieldCheck,
+} from "lucide-react";
 import { useStaffInvite } from "@/hooks/useOnboarding";
+import { useStaffDirectory, useSetStaffActive } from "@/hooks/useSettings";
+import { StaffAccessDialog } from "@/components/hr/StaffAccessDialog";
+import type { StaffDirectoryItem } from "@aifya/shared";
 
 const ROLES = [
   "facility_admin",
@@ -40,8 +49,16 @@ type InviteFormData = z.infer<typeof inviteSchema>;
  */
 export default function TeamPage() {
   const t = useTranslations("team");
+  const tc = useTranslations("common");
   const invite = useStaffInvite();
   const [invited, setInvited] = useState<string[]>([]);
+  const directory = useStaffDirectory();
+  const setActive = useSetStaffActive();
+  // HR issues the credentials, so the row opens the same access dialog the HR
+  // directory uses: role, activation and password in one place.
+  const [accessStaff, setAccessStaff] = useState<StaffDirectoryItem | null>(
+    null,
+  );
 
   const {
     register,
@@ -67,7 +84,7 @@ export default function TeamPage() {
     "w-full rounded-md border border-input bg-background px-3 py-2 text-sm text-foreground dark:border-border dark:bg-background";
 
   return (
-    <div className="mx-auto max-w-2xl p-6 lg:p-8">
+    <div className="mx-auto max-w-4xl p-6 lg:p-8">
       <h1 className="mb-1 flex items-center gap-2 text-2xl font-bold text-foreground">
         <UserPlus className="h-6 w-6 text-primary" />
         {t("title")}
@@ -146,6 +163,126 @@ export default function TeamPage() {
           </ul>
         </div>
       )}
+
+      {/* Staff directory: every account in the facility, active or not, so an
+          administrator can deactivate a leaver or restore an account. */}
+      <div className="mt-8">
+        <h2 className="mb-1 flex items-center gap-2 text-lg font-semibold text-foreground">
+          <Users className="h-5 w-5 text-primary" />
+          {t("directoryTitle")}
+        </h2>
+        <p className="mb-4 text-sm text-muted-foreground">
+          {t("directorySubtitle")}
+        </p>
+
+        {directory.isLoading ? (
+          <div className="flex items-center gap-2 rounded-xl border border-border bg-card p-6 text-sm text-muted-foreground">
+            <Loader2 className="h-4 w-4 animate-spin" />
+            {tc("loading")}
+          </div>
+        ) : directory.isError ? (
+          <div className="rounded-lg border border-destructive/40 bg-destructive/10 p-4 text-sm text-destructive">
+            {t("directoryError")}
+          </div>
+        ) : (directory.data?.items?.length ?? 0) === 0 ? (
+          <p className="rounded-xl border border-border bg-card p-6 text-center text-sm text-muted-foreground">
+            {t("directoryEmpty")}
+          </p>
+        ) : (
+          <div className="overflow-hidden rounded-xl border border-border bg-card shadow-[var(--shadow-card)]">
+            <table className="w-full text-sm">
+              <thead className="border-b border-border bg-muted/30">
+                <tr>
+                  <th className="px-4 py-3 text-left font-medium text-muted-foreground">
+                    {t("colName")}
+                  </th>
+                  <th className="px-4 py-3 text-left font-medium text-muted-foreground">
+                    {t("colRole")}
+                  </th>
+                  <th className="px-4 py-3 text-left font-medium text-muted-foreground">
+                    {t("colDepartment")}
+                  </th>
+                  <th className="px-4 py-3 text-left font-medium text-muted-foreground">
+                    {t("colStatus")}
+                  </th>
+                  <th className="px-4 py-3 text-right font-medium text-muted-foreground">
+                    {t("colActions")}
+                  </th>
+                </tr>
+              </thead>
+              <tbody>
+                {(directory.data?.items ?? []).map((member) => (
+                  <tr key={member.id} className="border-b border-border last:border-0">
+                    <td className="px-4 py-3">
+                      <div className="font-medium text-foreground">
+                        {[member.title, member.first_name, member.last_name]
+                          .filter(Boolean)
+                          .join(" ")}
+                      </div>
+                      <div className="text-xs text-muted-foreground">
+                        {member.employee_number} &middot; {member.email}
+                      </div>
+                    </td>
+                    <td className="px-4 py-3 capitalize text-foreground">
+                      {member.role.replace(/_/g, " ")}
+                    </td>
+                    <td className="px-4 py-3 text-muted-foreground">
+                      {member.department_name ?? "—"}
+                    </td>
+                    <td className="px-4 py-3">
+                      <span
+                        className={
+                          member.is_active
+                            ? "rounded-md bg-green-100 px-2 py-0.5 text-xs font-medium text-green-800 dark:bg-green-950 dark:text-green-200"
+                            : "rounded-md bg-muted px-2 py-0.5 text-xs font-medium text-muted-foreground"
+                        }
+                      >
+                        {member.is_active ? t("statusActive") : t("statusInactive")}
+                      </span>
+                    </td>
+                    <td className="px-4 py-3">
+                      <div className="flex justify-end gap-2">
+                        <button
+                          type="button"
+                          onClick={() => setAccessStaff(member)}
+                          className="inline-flex items-center gap-1.5 rounded-lg border border-border bg-background px-3 py-1.5 text-xs font-medium text-foreground transition-colors hover:bg-muted"
+                        >
+                          <ShieldCheck className="h-3.5 w-3.5" />
+                          {t("manageAccess")}
+                        </button>
+                        <button
+                          type="button"
+                          disabled={setActive.isPending}
+                          onClick={() =>
+                            setActive.mutate({
+                              staffId: member.id,
+                              isActive: !member.is_active,
+                            })
+                          }
+                          className="rounded-lg border border-border bg-background px-3 py-1.5 text-xs font-medium text-foreground transition-colors hover:bg-muted disabled:opacity-50"
+                        >
+                          {member.is_active ? t("deactivate") : t("activate")}
+                        </button>
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+
+        {setActive.isError && (
+          <div className="mt-3 rounded-lg border border-destructive/50 bg-destructive/10 p-3 text-sm text-destructive">
+            {t("statusError")}
+          </div>
+        )}
+      </div>
+
+      <StaffAccessDialog
+        staff={accessStaff}
+        onClose={() => setAccessStaff(null)}
+      />
     </div>
   );
 }

@@ -27,6 +27,21 @@ export type AdmissionStatus =
   | "discharged"
   | "deceased";
 
+/** Where an admission order sits in the request lifecycle. */
+export type AdmissionOrderStatus =
+  | "pending"
+  | "bed_pending"
+  | "accepted"
+  | "admitted"
+  | "declined"
+  | "cancelled";
+
+/** How quickly the admission should happen. */
+export type AdmissionType = "emergency" | "urgent" | "elective";
+
+/** Clinical priority of an admission order. */
+export type AdmissionPriority = "routine" | "urgent" | "emergency";
+
 /** Discharge type options. */
 export type DischargeType =
   | "improved"
@@ -179,6 +194,90 @@ export interface TransferToEmergencyRequest {
   /** Clinical reason for the worsening condition (becomes the ER chief complaint). */
   reason: string;
   notes?: string | null;
+}
+
+// ── Admission Order ──────────────────────────────────────────────────────────
+
+/**
+ * A clinician's request to admit a patient.
+ *
+ * Deliberately not an admission: raising an order leaves the patient an
+ * outpatient until the admission desk accepts it and assigns a bed.
+ */
+export interface AdmissionOrderResponse {
+  id: string;
+  order_number: string;
+  encounter_id: string;
+  patient_id: string;
+  ordered_by: string | null;
+  attending_doctor_id: string | null;
+  reason: string;
+  primary_diagnosis: string | null;
+  admission_type: AdmissionType;
+  priority: AdmissionPriority;
+  department_id: string | null;
+  requested_ward_id: string | null;
+  clinical_notes: string | null;
+  requested_at: string | null;
+  status: AdmissionOrderStatus;
+  decided_by: string | null;
+  decided_at: string | null;
+  decision_notes: string | null;
+  admission_id: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+/** Admission order plus the labels the queue renders. */
+export interface AdmissionOrderListItem extends AdmissionOrderResponse {
+  patient_name: string | null;
+  patient_mrn: string | null;
+  department_name: string | null;
+  requested_ward_name: string | null;
+  attending_doctor_name: string | null;
+  ordered_by_name: string | null;
+  admitted_ward_name: string | null;
+  admitted_bed_number: string | null;
+}
+
+/** Paginated admission-order queue. */
+export interface AdmissionOrderListResponse {
+  items: AdmissionOrderListItem[];
+  total: number;
+}
+
+/** Payload for raising an admission order. */
+export interface AdmissionOrderCreate {
+  encounter_id: string;
+  patient_id: string;
+  reason: string;
+  primary_diagnosis?: string | null;
+  admission_type?: AdmissionType;
+  priority?: AdmissionPriority;
+  department_id?: string | null;
+  requested_ward_id?: string | null;
+  attending_doctor_id?: string | null;
+  clinical_notes?: string | null;
+  requested_at?: string | null;
+}
+
+/** Payload for accepting an order at the admission desk. */
+export interface AdmissionOrderAccept {
+  decision_notes?: string | null;
+  bed_pending?: boolean;
+}
+
+/** Payload for declining or cancelling an order. */
+export interface AdmissionOrderDecision {
+  decision_notes?: string | null;
+}
+
+/** Payload for turning an accepted order into an admission. */
+export interface AdmissionOrderAdmit {
+  ward_id: string;
+  bed_id: string;
+  attending_doctor_id?: string | null;
+  decision_notes?: string | null;
 }
 
 // ── Nursing Note ─────────────────────────────────────────────────────────────

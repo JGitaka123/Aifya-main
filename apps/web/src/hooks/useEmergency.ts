@@ -10,6 +10,7 @@ import type {
   EmergencyVisitCreate,
   TriageRequest,
   AssignDoctorRequest,
+  StageRequest,
   DispositionRequest,
   DoctorOnDuty,
 } from "@aifya/shared";
@@ -100,6 +101,22 @@ export function useAssignDoctor(visitId: string) {
       onSuccess: () => qc.invalidateQueries({ queryKey: EMERGENCY_KEYS.all }),
     },
     { url: `${API_URL}/emergency/visits/${visitId}/assign-doctor`, method: "POST" }
+  );
+}
+
+/** Move a visit to the next stage of care: in treatment, or observation. */
+export function useSetEmergencyStage(visitId: string) {
+  const qc = useQueryClient();
+  return useOfflineMutation<EmergencyVisitResponse, StageRequest>(
+    {
+      mutationFn: (data) =>
+        idempotentApiFetch(`/api/v1/emergency/visits/${visitId}/stage`, {
+          method: "POST",
+          body: JSON.stringify(data),
+        }),
+      onSuccess: () => qc.invalidateQueries({ queryKey: EMERGENCY_KEYS.all }),
+    },
+    { url: `${API_URL}/emergency/visits/${visitId}/stage`, method: "POST" }
   );
 }
 

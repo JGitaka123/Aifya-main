@@ -1,9 +1,8 @@
 "use client";
 
-import { useState } from "react";
-import { useRouter } from "next/navigation";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useTranslations } from "next-intl";
-import { ArrowLeft } from "lucide-react";
+import { AlertTriangle, ArrowLeft, CheckCircle2 } from "lucide-react";
 import { Link } from "@/i18n/routing";
 import { PatientLookup } from "@/components/patients/PatientLookup";
 import {
@@ -12,7 +11,7 @@ import {
   useDoctorSchedules,
 } from "@/hooks/useAppointments";
 import { useStaffDirectory } from "@/hooks/useHR";
-import { cn } from "@/lib/utils";
+import { cn, formatDate, todayISO } from "@/lib/utils";
 import type { AppointmentPriority, AppointmentType, AvailableSlot, Patient } from "@aifya/shared";
 
 /**
@@ -23,11 +22,8 @@ import type { AppointmentPriority, AppointmentType, AvailableSlot, Patient } fro
 export default function NewAppointmentPage() {
   const t = useTranslations("appointments");
   const tc = useTranslations("common");
-  const router = useRouter();
 
-  const [selectedDate, setSelectedDate] = useState<string>(
-    new Date().toISOString().slice(0, 10)
-  );
+  const [selectedDate, setSelectedDate] = useState<string>(todayISO());
   const [selectedDoctorId, setSelectedDoctorId] = useState<string>("");
   const [selectedSlot, setSelectedSlot] = useState<AvailableSlot | null>(null);
 
@@ -37,6 +33,13 @@ export default function NewAppointmentPage() {
   const [priority, setPriority] = useState<AppointmentPriority>("routine");
   const [visitReason, setVisitReason] = useState("");
   const [notes, setNotes] = useState("");
+  const [error, setError] = useState("");
+  const [booked, setBooked] = useState<{
+    id: string;
+    number: string;
+    date: string;
+    time: string;
+  } | null>(null);
 
   const { data: schedules } = useDoctorSchedules();
   const { data: slots, isLoading: slotsLoading } = useAvailableSlots(
@@ -69,27 +72,82 @@ export default function NewAppointmentPage() {
   const doctors = Array.from(
     new Map(doctorEntries.map((d) => [d.id, d])).values()
   );
+  // The soonest day (today or later) on which at least one doctor holds a
+  // clinic session. Offered when the selected date has none, so an empty
+  // Sunday sends the user to the next real clinic day instead of a dead end.
+  const nextAvailableDate = useMemo(() => {
+    const relevant = (schedules ?? []).filter(
+      (schedule) =>
+        schedule.is_active &&
+        (!selectedDoctorId || schedule.doctor_id === selectedDoctorId)
+    );
+    if (!relevant.length) return null;
+    const clinicDays = new Set<number>(
+      relevant.map((schedule) => schedule.day_of_week)
+    );
+    const start = new Date(`${todayISO()}T00:00:00`);
+    for (let offset = 0; offset < 14; offset += 1) {
+      const candidate = new Date(
+        start.getFullYear(),
+        start.getMonth(),
+        start.getDate() + offset
+      );
+      // getDay() is 0=Sunday; schedules store 0=Monday.
+      const mondayFirst = (candidate.getDay() + 6) % 7;
+      if (!clinicDays.has(mondayFirst)) continue;
+      const month = String(candidate.getMonth() + 1).padStart(2, `0`);
+      const day = String(candidate.getDate()).padStart(2, `0`);
+      return `${candidate.getFullYear()}-${month}-${day}`;
+    }
+    return null;
+  }, [schedules, selectedDoctorId]);
+
+  // Opening on a day with no clinic session is a dead end for the desk, so once
+  // the schedules are known, land on the next day that can actually book. Once
+  // the user picks a date themselves this stops, so their choice always wins.
+  const dateChosenByUser = useRef(false);
+  useEffect(() => {
+    if (dateChosenByUser.current || slotsLoading) return;
+    if (!slots || slots.length > 0 || !nextAvailableDate) return;
+    setSelectedDate(nextAvailableDate);
+  }, [nextAvailableDate, slots, slotsLoading]);
 
   /**
    * Handle booking submission.
    */
   async function handleBook() {
     if (!selectedSlot || !patient) return;
+    setError("");
+    setBooked(null);
 
-    await createMutation.mutateAsync({
-      patient_id: patient.id,
-      doctor_id: selectedSlot.doctor_id,
-      schedule_id: selectedSlot.schedule_id,
-      appointment_date: selectedSlot.date,
-      start_time: selectedSlot.start_time,
-      end_time: selectedSlot.end_time,
-      appointment_type: appointmentType,
-      priority,
-      visit_reason: visitReason || undefined,
-      notes: notes || undefined,
-      room: selectedSlot.room || undefined,
-    });
-    router.push("/appointments");
+    try {
+      const appointment = await createMutation.mutateAsync({
+        patient_id: patient.id,
+        doctor_id: selectedSlot.doctor_id,
+        schedule_id: selectedSlot.schedule_id,
+        appointment_date: selectedSlot.date,
+        start_time: selectedSlot.start_time,
+        end_time: selectedSlot.end_time,
+        appointment_type: appointmentType,
+        priority,
+        visit_reason: visitReason || undefined,
+        notes: notes || undefined,
+        room: selectedSlot.room || undefined,
+      });
+      setBooked({
+        id: appointment.id,
+        number: appointment.appointment_number,
+        date: appointment.appointment_date,
+        time: appointment.start_time.slice(0, 5),
+      });
+      setSelectedSlot(null);
+      setVisitReason("");
+      setNotes("");
+    } catch (err) {
+      setError(
+        err instanceof Error && err.message ? err.message : t("bookFailed")
+      );
+    }
   }
 
   return (
@@ -106,6 +164,32 @@ export default function NewAppointmentPage() {
           {t("bookAppointment")}
         </h1>
       </div>
+
+      {booked && (
+        <div className="flex flex-wrap items-center gap-x-4 gap-y-2 rounded-xl border border-green-300 bg-green-50 px-4 py-3 dark:border-green-800 dark:bg-green-950">
+          <CheckCircle2 className="h-5 w-5 shrink-0 text-green-600 dark:text-green-400" />
+          <p className="text-sm text-green-800 dark:text-green-200">
+            {t("bookSuccess", {
+              number: booked.number,
+              date: formatDate(booked.date),
+              time: booked.time,
+            })}
+          </p>
+          <Link
+            href={`/appointments/${booked.id}`}
+            className="text-sm font-semibold text-green-800 underline dark:text-green-200"
+          >
+            {t("viewAppointment")}
+          </Link>
+        </div>
+      )}
+
+      {error && (
+        <div className="flex items-start gap-3 rounded-xl border border-red-300 bg-red-50 px-4 py-3 dark:border-red-800 dark:bg-red-950">
+          <AlertTriangle className="mt-0.5 h-5 w-5 shrink-0 text-red-600 dark:text-red-400" />
+          <p className="text-sm text-red-800 dark:text-red-200">{error}</p>
+        </div>
+      )}
 
       <div className="grid gap-6 lg:grid-cols-2">
         {/* Left: Date & Slot Selection */}
@@ -124,6 +208,7 @@ export default function NewAppointmentPage() {
                   type="date"
                   value={selectedDate}
                   onChange={(e) => {
+                    dateChosenByUser.current = true;
                     setSelectedDate(e.target.value);
                     setSelectedSlot(null);
                   }}
@@ -163,6 +248,28 @@ export default function NewAppointmentPage() {
                 {tc("loading")}
               </p>
             ) : !slots?.length ? (
+              <div className="space-y-2 rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 dark:border-amber-800 dark:bg-amber-950">
+                <p className="flex items-start gap-2 text-sm text-amber-800 dark:text-amber-200">
+                  <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+                  {t("noClinicSessions")}
+                </p>
+                <p className="pl-6 text-xs text-amber-700 dark:text-amber-300">
+                  {t("noClinicSessionsHint")}
+                </p>
+                {nextAvailableDate && nextAvailableDate !== selectedDate && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setSelectedDate(nextAvailableDate);
+                      setSelectedSlot(null);
+                    }}
+                    className="ml-6 rounded-lg border border-amber-400 bg-amber-100 px-3 py-1.5 text-xs font-semibold text-amber-900 hover:bg-amber-200 dark:border-amber-700 dark:bg-amber-900 dark:text-amber-100"
+                  >
+                    {t("nextClinicDay", { date: formatDate(nextAvailableDate) })}
+                  </button>
+                )}
+              </div>
+            ) : !slots.some((slot) => slot.available) ? (
               <p className="text-sm text-muted-foreground">
                 {t("noSlots")}
               </p>

@@ -241,7 +241,8 @@ async def resolve_payroll_employee(
     Auth users are staff rows; payroll employee rows are a separate master
     record. They are mirrored onto staff via ``employees.staff_id ==
     staff.employee_number`` (see payroll/employee_staff_sync.py), so match
-    on that code first, then fall back to email.
+    on that code. Only when the staff record carries no employee number at all
+    do we fall back to a unique email match.
 
     @param db: Async DB session
     @param facility_id: Tenant facility
@@ -252,12 +253,29 @@ async def resolve_payroll_employee(
     from app.models.staff import Staff
 
     staff = await db.get(Staff, staff_id)
+    if staff is None:
+        # OIDC logins carry the Keycloak user id as the token subject rather
+        # than the clinical staff id, so resolve that link too.
+        staff = (
+            await db.execute(
+                select(Staff)
+                .where(
+                    Staff.keycloak_user_id == staff_id,
+                    Staff.facility_id == facility_id,
+                    Staff.is_deleted == False,  # noqa: E712
+                )
+                .limit(1)
+            )
+        ).scalars().first()
     if staff is None or staff.is_deleted or staff.facility_id != facility_id:
         return None
 
     candidate = None
     code = (getattr(staff, "employee_number", None) or "").strip()
     if code:
+        # The employee number is the authoritative link. A miss means the
+        # payroll employee row has not been mirrored yet, not that a colleague
+        # who happens to share the address should be used instead.
         candidate = (
             await db.execute(
                 select(Employee)
@@ -269,8 +287,12 @@ async def resolve_payroll_employee(
                 .limit(1)
             )
         ).scalars().first()
-    if candidate is None and getattr(staff, "email", None):
-        candidate = (
+    elif getattr(staff, "email", None):
+        # No employee number to go on, so email is the only key left. Trust it
+        # only when it names a single employee - a shared inbox, or one person's
+        # address on two accounts, would otherwise file this person's leave, and
+        # their balance, against someone else.
+        matches = (
             await db.execute(
                 select(Employee)
                 .where(
@@ -278,9 +300,11 @@ async def resolve_payroll_employee(
                     Employee.is_deleted.is_(False),
                     func.lower(Employee.email) == func.lower(staff.email),
                 )
-                .limit(1)
+                .limit(2)
             )
-        ).scalars().first()
+        ).scalars().all()
+        if len(matches) == 1:
+            candidate = matches[0]
     return candidate
 
 

@@ -211,7 +211,8 @@ async def forecast_bed_demand(
                 date=forecast_date,
                 department=dept_label,
                 predicted_occupancy=round(predicted_occupancy, 1),
-                confidence_interval=(round(ci_lower, 1), round(ci_upper, 1)),
+                confidence_lower=round(ci_lower, 1),
+                confidence_upper=round(ci_upper, 1),
                 current_occupancy=round(current_occupancy_pct, 1),
                 recommended_actions=actions,
             )

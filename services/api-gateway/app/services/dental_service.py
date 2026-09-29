@@ -4,6 +4,7 @@ from datetime import UTC, date, datetime
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.services.numbering import highest_sequence
 from app.models.dental import DentalChart, DentalTreatmentPlan, DentalVisit
 from app.models.patient import Patient
 from app.models.staff import Staff
@@ -105,14 +106,18 @@ class DentalService:
         """
         now = datetime.now(UTC)
         date_part = now.strftime("%Y%m%d")
-        count = await self.db.execute(
-            select(func.count(DentalVisit.id)).where(
-                DentalVisit.facility_id == facility_id,
-                DentalVisit.visit_number.like(f"DV-{date_part}-%"),
-                DentalVisit.is_deleted == False,  # noqa: E712
+        # Retired rows still hold their number, so counting only the live ones
+        # hands back a number already in use. Start from the highest number
+        # issued, deleted or not.
+        highest = (
+            await self.db.execute(
+                select(highest_sequence(DentalVisit.visit_number)).where(
+                    DentalVisit.facility_id == facility_id,
+                    DentalVisit.visit_number.like(f"DV-{date_part}-%"),
+                )
             )
-        )
-        seq = (count.scalar() or 0) + 1
+        ).scalar_one_or_none()
+        seq = (highest or 0) + 1
         visit_number = f"DV-{date_part}-{seq:04d}"
 
         visit = DentalVisit(
@@ -214,14 +219,18 @@ class DentalService:
         """
         now = datetime.now(UTC)
         date_part = now.strftime("%Y%m%d")
-        count = await self.db.execute(
-            select(func.count(DentalTreatmentPlan.id)).where(
-                DentalTreatmentPlan.facility_id == facility_id,
-                DentalTreatmentPlan.plan_number.like(f"DP-{date_part}-%"),
-                DentalTreatmentPlan.is_deleted == False,  # noqa: E712
+        # Retired rows still hold their number, so counting only the live ones
+        # hands back a number already in use. Start from the highest number
+        # issued, deleted or not.
+        highest = (
+            await self.db.execute(
+                select(highest_sequence(DentalTreatmentPlan.plan_number)).where(
+                    DentalTreatmentPlan.facility_id == facility_id,
+                    DentalTreatmentPlan.plan_number.like(f"DP-{date_part}-%"),
+                )
             )
-        )
-        seq = (count.scalar() or 0) + 1
+        ).scalar_one_or_none()
+        seq = (highest or 0) + 1
 
         plan = DentalTreatmentPlan(
             facility_id=facility_id,

@@ -10,9 +10,18 @@ import {
   AlertTriangle,
   Plus,
   Users,
+  ClipboardCheck,
+  Loader2,
 } from "lucide-react";
 import { Link } from "@/i18n/routing";
-import { useOPDQueue, useCallNext } from "@/hooks/useEncounters";
+import {
+  useOPDQueue,
+  useCallNext,
+  useDepartments,
+  useCompleteAssessment,
+} from "@/hooks/useEncounters";
+import { usePermissions } from "@/hooks/usePermissions";
+import { PERMISSIONS } from "@/lib/auth/permissions";
 import { formatDateTime } from "@/lib/utils";
 import { cn } from "@/lib/utils";
 import { PageHeader } from "@/components/ui/PageHeader";
@@ -66,6 +75,51 @@ const STATUS_VARIANT: Record<string, "warning" | "info" | "success" | "purple" |
 };
 
 /**
+ * Hand a patient from OPD to the consultation room.
+ *
+ * Recording vitals already completes the assessment; this covers the visit
+ * that needed no measurements, so a patient is never stuck in a stage nobody
+ * can clear.
+ *
+ * @param props.encounterId - Encounter to hand over
+ * @returns Assessment hand-off button with an inline error
+ */
+function OpdAssessmentButton({ encounterId }: { encounterId: string }) {
+  const t = useTranslations("opd");
+  const complete = useCompleteAssessment(encounterId);
+  const [error, setError] = useState("");
+
+  return (
+    <div className="flex w-36 flex-col items-center justify-center gap-1">
+      <button
+        type="button"
+        onClick={() => {
+          setError("");
+          complete.mutate(undefined, {
+            onError: (err: Error) =>
+              setError(err.message || t("assessmentFailed")),
+          });
+        }}
+        disabled={complete.isPending}
+        className="flex w-full items-center justify-center gap-1.5 rounded-lg border border-border bg-card px-3 py-2 text-xs font-semibold text-foreground shadow-sm transition-colors hover:bg-muted disabled:opacity-50"
+      >
+        {complete.isPending ? (
+          <Loader2 className="h-4 w-4 animate-spin" />
+        ) : (
+          <ClipboardCheck className="h-4 w-4" />
+        )}
+        {complete.isPending ? t("completingAssessment") : t("completeAssessment")}
+      </button>
+      {error && (
+        <span className="text-center text-[10px] leading-tight text-red-600 dark:text-red-400">
+          {error}
+        </span>
+      )}
+    </div>
+  );
+}
+
+/**
  * OPD Queue page with SATS triage colors and real-time updates.
  * Queue auto-refreshes every 15 seconds.
  * @returns OPD queue page
@@ -75,12 +129,32 @@ export default function OPDQueuePage() {
   const tc = useTranslations("common");
   const router = useRouter();
   const [statusFilter, setStatusFilter] = useState<string>("");
+  // One patient journey, two desks. "assessment" is the nurse taking the
+  // observations; "consultation" is the doctor's waiting list. OPD opens on the
+  // nurses' list, because that is the work this screen exists for.
+  const [stageFilter, setStageFilter] = useState<string>("assessment");
+  // The queue can be read for the whole facility or for one unit, so a doctor
+  // (or reception) can look at exactly one department's patients.
+  const [departmentFilter, setDepartmentFilter] = useState<string>("");
   // Set when the API refuses to start a consultation, e.g. the reception
   // consultation fee is still outstanding.
   const [callError, setCallError] = useState<string>("");
 
-  const { data, isLoading } = useOPDQueue(statusFilter || undefined);
+  const { data, isLoading } = useOPDQueue(
+    statusFilter || undefined,
+    departmentFilter || undefined,
+    stageFilter || undefined
+  );
+  const { data: departmentDirectory } = useDepartments();
+  const departments = departmentDirectory ?? [];
   const callNext = useCallNext();
+  // Calling the next patient claims a consultation, which the API only allows
+  // a clinician to do, so the front desk never sees the button.
+  const { hasPermission } = usePermissions();
+  const canConsult = hasPermission(PERMISSIONS.CLINICAL_CONSULT);
+  // The nurse closes the assessment; a clinician may do it too when no nurse
+  // is on shift, which is why the server accepts either permission.
+  const canTriage = hasPermission(PERMISSIONS.TRIAGE_RECORD);
 
   /**
    * Call the next patient in queue and navigate to their encounter.
@@ -89,13 +163,19 @@ export default function OPDQueuePage() {
     setCallError("");
     callNext.mutate(undefined, {
       onSuccess: (encounter) => {
-        router.push(`/opd/${encounter.id}`);
+        router.push(`/opd/${encounter.id}?tab=consultation`);
       },
       onError: (err: Error) => {
         setCallError(err.message || t("callNextFailed"));
       },
     });
   };
+
+  const stageOptions: { value: string; label: string }[] = [
+    { value: "", label: t("allStages") },
+    { value: "assessment", label: t("awaitingOpd") },
+    { value: "consultation", label: t("readyForDoctor") },
+  ];
 
   const statusOptions: { value: string; label: string }[] = [
     { value: "", label: tc("actions") },
@@ -110,10 +190,25 @@ export default function OPDQueuePage() {
       <PageHeader
         icon={Stethoscope}
         title={t("queue")}
+        subtitle={t("opdSubtitle")}
         badge={data?.total}
         breadcrumbs={[{ label: t("queue") }]}
         actions={
           <>
+            {/* Department filter */}
+            <select
+              value={departmentFilter}
+              onChange={(e) => setDepartmentFilter(e.target.value)}
+              className="rounded-lg border border-border bg-card px-3 py-2 text-sm text-foreground shadow-sm transition-colors focus:outline-none focus:ring-2 focus:ring-primary/30"
+            >
+              <option value="">{t("allDepartments")}</option>
+              {departments.map((d) => (
+                <option key={d.id} value={d.id}>
+                  {d.name}
+                </option>
+              ))}
+            </select>
+
             {/* Status filter */}
             <select
               value={statusFilter}
@@ -127,19 +222,21 @@ export default function OPDQueuePage() {
               ))}
             </select>
 
-            {/* Call next button */}
-            <button
-              onClick={handleCallNext}
-              disabled={callNext.isPending}
-              className="flex items-center gap-2 rounded-lg bg-primary px-4 py-2 text-sm font-medium text-primary-foreground shadow-sm transition-colors hover:bg-primary/90 disabled:opacity-50"
-            >
-              <Phone className="h-4 w-4" />
-              {callNext.isPending ? t("callingNext") : t("callNext")}
-            </button>
+            {/* Call next button - clinicians only */}
+            {canConsult && (
+              <button
+                onClick={handleCallNext}
+                disabled={callNext.isPending}
+                className="flex items-center gap-2 rounded-lg bg-primary px-4 py-2 text-sm font-medium text-primary-foreground shadow-sm transition-colors hover:bg-primary/90 disabled:opacity-50"
+              >
+                <Phone className="h-4 w-4" />
+                {callNext.isPending ? t("callingNext") : t("callNext")}
+              </button>
+            )}
 
             {/* New encounter link */}
             <Link
-              href="/opd/new"
+              href="/patients/register"
               className="flex items-center gap-2 rounded-lg border border-border bg-card px-4 py-2 text-sm font-medium text-foreground shadow-sm transition-colors hover:bg-muted"
             >
               <Plus className="h-4 w-4" />
@@ -148,6 +245,25 @@ export default function OPDQueuePage() {
           </>
         }
       />
+
+      {/* Stage switch: still with OPD, or already handed to the doctor */}
+      <div className="flex flex-wrap items-center gap-2">
+        {stageOptions.map((opt) => (
+          <button
+            key={opt.value}
+            type="button"
+            onClick={() => setStageFilter(opt.value)}
+            className={cn(
+              "rounded-full px-3.5 py-1.5 text-xs font-semibold transition-colors",
+              stageFilter === opt.value
+                ? "bg-primary text-primary-foreground shadow-sm"
+                : "bg-muted text-muted-foreground hover:bg-muted/80",
+            )}
+          >
+            {opt.label}
+          </button>
+        ))}
+      </div>
 
       {/* Consultation fee gate / call-next failure */}
       {callError && (
@@ -178,84 +294,117 @@ export default function OPDQueuePage() {
         <div className="space-y-3">
           {data.items.map((encounter) => {
             const triage = TRIAGE_MAP[encounter.triage_category ?? "non_urgent"];
+            const assessed = Boolean(encounter.triaged_at);
 
             return (
-              <Link
-                key={encounter.id}
-                href={`/opd/${encounter.id}`}
-                className={cn(
-                  "flex items-center gap-4 rounded-lg border p-4 transition-all",
-                  "bg-card shadow-[var(--shadow-card)] hover:shadow-[var(--shadow-card-hover)]",
-                  triage.border,
-                )}
-              >
-                {/* Patient avatar */}
-                <Avatar
-                  name={encounter.patient_name ?? "?"}
-                  size="lg"
-                />
+              <div key={encounter.id} className="flex items-stretch gap-2">
+                <Link
+                  href={`/opd/${encounter.id}`}
+                  className={cn(
+                    "flex min-w-0 flex-1 items-center gap-4 rounded-lg border p-4 transition-all",
+                    "bg-card shadow-[var(--shadow-card)] hover:shadow-[var(--shadow-card-hover)]",
+                    triage.border,
+                  )}
+                >
+                  {/* Patient avatar */}
+                  <Avatar
+                    name={encounter.patient_name ?? "?"}
+                    size="lg"
+                  />
 
-                {/* Queue number */}
-                <div className="flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-lg bg-muted text-sm font-bold text-foreground">
-                  {encounter.queue_number ?? "-"}
-                </div>
+                  {/* Queue number */}
+                  <div className="flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-lg bg-muted text-sm font-bold text-foreground">
+                    {encounter.queue_number ?? "-"}
+                  </div>
 
-                {/* Patient info */}
-                <div className="min-w-0 flex-1">
-                  <div className="flex items-center gap-2">
-                    <span className="truncate font-semibold text-foreground">
-                      {encounter.patient_name ?? "\u2014"}
-                    </span>
-                    {encounter.patient_mrn && (
-                      <span className="font-mono text-xs text-muted-foreground">
-                        {encounter.patient_mrn}
+                  {/* Patient info */}
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-center gap-2">
+                      <span className="truncate font-semibold text-foreground">
+                        {encounter.patient_name ?? "\u2014"}
                       </span>
+                      {encounter.patient_mrn && (
+                        <span className="font-mono text-xs text-muted-foreground">
+                          {encounter.patient_mrn}
+                        </span>
+                      )}
+                    </div>
+                    {encounter.chief_complaint && (
+                      <p className="mt-0.5 truncate text-sm text-muted-foreground">
+                        {encounter.chief_complaint}
+                      </p>
                     )}
                   </div>
-                  {encounter.chief_complaint && (
-                    <p className="mt-0.5 truncate text-sm text-muted-foreground">
-                      {encounter.chief_complaint}
-                    </p>
+
+                  {/* Triage badge */}
+                  <StatusBadge
+                    variant={triage.variant}
+                    size="sm"
+                    className="hidden sm:inline-flex"
+                  >
+                    {t(triage.label as Parameters<typeof t>[0])}
+                  </StatusBadge>
+
+                  {/* Where the patient is between OPD and the doctor */}
+                  <StatusBadge
+                    variant={assessed ? "success" : "warning"}
+                    size="sm"
+                    className="hidden md:inline-flex"
+                  >
+                    {assessed ? t("triaged") : t("awaitingOpd")}
+                  </StatusBadge>
+
+                  {/* Who took the observations, once they have been taken */}
+                  {assessed && encounter.nurse_name && (
+                    <span className="hidden text-xs text-muted-foreground lg:inline">
+                      {t("triagedBy", { name: encounter.nurse_name })}
+                    </span>
                   )}
-                </div>
 
-                {/* Triage badge */}
-                <StatusBadge
-                  variant={triage.variant}
-                  size="sm"
-                  className="hidden sm:inline-flex"
-                >
-                  {t(triage.label as Parameters<typeof t>[0])}
-                </StatusBadge>
+                  {/* Where reception directed the patient */}
+                  <span className="hidden flex-shrink-0 items-center gap-1 text-xs text-muted-foreground xl:flex">
+                    <Stethoscope className="h-3 w-3" />
+                    {encounter.department_name ?? t("unassignedDepartment")}
+                  </span>
 
-                {/* Status badge */}
-                <StatusBadge
-                  variant={STATUS_VARIANT[encounter.status] ?? "warning"}
-                  size="sm"
-                  dot
-                >
-                  {t(
-                    encounter.status === "in_consultation"
-                      ? "inConsultation"
-                      : (encounter.status as Parameters<typeof t>[0]),
+                  {encounter.attending_doctor_name && (
+                    <span className="hidden text-xs text-muted-foreground xl:inline">
+                      {encounter.attending_doctor_name}
+                    </span>
                   )}
-                </StatusBadge>
 
-                {/* Time */}
-                <div className="hidden items-center gap-1 text-xs text-muted-foreground lg:flex">
-                  <Clock className="h-3 w-3" />
-                  {formatDateTime(encounter.created_at)}
-                </div>
+                  {/* Status badge */}
+                  <StatusBadge
+                    variant={STATUS_VARIANT[encounter.status] ?? "warning"}
+                    size="sm"
+                    dot
+                  >
+                    {t(
+                      encounter.status === "in_consultation"
+                        ? "inConsultation"
+                        : (encounter.status as Parameters<typeof t>[0]),
+                    )}
+                  </StatusBadge>
 
-                {/* Priority indicator for emergencies */}
-                {encounter.priority >= 4 && (
-                  <AlertTriangle className="h-5 w-5 flex-shrink-0 text-red-500" />
+                  {/* Time */}
+                  <div className="hidden items-center gap-1 text-xs text-muted-foreground lg:flex">
+                    <Clock className="h-3 w-3" />
+                    {formatDateTime(encounter.created_at)}
+                  </div>
+
+                  {/* Priority indicator for emergencies */}
+                  {encounter.priority >= 4 && (
+                    <AlertTriangle className="h-5 w-5 flex-shrink-0 text-red-500" />
+                  )}
+                  {/* The nurse's next action on this patient */}
+                  <span className="inline-flex flex-shrink-0 items-center gap-1 rounded-full bg-primary px-3 py-1 text-xs font-semibold text-primary-foreground shadow transition-all">
+                    {assessed ? tc("open") : t("triageAction")}
+                  </span>
+                </Link>
+                {!assessed && canTriage && (
+                  <OpdAssessmentButton encounterId={encounter.id} />
                 )}
-                {/* Open encounter CTA */}
-                <span className="inline-flex flex-shrink-0 items-center gap-1 rounded-full bg-primary px-3 py-1 text-xs font-semibold text-primary-foreground shadow transition-all">
-                  {tc("open")}
-                </span>
-              </Link>
+              </div>
             );
           })}
         </div>

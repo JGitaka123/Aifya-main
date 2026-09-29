@@ -16,7 +16,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth import CurrentUser, get_current_user, require_roles
 from app.auth.license_check import require_module
+from app.auth.permissions import is_assignable_role
 from app.database import get_db
+from app.models.hr import StaffProfile
 from app.models.payroll import (
     Employee,
     EmployeeSalary,
@@ -26,19 +28,29 @@ from app.models.payroll import (
     PayrollRun,
     StatutoryRate,
 )
-from app.models.payroll_extra import LeaveType, PayrollLeaveRequest
-from app.models.staff import Department
+from app.models.payroll_extra import (
+    EmployeeDeduction,
+    LeaveType,
+    PayrollLeaveRequest,
+)
+from app.models.staff import Department, Staff
 from app.schemas.payroll import (
     CostTrendResponse,
     DepartmentCreate,
     DepartmentResponse,
     EmployeeCreate,
+    EmployeeDeductionCreate,
+    EmployeeDeductionResponse,
     EmployeeListItem,
     EmployeeListResponse,
     EmployeeResponse,
     EmployeeUpdate,
     HeadcountResponse,
+    HousingLevyScheduleResponse,
+    InsuranceUtilisationResponse,
     LeaveApprovalRequest,
+    LeaveBalanceBucket,
+    LeaveBalanceResponse,
     LeaveRequestCreate,
     LeaveRequestListItem,
     LeaveRequestListResponse,
@@ -62,7 +74,9 @@ from app.schemas.payroll import (
     StatutoryRateResponse,
     TurnoverResponse,
 )
+from app.services.hr_service import HRService
 from app.services.payroll.employee_staff_sync import sync_employee_to_staff
+from app.services.staff_access import StaffAccessError, find_login, provision_login
 from app.services.payroll.engine import run_monthly_payroll
 from app.services.payroll.gl_integration import post_payroll_to_gl
 from app.services.payroll.leave import (
@@ -79,12 +93,28 @@ from app.services.payroll.reports import (
     generate_p9,
     get_employee_turnover,
     get_headcount_report,
+    get_housing_levy_schedule,
     get_leave_utilisation,
+    get_insurance_utilisation,
     get_monthly_payroll_summary,
     get_nssf_schedule,
     get_paye_schedule,
     get_payroll_cost_trend,
     get_shif_schedule,
+)
+
+#: Roles that may file and read leave on someone else's behalf. Everyone else
+#: is restricted to their own payroll employee row - a clinician booking a
+#: colleague's annual leave is a forged request, not a leave request.
+LEAVE_MANAGER_ROLES: frozenset[str] = frozenset(
+    {
+        "admin",
+        "facility_admin",
+        "hr_admin",
+        "hr_officer",
+        "manager",
+        "super_admin",
+    }
 )
 
 router = APIRouter(dependencies=[Depends(require_module("hr"))])
@@ -220,6 +250,31 @@ async def _department_name(
     ).scalar_one_or_none()
 
 
+async def _employee_has_login(db: AsyncSession, emp: Employee) -> bool:
+    """Whether the staff row behind this employee can sign in.
+
+    Payroll employees and clinical staff are separate rows joined by the
+    employee number, so answering "does this person have a login?" means
+    finding the staff row first and then its auth account.
+
+    @param db: Database session
+    @param emp: Payroll employee row
+    @returns True when an auth account exists for the matching staff member
+    """
+    staff_id = (
+        await db.execute(
+            select(Staff.id).where(
+                Staff.facility_id == emp.facility_id,
+                Staff.employee_number == emp.staff_id,
+                Staff.is_deleted == False,  # noqa: E712
+            )
+        )
+    ).scalars().first()
+    if staff_id is None:
+        return False
+    return (await find_login(db, staff_id)) is not None
+
+
 @router.get("/employees", response_model=EmployeeListResponse)
 async def list_employees(
     department_id: uuid.UUID | None = Query(None),
@@ -307,28 +362,93 @@ async def create_employee(
         require_roles("admin", "facility_admin", "hr_admin")
     ),
 ) -> EmployeeResponse:
-    """Create a payroll-grade employee record."""
+    """Create a payroll-grade employee record.
+
+    The employee form is where HR adds a person, so it also carries the two
+    things that decide their access: the role they hold, and an optional
+    initial password. Supplying them registers the clinical staff row with an
+    explicit role and creates the login, which is what lets the new employee
+    sign in and see exactly the tabs their role owns. Both are optional - a
+    record-only employee is still valid and can be given access later.
+    """
+    payload = data.model_dump()
+    role = payload.pop("role", None)
+    login_password = payload.pop("login_password", None)
+    if role and not is_assignable_role(role):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=(
+                "That is not a role HR can assign. Choose one from "
+                "GET /hr/roles."
+            ),
+        )
+    opening_basic = Decimal(payload.pop("basic_salary", None) or 0)
+    opening_house = Decimal(payload.pop("house_allowance", None) or 0)
+    opening_transport = Decimal(payload.pop("transport_allowance", None) or 0)
+    opening_other = Decimal(payload.pop("other_allowances", None) or 0)
+
     emp = Employee(
         facility_id=current_user.facility_id,
-        **data.model_dump(),
+        **payload,
         created_by=current_user.user_id,
         updated_by=current_user.user_id,
     )
     db.add(emp)
     await db.flush()
-    await sync_employee_to_staff(
+
+    # The pay entered on the employee form becomes the opening salary record.
+    # Payroll prices every run from employee_salaries, so without this row the
+    # new employee would be silently skipped by every run.
+    if opening_basic or opening_house or opening_transport or opening_other:
+        db.add(
+            EmployeeSalary(
+                facility_id=current_user.facility_id,
+                employee_id=emp.id,
+                basic_salary=opening_basic,
+                house_allowance=opening_house,
+                transport_allowance=opening_transport,
+                other_allowances=(
+                    {"Other Allowances": str(opening_other)}
+                    if opening_other
+                    else {}
+                ),
+                effective_from=emp.hire_date,
+                approved_by=current_user.user_id,
+                created_by=current_user.user_id,
+                updated_by=current_user.user_id,
+            )
+        )
+        await db.flush()
+
+    staff = await sync_employee_to_staff(
         db,
         facility_id=current_user.facility_id,
         employee=emp,
         actor_id=current_user.user_id,
+        role_override=role,
     )
+    has_login = False
+    if login_password and staff is not None:
+        try:
+            await provision_login(
+                db,
+                staff=staff,
+                password=login_password,
+                actor_id=current_user.user_id,
+            )
+        except StaffAccessError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)
+            ) from exc
+        has_login = True
     await db.refresh(emp)
     response = EmployeeResponse.model_validate(emp)
     return response.model_copy(
         update={
             "department_name": await _department_name(
                 db, current_user.facility_id, emp.department_id
-            )
+            ),
+            "has_login": has_login,
         }
     )
 
@@ -358,7 +478,8 @@ async def get_employee(
         update={
             "department_name": await _department_name(
                 db, current_user.facility_id, emp.department_id
-            )
+            ),
+            "has_login": await _employee_has_login(db, emp),
         }
     )
 
@@ -402,7 +523,8 @@ async def update_employee(
         update={
             "department_name": await _department_name(
                 db, current_user.facility_id, emp.department_id
-            )
+            ),
+            "has_login": await _employee_has_login(db, emp),
         }
     )
 
@@ -611,15 +733,53 @@ async def approve_payroll_run(
     run.updated_by = current_user.user_id
     await db.flush()
 
-    # Post to GL (best-effort)
-    txn_id = await post_payroll_to_gl(
-        db=db, run=run, user_id=current_user.user_id
-    )
-    if txn_id is not None:
-        run.gl_transaction_id = txn_id
-        run.status = "posted"
-        await db.flush()
+    await _post_run_to_gl(db, run, current_user.user_id)
 
+    await db.refresh(run)
+    return await _build_run_response(db, current_user.facility_id, run)
+
+
+@router.post("/runs/{run_id}/post-to-gl", response_model=PayrollRunResponse)
+async def post_payroll_run_to_gl(
+    run_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: CurrentUser = Depends(
+        require_roles("admin", "facility_admin", "finance_admin")
+    ),
+) -> PayrollRunResponse:
+    """Retry the Finance general-ledger post for an approved run.
+
+    Safe to repeat: both journals carry a stable idempotency key, so a replay
+    returns the original transaction instead of posting the payroll twice.
+
+    @param run_id: Payroll run UUID
+    @returns The run, now posted, or still approved with the failure recorded
+    """
+    run = (
+        await db.execute(
+            select(PayrollRun).where(
+                PayrollRun.id == run_id,
+                PayrollRun.facility_id == current_user.facility_id,
+                PayrollRun.is_deleted.is_(False),
+            )
+        )
+    ).scalars().first()
+    if run is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Payroll run not found"
+        )
+    if run.status == "posted" and run.gl_transaction_id is not None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Payroll run is already posted to the general ledger",
+        )
+    if run.status not in ("approved", "posted"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Cannot post run in status '{run.status}'; approve it first",
+        )
+
+    await _post_run_to_gl(db, run, current_user.user_id)
     await db.refresh(run)
     return await _build_run_response(db, current_user.facility_id, run)
 
@@ -894,6 +1054,21 @@ async def shif_schedule(
     )
 
 
+@router.get("/reports/housing-levy-schedule", response_model=HousingLevyScheduleResponse)
+async def housing_levy_schedule(
+    month: int = Query(..., ge=1, le=12),
+    year: int = Query(..., ge=2000, le=2100),
+    db: AsyncSession = Depends(get_db),
+    current_user: CurrentUser = Depends(get_current_user),
+) -> HousingLevyScheduleResponse:
+    """Affordable Housing Levy schedule per employee."""
+    return HousingLevyScheduleResponse(
+        **await get_housing_levy_schedule(
+            db, current_user.facility_id, month, year
+        )
+    )
+
+
 @router.get("/reports/headcount", response_model=HeadcountResponse)
 async def headcount_report(
     as_of: date | None = Query(None),
@@ -908,6 +1083,130 @@ async def headcount_report(
             as_of=as_of or date.today(),
         )
     )
+
+
+@router.get(
+    "/reports/insurance-utilisation",
+    response_model=InsuranceUtilisationResponse,
+)
+async def insurance_utilisation(
+    year: int = Query(..., ge=2000, le=2100),
+    db: AsyncSession = Depends(get_db),
+    current_user: CurrentUser = Depends(get_current_user),
+) -> InsuranceUtilisationResponse:
+    """Configured insurance products plus how payroll has used them."""
+    return InsuranceUtilisationResponse(
+        **await get_insurance_utilisation(
+            db=db, facility_id=current_user.facility_id, year=year
+        )
+    )
+
+
+@router.get(
+    "/employee-deductions",
+    response_model=list[EmployeeDeductionResponse],
+)
+async def list_employee_deductions(
+    employee_id: uuid.UUID | None = Query(None),
+    db: AsyncSession = Depends(get_db),
+    current_user: CurrentUser = Depends(get_current_user),
+) -> list[EmployeeDeductionResponse]:
+    """List an employee's active deductions (insurance premiums, loans, ...)."""
+    stmt = select(EmployeeDeduction).where(
+        EmployeeDeduction.facility_id == current_user.facility_id,
+        EmployeeDeduction.is_deleted.is_(False),
+    )
+    if employee_id is not None:
+        stmt = stmt.where(EmployeeDeduction.employee_id == employee_id)
+    rows = (
+        await db.execute(stmt.order_by(EmployeeDeduction.name.asc()))
+    ).scalars().all()
+    return [EmployeeDeductionResponse.model_validate(r) for r in rows]
+
+
+@router.post(
+    "/employee-deductions",
+    response_model=EmployeeDeductionResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_employee_deduction(
+    data: EmployeeDeductionCreate,
+    db: AsyncSession = Depends(get_db),
+    current_user: CurrentUser = Depends(
+        require_roles(
+            "admin", "facility_admin", "finance_admin", "hr_admin", "hr_officer"
+        )
+    ),
+) -> EmployeeDeductionResponse:
+    """Record a deduction for an employee.
+
+    Naming it after a configured insurance product makes the payroll engine
+    treat it as an insurance premium and grant insurance relief on it.
+    """
+    employee = (
+        await db.execute(
+            select(Employee.id).where(
+                Employee.id == data.employee_id,
+                Employee.facility_id == current_user.facility_id,
+                Employee.is_deleted.is_(False),
+            )
+        )
+    ).scalar_one_or_none()
+    if employee is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Employee not found"
+        )
+
+    deduction = EmployeeDeduction(
+        facility_id=current_user.facility_id,
+        employee_id=data.employee_id,
+        name=data.name.strip(),
+        amount=data.amount,
+        frequency=data.frequency,
+        start_date=data.start_date,
+        end_date=data.end_date,
+        is_active=data.is_active,
+        notes=data.notes,
+        created_by=current_user.user_id,
+        updated_by=current_user.user_id,
+    )
+    db.add(deduction)
+    await db.flush()
+    await db.refresh(deduction)
+    return EmployeeDeductionResponse.model_validate(deduction)
+
+
+@router.delete(
+    "/employee-deductions/{deduction_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+async def delete_employee_deduction(
+    deduction_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: CurrentUser = Depends(
+        require_roles(
+            "admin", "facility_admin", "finance_admin", "hr_admin", "hr_officer"
+        )
+    ),
+) -> None:
+    """Stop a deduction from being applied on the next payroll run."""
+    deduction = (
+        await db.execute(
+            select(EmployeeDeduction).where(
+                EmployeeDeduction.id == deduction_id,
+                EmployeeDeduction.facility_id == current_user.facility_id,
+                EmployeeDeduction.is_deleted.is_(False),
+            )
+        )
+    ).scalars().first()
+    if deduction is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Deduction not found"
+        )
+    deduction.is_deleted = True
+    deduction.is_active = False
+    deduction.updated_by = current_user.user_id
+    await db.flush()
 
 
 @router.get("/reports/leave-utilisation")
@@ -1148,15 +1447,9 @@ async def list_leave_requests(
     own payroll employee record (the auth staff id is resolved to the
     mirrored payroll employee row when present).
     """
-    manager_roles = {
-        "admin",
-        "facility_admin",
-        "hr_admin",
-        "hr_officer",
-        "manager",
-        "super_admin",
-    }
-    if current_user.roles and any(r in manager_roles for r in current_user.roles):
+    if current_user.roles and any(
+        r in LEAVE_MANAGER_ROLES for r in current_user.roles
+    ):
         scope_employee_id = employee_id
     else:
         # Non-managers are scoped to their own payroll employee row. Their
@@ -1216,6 +1509,72 @@ async def list_leave_requests(
     return LeaveRequestListResponse(items=items, total=len(items))
 
 
+@router.get("/leave-balance", response_model=LeaveBalanceResponse)
+async def get_my_leave_balance(
+    db: AsyncSession = Depends(get_db),
+    current_user: CurrentUser = Depends(get_current_user),
+) -> LeaveBalanceResponse:
+    """Self-service: the signed-in user's own leave balance.
+
+    A clinician asks for leave from their own workspace, so this resolves the
+    caller's staff record to their payroll employee row and reports the
+    entitlement, the days already approved and what is left. `remaining`
+    matches the HR & Staff screen: entitlement minus approved payroll-register
+    days, never negative.
+
+    @param db: Database session
+    @param current_user: Authenticated user from JWT
+    @returns The caller's own leave balance
+    @raises HTTPException 400: When no payroll employee is linked
+    """
+    employee = await resolve_payroll_employee(
+        db, current_user.facility_id, current_user.user_id
+    )
+    if employee is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                "No payroll employee is linked to this account. "
+                "Ask an HR admin to register you as an employee first."
+            ),
+        )
+
+    profile = (
+        await db.execute(
+            select(StaffProfile).where(
+                StaffProfile.facility_id == current_user.facility_id,
+                StaffProfile.staff_id == current_user.user_id,
+                StaffProfile.is_deleted.is_(False),
+            )
+        )
+    ).scalars().first()
+
+    entitled = {
+        "annual": profile.annual_leave_balance if profile else 0,
+        "sick": profile.sick_leave_balance if profile else 0,
+        "maternity": profile.maternity_leave_balance if profile else 0,
+        "paternity": profile.paternity_leave_balance if profile else 0,
+    }
+    taken = await HRService(db).payroll_leave_days_by_type(
+        current_user.user_id, current_user.facility_id
+    )
+
+    buckets = [
+        LeaveBalanceBucket(
+            key=key,
+            entitled_days=days,
+            taken_days=taken.get(key, 0),
+            remaining_days=max(0, days - taken.get(key, 0)),
+        )
+        for key, days in entitled.items()
+    ]
+    return LeaveBalanceResponse(
+        employee_id=employee.id,
+        employee_name=employee.full_name,
+        buckets=buckets,
+    )
+
+
 @router.post(
     "/leave-requests",
     response_model=LeaveRequestResponse,
@@ -1231,6 +1590,13 @@ async def create_leave_request(
         employee_id = data.employee_id
         # The Leave tab sends the signed-in user's staff id by default.
         # Translate that to the matching payroll employee record.
+        is_manager = bool(current_user.roles) and any(
+            r in LEAVE_MANAGER_ROLES for r in current_user.roles
+        )
+        if not is_manager:
+            # Self-service: a non-manager may only file their own leave, so
+            # the body's employee is ignored rather than trusted.
+            employee_id = current_user.user_id
         if employee_id == current_user.user_id:
             resolved = await resolve_payroll_employee(
                 db, current_user.facility_id, current_user.user_id
@@ -1295,6 +1661,38 @@ async def process_leave_request(
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────
+
+
+#: Longest GL failure text kept on a run.
+_GL_ERROR_MAX = 500
+
+
+async def _post_run_to_gl(
+    db: AsyncSession,
+    run: PayrollRun,
+    user_id: uuid.UUID,
+) -> None:
+    """Attempt the Finance GL post and record the outcome on the run.
+
+    A failure leaves the run at `approved` with `gl_posting_error` set, so it
+    reads as not-in-the-ledger rather than being mistaken for posted.
+
+    @param db: Async session
+    @param run: Payroll run to post
+    @param user_id: User triggering the post
+    """
+    run.gl_attempted_at = datetime.now(UTC)
+    result = await post_payroll_to_gl(db=db, run=run, user_id=user_id)
+    if result.ok:
+        run.gl_transaction_id = result.transaction_id
+        run.gl_posting_error = None
+        run.status = "posted"
+    else:
+        run.gl_transaction_id = None
+        code = result.error_code or "posting_failed"
+        detail = result.error_detail or ""
+        run.gl_posting_error = f"{code}: {detail}".rstrip(": ")[:_GL_ERROR_MAX]
+    await db.flush()
 
 
 async def _build_run_response(

@@ -3,6 +3,7 @@ import type {
   PatientLimitInfo,
   SubscriptionTier,
 } from "@aifya/shared";
+import { ALL_PERMISSIONS } from "@/lib/auth/permissions";
 
 export interface BetaUser {
   id: string;
@@ -10,6 +11,9 @@ export interface BetaUser {
   name: string;
   roles: string[];
   facilityId: string;
+  departmentId: string | null;
+  departmentName: string | null;
+  permissions: string[];
 }
 
 export const BETA_PUBLIC_ACCESS_ENABLED =
@@ -28,6 +32,9 @@ const BETA_USER: BetaUser = {
     "hr",
   ],
   facilityId: "aifya-beta",
+  departmentId: null,
+  departmentName: null,
+  permissions: [...ALL_PERMISSIONS],
 };
 
 const BETA_TIER: SubscriptionTier = "government";
@@ -67,6 +74,7 @@ const BETA_ENABLED_MODULES = [
   "county_dashboard",
   "aggregate_reporting",
   "facility_comparison",
+  "knowledge",
 ];
 
 const BETA_FEATURE_FLAGS: Record<string, boolean> = {
@@ -90,6 +98,7 @@ export function getBetaUser(): BetaUser {
   return {
     ...BETA_USER,
     roles: [...BETA_USER.roles],
+    permissions: [...BETA_USER.permissions],
   };
 }
 

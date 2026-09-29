@@ -1,13 +1,15 @@
 """Post approved payroll runs to the Finance General Ledger.
 
-Falls back gracefully if the Finance module is not yet available — logs
-a warning and leaves `payroll_run.gl_transaction_id = None`.
+A failed post is returned, not raised: the caller records the outcome on the
+run so the operator sees that nothing reached the ledger, and can retry.
+Posting is idempotent, so a retry never double-posts.
 """
 
 from __future__ import annotations
 
 import logging
 import uuid
+from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any
 
@@ -17,6 +19,29 @@ from app.models.payroll import PayrollRun
 
 _logger = logging.getLogger(__name__)
 _ZERO = Decimal("0")
+
+
+@dataclass(frozen=True)
+class GLPostingResult:
+    """Outcome of a payroll -> General Ledger posting attempt.
+
+    A failed post is a normal outcome the operator has to see and retry, so it
+    is returned rather than raised.
+
+    @param transaction_id: Parent GL transaction id when the post succeeded
+    @param error_code: finance_module_unavailable | posting_failed
+    @param error_detail: Underlying exception text, for the operator to act on
+    """
+
+    transaction_id: uuid.UUID | None = None
+    error_code: str | None = None
+    error_detail: str | None = None
+
+    @property
+    def ok(self) -> bool:
+        """Whether both journals reached the ledger."""
+        return self.transaction_id is not None
+
 
 # Account codes (must match app.services.finance.seed_data DEFAULT_ACCOUNTS)
 ACC_SALARIES_EXPENSE = "5000"
@@ -53,17 +78,18 @@ async def post_payroll_to_gl(
     db: AsyncSession,
     run: PayrollRun,
     user_id: uuid.UUID,
-) -> uuid.UUID | None:
+) -> GLPostingResult:
     """Post the salary + employer-statutory journals to the Finance GL.
 
-    Uses `app.services.finance.post_compound_transaction` if available.
-    Returns the parent GL transaction id, or None if Finance is not
-    available / posting failed (logged at WARNING).
+    Never raises: the caller records the outcome on the run so a failure is
+    visible to the operator and can be retried. Posting is idempotent - both
+    journals carry a stable `payroll_run:{id}:*` key, so replaying a retry
+    returns the original transaction instead of double-posting.
 
     @param db: Async session
     @param run: Approved PayrollRun
     @param user_id: User triggering the post
-    @returns Parent GL transaction id or None
+    @returns GLPostingResult holding the parent transaction id, or the failure
     """
     try:
         from app.services.finance import (
@@ -77,7 +103,7 @@ async def post_payroll_to_gl(
                 "reason": "finance.post_compound_transaction not importable",
             },
         )
-        return None
+        return GLPostingResult(error_code="finance_module_unavailable")
 
     salary_entries = _build_salary_entries(run)
     employer_entries = _build_employer_entries(run)
@@ -97,6 +123,9 @@ async def post_payroll_to_gl(
             idempotency_key=f"payroll_run:{run.id}:salary",
             user_id=user_id,
         )
+        # The employer journal is a second transaction; if it fails the
+        # salary journal is already posted, and the idempotency key above
+        # makes the retry safe rather than a double-post.
         await post_compound_transaction(
             db=db,
             facility_id=run.facility_id,
@@ -105,8 +134,10 @@ async def post_payroll_to_gl(
             idempotency_key=f"payroll_run:{run.id}:employer",
             user_id=user_id,
         )
-        return getattr(salary_txn, "id", None)
-    except Exception as exc:
+        return GLPostingResult(
+            transaction_id=getattr(salary_txn, "id", None)
+        )
+    except Exception as exc:  # noqa: BLE001 - surfaced to the operator
         _logger.warning(
             "payroll.gl.post_failed",
             extra={
@@ -114,4 +145,7 @@ async def post_payroll_to_gl(
                 "error": str(exc),
             },
         )
-        return None
+        return GLPostingResult(
+            error_code="posting_failed",
+            error_detail=f"{type(exc).__name__}: {exc}",
+        )

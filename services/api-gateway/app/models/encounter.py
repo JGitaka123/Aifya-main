@@ -24,6 +24,7 @@ class Encounter(AuditMixin, Base):
         Index("ix_encounters_facility_patient", "facility_id", "patient_id"),
         Index("ix_encounters_facility_status", "facility_id", "status"),
         Index("ix_encounters_facility_date", "facility_id", "encounter_date"),
+        Index("ix_encounters_facility_triaged", "facility_id", "triaged_at"),
     )
 
     patient_id: Mapped[uuid.UUID] = mapped_column(
@@ -54,6 +55,9 @@ class Encounter(AuditMixin, Base):
         String(20)
     )  # SATS category: emergency, urgent, standard, non_urgent, or dead
     priority: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    # Stamped with the first vitals recording, so the visit itself can say it
+    # went through triage instead of leaving that only on the vital_signs row.
+    triaged_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     # Status
     status: Mapped[str] = mapped_column(
@@ -73,6 +77,12 @@ class Encounter(AuditMixin, Base):
     admission_date: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     discharge_date: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     discharge_summary: Mapped[str | None] = mapped_column(Text)
+
+    # The department's closing note. A visit that reaches "completed" carries
+    # one, so the record says what was actually done rather than only that the
+    # patient left. completed_at is the moment it was written.
+    outcome: Mapped[str | None] = mapped_column(Text)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     # Billing
     billing_status: Mapped[str] = mapped_column(

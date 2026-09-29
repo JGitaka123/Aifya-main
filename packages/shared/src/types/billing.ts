@@ -159,13 +159,20 @@ export interface InvoiceWaiveRequest {
   reason: string;
 }
 
-// ── Point of sale: ordered services (lab, imaging, pharmacy) ────────────────
+// ── Point of sale: ordered services (lab, imaging, pharmacy, OPD) ──────────────
 
 /** Kind of clinical request a point-of-sale charge settles. */
 export type ServiceReferenceType =
   | "lab_order"
   | "imaging_order"
-  | "prescription";
+  | "prescription"
+  | "point_of_care";
+
+/**
+ * Payment state of one ordered service, as a department sees it.
+ * "not_charged" means the request never reached the bill (free or uncatalogued).
+ */
+export type ServiceChargeStatus = "not_charged" | "paid" | "partial" | "unpaid";
 
 /** What a patient owes for one ordered service. */
 export interface ServiceCharge {

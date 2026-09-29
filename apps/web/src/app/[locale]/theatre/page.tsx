@@ -8,11 +8,14 @@ import {
   CheckCircle,
   Crosshair,
   MonitorCheck,
+  Plus,
   Scissors,
   XCircle,
 } from "lucide-react";
 import { Link } from "@/i18n/routing";
 import { useTheatreSummary, useSurgicalCases, useTheatres } from "@/hooks/useTheatre";
+import { NewTheatrePanel } from "@/components/theatre/NewTheatrePanel";
+import { ScheduleCasePanel } from "@/components/theatre/ScheduleCasePanel";
 import { cn } from "@/lib/utils";
 
 const PRIORITY_STYLES: Record<string, string> = {
@@ -43,6 +46,9 @@ export default function TheatrePage() {
   const t = useTranslations("theatre");
   const [tab, setTab] = useState<"schedule" | "theatres">("schedule");
   const [dateFilter, setDateFilter] = useState(new Date().toISOString().split("T")[0]);
+  const [showSchedule, setShowSchedule] = useState(false);
+  const [showNewTheatre, setShowNewTheatre] = useState(false);
+  const [notice, setNotice] = useState<string | null>(null);
 
   const { data: summary, isLoading: summaryLoading } = useTheatreSummary();
   const { data: cases, isLoading: casesLoading } = useSurgicalCases(dateFilter);
@@ -81,27 +87,59 @@ export default function TheatrePage() {
         ))}
       </div>
 
-      {/* Tabs */}
-      <div className="flex gap-2 border-b border-border">
-        {(["schedule", "theatres"] as const).map((t_) => (
-          <button
-            key={t_}
-            onClick={() => setTab(t_)}
-            className={cn(
-              "px-4 py-2 text-sm font-medium transition-colors",
-              tab === t_
-                ? "border-b-2 border-blue-600 text-blue-600 dark:border-blue-400 dark:text-blue-400"
-                : "text-muted-foreground hover:text-foreground"
-            )}
-          >
-            {t(`tab.${t_}`)}
+      {notice && (
+        <div className="flex items-center justify-between gap-3 rounded-lg border border-green-200 bg-green-50 p-3 text-sm text-green-800 dark:border-green-800 dark:bg-green-950/40 dark:text-green-200">
+          <span>{notice}</span>
+          <button onClick={() => setNotice(null)} className="text-xs underline">
+            {t("dismiss")}
           </button>
-        ))}
+        </div>
+      )}
+
+      {/* Tabs */}
+      <div className="flex items-center justify-between gap-2 border-b border-border">
+        <div className="flex gap-2">
+          {(["schedule", "theatres"] as const).map((t_) => (
+            <button
+              key={t_}
+              onClick={() => setTab(t_)}
+              className={cn(
+                "px-4 py-2 text-sm font-medium transition-colors",
+                tab === t_
+                  ? "border-b-2 border-blue-600 text-blue-600 dark:border-blue-400 dark:text-blue-400"
+                  : "text-muted-foreground hover:text-foreground"
+              )}
+            >
+              {t(`tab.${t_}`)}
+            </button>
+          ))}
+        </div>
+        <button
+          onClick={() => {
+            setNotice(null);
+            if (tab === "schedule") setShowSchedule(true);
+            else setShowNewTheatre(true);
+          }}
+          className="mb-1 inline-flex items-center gap-1.5 rounded-lg bg-primary px-3 py-1.5 text-xs font-semibold text-primary-foreground hover:bg-primary/90"
+        >
+          <Plus className="h-3.5 w-3.5" />
+          {tab === "schedule" ? t("scheduleCase") : t("newTheatre")}
+        </button>
       </div>
 
       {/* Schedule Tab */}
       {tab === "schedule" && (
         <div className="space-y-4">
+          {showSchedule && (
+            <ScheduleCasePanel
+              onScheduled={(caseNumber) => {
+                setShowSchedule(false);
+                setNotice(t("scheduleSuccess", { caseNumber }));
+              }}
+              onCancel={() => setShowSchedule(false)}
+            />
+          )}
+
           <div className="flex gap-3">
             <input
               type="date"
@@ -166,22 +204,33 @@ export default function TheatrePage() {
 
       {/* Theatres Tab */}
       {tab === "theatres" && (
-        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-          {theatres?.map((th) => (
-            <div key={th.id} className="rounded-xl border border-border bg-card p-4 shadow-[var(--shadow-card)]">
-              <div className="flex items-center justify-between">
-                <h3 className="font-semibold text-foreground">{th.name}</h3>
-                <span className={cn("rounded-full px-2 py-0.5 text-xs font-medium", THEATRE_STATUS_STYLES[th.status])}>
-                  {t(`theatreStatus.${th.status}`)}
-                </span>
-              </div>
-              <p className="mt-1 text-sm text-muted-foreground">{th.code} — {t(`theatreType.${th.theatre_type}`)}</p>
-              {th.floor && <p className="text-xs text-muted-foreground/70">{t("floor")}: {th.floor}</p>}
-            </div>
-          ))}
-          {!theatres?.length && (
-            <p className="col-span-full py-8 text-center text-muted-foreground/70">{t("noTheatres")}</p>
+        <div className="space-y-4">
+          {showNewTheatre && (
+            <NewTheatrePanel
+              onCreated={(name) => {
+                setShowNewTheatre(false);
+                setNotice(t("createSuccess", { name }));
+              }}
+              onCancel={() => setShowNewTheatre(false)}
+            />
           )}
+          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+            {theatres?.map((th) => (
+              <div key={th.id} className="rounded-xl border border-border bg-card p-4 shadow-[var(--shadow-card)]">
+                <div className="flex items-center justify-between">
+                  <h3 className="font-semibold text-foreground">{th.name}</h3>
+                  <span className={cn("rounded-full px-2 py-0.5 text-xs font-medium", THEATRE_STATUS_STYLES[th.status])}>
+                    {t(`theatreStatus.${th.status}`)}
+                  </span>
+                </div>
+                <p className="mt-1 text-sm text-muted-foreground">{th.code} — {t(`theatreType.${th.theatre_type}`)}</p>
+                {th.floor && <p className="text-xs text-muted-foreground/70">{t("floor")}: {th.floor}</p>}
+              </div>
+            ))}
+            {!theatres?.length && (
+              <p className="col-span-full py-8 text-center text-muted-foreground/70">{t("noTheatres")}</p>
+            )}
+          </div>
         </div>
       )}
     </div>

@@ -18,8 +18,13 @@ from app.models.payroll import (
     Employee,
     PayrollLineItem,
     PayrollRun,
+    StatutoryRate,
 )
-from app.models.payroll_extra import LeaveType, PayrollLeaveRequest
+from app.models.payroll_extra import (
+    EmployeeDeduction,
+    LeaveType,
+    PayrollLeaveRequest,
+)
 from app.models.staff import Department
 
 _ZERO = Decimal("0")
@@ -203,6 +208,11 @@ async def get_paye_schedule(
     return {
         "month": month,
         "year": year,
+        # Which payroll run this return came from, so the Reports UI can show
+        # the same period/status the Payroll tab shows instead of a silent
+        # empty table when the run is still a draft.
+        "run_id": run.id if run is not None else None,
+        "run_status": run.status if run is not None else None,
         "rows": rows,
         "total_taxable": sum((r["taxable_pay"] for r in rows), _ZERO),
         "total_paye": sum((r["paye"] for r in rows), _ZERO),
@@ -251,6 +261,8 @@ async def get_nssf_schedule(
     return {
         "month": month,
         "year": year,
+        "run_id": run.id if run is not None else None,
+        "run_status": run.status if run is not None else None,
         "rows": rows,
         "total_employee": sum((r["employee_contribution"] for r in rows), _ZERO),
         "total_employer": sum((r["employer_contribution"] for r in rows), _ZERO),
@@ -290,8 +302,71 @@ async def get_shif_schedule(
     return {
         "month": month,
         "year": year,
+        "run_id": run.id if run is not None else None,
+        "run_status": run.status if run is not None else None,
         "rows": rows,
         "total": sum((r["contribution"] for r in rows), _ZERO),
+    }
+
+
+async def get_housing_levy_schedule(
+    db: AsyncSession, facility_id: uuid.UUID, month: int, year: int
+) -> dict[str, Any]:
+    """Affordable Housing Levy schedule per employee.
+
+    The levy is 1.5% of gross from the employee plus 1.5% from the employer
+    and is remitted to KRA, so the KRA PIN identifies the employee here the
+    same way it does on the P10 PAYE schedule.
+    """
+    run = await _resolve_run(db, facility_id, month, year)
+    rows: list[dict[str, Any]] = []
+    if _is_reportable(run) and run is not None:
+        lines = await _period_lines(
+            db,
+            facility_id,
+            run,
+            [
+                Employee.id,
+                Employee.full_name,
+                Employee.kra_pin,
+                PayrollLineItem.gross_salary,
+                PayrollLineItem.housing_levy,
+                PayrollLineItem.employer_housing_levy,
+            ],
+        )
+        rows = [
+            {
+                "employee_id": employee_id,
+                "employee_name": name,
+                "kra_pin": kra_pin,
+                "gross_salary": Decimal(gross or 0),
+                "employee_contribution": Decimal(employee_share or 0),
+                "employer_contribution": Decimal(employer_share or 0),
+                "total": Decimal(employee_share or 0)
+                + Decimal(employer_share or 0),
+            }
+            for (
+                employee_id,
+                name,
+                kra_pin,
+                gross,
+                employee_share,
+                employer_share,
+            ) in lines
+        ]
+    return {
+        "month": month,
+        "year": year,
+        "run_id": run.id if run is not None else None,
+        "run_status": run.status if run is not None else None,
+        "rows": rows,
+        "total_employee": sum(
+            (r["employee_contribution"] for r in rows), _ZERO
+        ),
+        "total_employer": sum(
+            (r["employer_contribution"] for r in rows), _ZERO
+        ),
+        "total": sum((r["total"] for r in rows), _ZERO),
     }
 
 
@@ -714,4 +789,211 @@ async def get_employee_turnover(
         "terminations": sum(leavers_by_month.values()),
         "ending_headcount": int(ending),
         "points": points,
+    }
+
+
+# ── Insurance utilisation ────────────────────────────────────────────────
+
+_DEFAULT_INSURANCE_RELIEF_RATE = Decimal("0.15")
+_DEFAULT_INSURANCE_RELIEF_CAP = Decimal("5000")
+
+
+async def get_insurance_utilisation(
+    db: AsyncSession,
+    facility_id: uuid.UUID,
+    year: int,
+) -> dict[str, Any]:
+    """Insurance products, who is covered, and what payroll actually deducted.
+
+    Insurance products are ``statutory_rates`` rows in the ``insurance``
+    category. A premium is an ``employee_deductions`` row whose name matches a
+    product, so it flows into the payslip as an ordinary deduction; the relief
+    it earns is the ``insurance_relief`` the engine wrote on each payroll line.
+
+    @param db: Async session
+    @param facility_id: Tenant
+    @param year: Pay period year
+    @returns Products, coverage and per-period premium/relief
+    """
+    year_start = date(year, 1, 1)
+    year_end = date(year, 12, 31)
+    in_facility = or_(
+        StatutoryRate.facility_id == facility_id,
+        StatutoryRate.facility_id.is_(None),
+    )
+    in_year = and_(
+        StatutoryRate.effective_from <= year_end,
+        or_(
+            StatutoryRate.effective_to.is_(None),
+            StatutoryRate.effective_to >= year_start,
+        ),
+    )
+
+    product_rows = (
+        await db.execute(
+            select(StatutoryRate)
+            .where(
+                StatutoryRate.is_deleted.is_(False),
+                StatutoryRate.category == "insurance",
+                in_year,
+                in_facility,
+            )
+            .order_by(
+                StatutoryRate.facility_id.is_(None).asc(),
+                StatutoryRate.effective_from.desc(),
+            )
+        )
+    ).scalars().all()
+
+    products: list[dict[str, Any]] = []
+    product_names: set[str] = set()
+    for row in product_rows:
+        key = (row.name or "").strip().lower()
+        if not key or key in product_names:
+            continue
+        product_names.add(key)
+        products.append(
+            {
+                "id": row.id,
+                "name": row.name,
+                "rate": Decimal(row.rate) if row.rate is not None else None,
+                "fixed_amount": (
+                    Decimal(row.fixed_amount)
+                    if row.fixed_amount is not None
+                    else None
+                ),
+                "effective_from": row.effective_from,
+                "effective_to": row.effective_to,
+            }
+        )
+
+    relief_row = (
+        await db.execute(
+            select(StatutoryRate)
+            .where(
+                StatutoryRate.is_deleted.is_(False),
+                StatutoryRate.category == "relief",
+                StatutoryRate.name == "Insurance Relief",
+                in_year,
+                in_facility,
+            )
+            .order_by(
+                StatutoryRate.facility_id.is_(None).asc(),
+                StatutoryRate.effective_from.desc(),
+            )
+        )
+    ).scalars().first()
+    relief_rate = (
+        Decimal(relief_row.rate)
+        if relief_row is not None and relief_row.rate is not None
+        else _DEFAULT_INSURANCE_RELIEF_RATE
+    )
+    relief_cap = (
+        Decimal(relief_row.fixed_cap)
+        if relief_row is not None and relief_row.fixed_cap is not None
+        else _DEFAULT_INSURANCE_RELIEF_CAP
+    )
+
+    deduction_rows = (
+        await db.execute(
+            select(EmployeeDeduction, Employee.full_name)
+            .join(Employee, Employee.id == EmployeeDeduction.employee_id)
+            .where(
+                EmployeeDeduction.facility_id == facility_id,
+                EmployeeDeduction.is_deleted.is_(False),
+                EmployeeDeduction.is_active.is_(True),
+                EmployeeDeduction.start_date <= year_end,
+                or_(
+                    EmployeeDeduction.end_date.is_(None),
+                    EmployeeDeduction.end_date >= year_start,
+                ),
+                Employee.facility_id == facility_id,
+                Employee.is_deleted.is_(False),
+            )
+            .order_by(Employee.full_name.asc())
+        )
+    ).all()
+
+    covered: dict[uuid.UUID, dict[str, Any]] = {}
+    for deduction, employee_name in deduction_rows:
+        if (deduction.name or "").strip().lower() not in product_names:
+            continue
+        entry = covered.setdefault(
+            deduction.employee_id,
+            {
+                "employee_id": deduction.employee_id,
+                "employee_name": employee_name or "",
+                "products": [],
+                "monthly_premium": _ZERO,
+            },
+        )
+        entry["products"].append(deduction.name)
+        if deduction.frequency == "monthly":
+            entry["monthly_premium"] += Decimal(deduction.amount or 0)
+    coverage = [covered[key] for key in covered]
+
+    line_rows = (
+        await db.execute(
+            select(
+                PayrollRun.month,
+                PayrollRun.status,
+                PayrollLineItem.other_deductions,
+                PayrollLineItem.insurance_relief,
+            )
+            .join(PayrollRun, PayrollRun.id == PayrollLineItem.payroll_run_id)
+            .where(
+                PayrollLineItem.facility_id == facility_id,
+                PayrollLineItem.is_deleted.is_(False),
+                PayrollRun.facility_id == facility_id,
+                PayrollRun.is_deleted.is_(False),
+                PayrollRun.year == year,
+            )
+        )
+    ).all()
+
+    buckets: dict[int, dict[str, Any]] = {}
+    for month, run_status, breakdown, relief in line_rows:
+        premium = _ZERO
+        if isinstance(breakdown, dict):
+            for name, value in breakdown.items():
+                if (name or "").strip().lower() not in product_names:
+                    continue
+                try:
+                    premium += Decimal(str(value))
+                except (ArithmeticError, ValueError):
+                    continue
+        relief_value = Decimal(relief or 0)
+        if premium <= _ZERO and relief_value <= _ZERO:
+            continue
+        bucket = buckets.setdefault(
+            int(month),
+            {
+                "month": int(month),
+                "year": year,
+                "label": _MONTH_LABELS[int(month) - 1],
+                "run_status": run_status,
+                "covered_employees": 0,
+                "premium": _ZERO,
+                "relief": _ZERO,
+            },
+        )
+        bucket["covered_employees"] += 1
+        bucket["premium"] += premium
+        bucket["relief"] += relief_value
+
+    periods = [buckets[month] for month in sorted(buckets)]
+
+    return {
+        "year": year,
+        "relief_rate": relief_rate,
+        "relief_cap": relief_cap,
+        "products": products,
+        "coverage": coverage,
+        "covered_employees": len(coverage),
+        "monthly_premium": sum(
+            (item["monthly_premium"] for item in coverage), _ZERO
+        ),
+        "periods": periods,
+        "total_premium": sum((point["premium"] for point in periods), _ZERO),
+        "total_relief": sum((point["relief"] for point in periods), _ZERO),
     }

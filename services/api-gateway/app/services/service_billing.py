@@ -1,8 +1,9 @@
-"""Point-of-sale billing for ordered services (lab, imaging, pharmacy).
+"""Point-of-sale billing for ordered services (lab, imaging, pharmacy, OPD).
 
-A clinician orders lab tests, an imaging study or a medicine. The patient pays
-for that request at the front desk, takes the printed receipt to the service
-point, and the service is released only once the request is paid.
+A clinician orders lab tests, an imaging study or a medicine, or a nurse runs a
+bedside screening test during the OPD assessment. The patient pays for that
+request at the front desk, takes the printed receipt to the service point, and
+the service is released only once the request is paid.
 
 Where the money lives
 ---------------------
@@ -34,8 +35,14 @@ from app.models.billing import Invoice, InvoiceItem, Payment
 LAB_ORDER = "lab_order"
 IMAGING_ORDER = "imaging_order"
 PRESCRIPTION = "prescription"
+POINT_OF_CARE = "point_of_care"
 
-SERVICE_REFERENCE_TYPES: tuple[str, ...] = (LAB_ORDER, IMAGING_ORDER, PRESCRIPTION)
+SERVICE_REFERENCE_TYPES: tuple[str, ...] = (
+    LAB_ORDER,
+    IMAGING_ORDER,
+    PRESCRIPTION,
+    POINT_OF_CARE,
+)
 
 # Event tying a payment to the request it settles.
 SERVICE_PAYMENT_EVENT = "ServicePaymentRecorded"
@@ -45,6 +52,7 @@ REFERENCE_LABELS: dict[str, str] = {
     LAB_ORDER: "Lab request",
     IMAGING_ORDER: "Imaging request",
     PRESCRIPTION: "Prescription",
+    POINT_OF_CARE: "Point-of-care tests",
 }
 
 # Statuses that mean the bill can no longer take money.
@@ -91,6 +99,22 @@ def _summarise(descriptions: list[str], limit: int = 3) -> str:
     return shown + " (+" + str(len(descriptions) - limit) + " more)"
 
 
+def charge_status(charge: ServiceCharge | None) -> str:
+    """
+    Describe a request's payment state for a department screen.
+
+    @param charge: The request's charge, or None when it was never billed
+    @returns not_charged, paid, partial or unpaid
+    """
+    if charge is None or charge.total_cents <= 0:
+        return "paid" if charge is not None else "not_charged"
+    if charge.balance_cents <= 0:
+        return "paid"
+    if charge.paid_cents > 0:
+        return "partial"
+    return "unpaid"
+
+
 # Marker separating the account reference a patient sees on the M-Pesa SMS from
 # the internal note naming the request the payment should settle.
 REFERENCE_MARKER = "#"
@@ -109,7 +133,7 @@ def build_service_reference(
     callback to read.
 
     @param base: Reference shown on the M-Pesa SMS (usually the invoice number)
-    @param reference_type: lab_order, imaging_order or prescription
+    @param reference_type: lab_order, imaging_order, prescription or point_of_care
     @param reference_id: The request UUID
     @returns Base reference, tagged when a request was named
     """
@@ -337,7 +361,7 @@ class ServiceBillingService:
         Fetch the charge for a single ordered service.
 
         @param facility_id: Facility UUID
-        @param reference_type: lab_order, imaging_order or prescription
+        @param reference_type: lab_order, imaging_order, prescription or point_of_care
         @param reference_id: The request UUID
         @returns The charge, or None when the request was never billed
         """
@@ -369,6 +393,63 @@ class ServiceBillingService:
         )
         return charges[0] if charges else None
 
+    async def charges_for_encounters(
+        self,
+        encounter_ids: list[uuid.UUID],
+        facility_id: uuid.UUID,
+    ) -> dict[tuple[str, uuid.UUID], ServiceCharge]:
+        """
+        Fetch the charges for many encounters in one pass.
+
+        A department worklist is a page of orders drawn from many encounters,
+        so this answers "has this request been paid?" for all of them without a
+        query per row.
+
+        @param encounter_ids: Encounter UUIDs on the page
+        @param facility_id: Facility UUID
+        @returns Map of (reference_type, reference_id) -> charge
+        """
+        if not encounter_ids:
+            return {}
+        result = await self.db.execute(
+            select(Invoice)
+            .where(
+                Invoice.encounter_id.in_(set(encounter_ids)),
+                Invoice.facility_id == facility_id,
+                Invoice.is_deleted == False,  # noqa: E712
+                Invoice.status.notin_(_CLOSED_INVOICE_STATUSES),
+            )
+            .order_by(Invoice.created_at.asc())
+        )
+        invoices = list(result.scalars().all())
+        if not invoices:
+            return {}
+        by_id = {invoice.id: invoice for invoice in invoices}
+        item_result = await self.db.execute(
+            select(InvoiceItem)
+            .where(
+                InvoiceItem.invoice_id.in_(list(by_id)),
+                InvoiceItem.reference_type.in_(SERVICE_REFERENCE_TYPES),
+                InvoiceItem.is_deleted == False,  # noqa: E712
+            )
+            .order_by(InvoiceItem.created_at.asc())
+        )
+
+        items_by_encounter: dict[uuid.UUID, list[InvoiceItem]] = {}
+        for item in item_result.scalars().all():
+            invoice = by_id.get(item.invoice_id)
+            if invoice is None or invoice.encounter_id is None:
+                continue
+            items_by_encounter.setdefault(invoice.encounter_id, []).append(item)
+
+        charges: dict[tuple[str, uuid.UUID], ServiceCharge] = {}
+        for encounter_id, encounter_items in items_by_encounter.items():
+            for charge in await self._charges_from_items(
+                encounter_items, by_id, facility_id, encounter_id
+            ):
+                charges[(charge.reference_type, charge.reference_id)] = charge
+        return charges
+
     # Gate
 
     async def assert_service_paid(
@@ -386,7 +467,7 @@ class ServiceBillingService:
         services keep working and legacy records are never stranded.
 
         @param facility_id: Facility UUID
-        @param reference_type: lab_order, imaging_order or prescription
+        @param reference_type: lab_order, imaging_order, prescription or point_of_care
         @param reference_id: The request UUID
         @param label: Optional label for the message
         @raises ValueError: When the request has an unpaid charge
@@ -511,7 +592,13 @@ class ServiceBillingService:
         created_by: uuid.UUID | None,
     ) -> None:
         """
-        Record which request a payment settled (idempotent per payment).
+        Record which request a payment settled (idempotent per payment and
+        request).
+
+        One payment can be spread over several requests, so the guard is keyed
+        by the payment *and* the request it is applied to: replaying the same
+        payment against the same request is a no-op, while the same payment
+        can still be split across every other request it cleared.
 
         @param facility_id: Facility UUID
         @param patient_id: Patient UUID
@@ -527,6 +614,10 @@ class ServiceBillingService:
                 EventBase.facility_id == facility_id,
                 EventBase.event_type == SERVICE_PAYMENT_EVENT,
                 EventBase.event_data["payment_id"].as_string() == str(payment_id),
+                EventBase.event_data["reference_type"].as_string()
+                == reference_type,
+                EventBase.event_data["reference_id"].as_string()
+                == str(reference_id),
             )
         )
         if existing.scalar_one_or_none() is not None:
@@ -563,7 +654,8 @@ class ServiceBillingService:
         created_by: uuid.UUID | None,
     ) -> None:
         """
-        Record which request a payment settled (idempotent per payment).
+        Record which request a payment settled (idempotent per payment and
+        request).
 
         Every collection path goes through here - cash at the desk, an M-Pesa
         STK push answered on the patient's phone, and a manually captured
@@ -605,15 +697,16 @@ class ServiceBillingService:
 
         Money confirmed by the machine (an M-Pesa callback) lands against an
         invoice rather than a named request, so which requests it pays for has
-        to be decided here: a named request first, then a request whose
-        outstanding balance the money matches exactly, then the rest oldest
-        first. A part payment therefore releases what the patient actually
-        paid for instead of leaving it stuck behind the lab, x-ray or
-        pharmacy desk.
+        to be decided here: a named request is settled first, then the
+        remaining requests oldest first. The amount is consumed request by
+        request until it runs out, so one payment can settle several requests
+        and a part payment leaves only the requests it did not reach still
+        owing - never a bill that reads "paid" while the lab, x-ray or
+        pharmacy desk still refuses to release the work.
 
-        Requests that carry no charge are skipped, and an already-settled
-        request is never credited twice, so a repeated callback cannot
-        double-count a shilling.
+        Requests that carry no charge are skipped, and a request already
+        credited by this same payment is never credited twice, so a repeated
+        callback cannot double-count a shilling.
 
         @param facility_id: Facility UUID
         @param invoice_id: Invoice UUID
@@ -659,9 +752,6 @@ class ServiceBillingService:
                 ):
                     take(charge)
         for charge in on_invoice:
-            if charge.balance_cents == amount_cents:
-                take(charge)
-        for charge in on_invoice:
             take(charge)
 
         remaining = amount_cents
@@ -688,17 +778,70 @@ class ServiceBillingService:
             settled.append(charge)
         return settled
 
+    async def settle_invoice_payment(
+        self,
+        *,
+        facility_id: uuid.UUID,
+        invoice_id: uuid.UUID,
+        payment_id: uuid.UUID,
+        amount_cents: int,
+        created_by: uuid.UUID | None,
+    ) -> list[ServiceCharge]:
+        """
+        Spread a payment that named no request across the visit's services.
+
+        The invoice screen takes money against a bill rather than a named
+        request, so the same rule the point of sale uses applies: whatever the
+        visit still owes is settled oldest first until the money runs out.
+        Invoices with no encounter (a standalone bill) carry no ordered
+        services to release and are left alone.
+
+        @param facility_id: Facility UUID
+        @param invoice_id: Invoice UUID
+        @param payment_id: Payment UUID
+        @param amount_cents: Amount received, in cents
+        @param created_by: Staff UUID that took the money, if known
+        @returns The charges this payment settled, in settlement order
+        """
+        invoice = (
+            await self.db.execute(
+                select(Invoice).where(
+                    Invoice.id == invoice_id,
+                    Invoice.facility_id == facility_id,
+                    Invoice.is_deleted == False,  # noqa: E712
+                )
+            )
+        ).scalar_one_or_none()
+        if invoice is None or invoice.encounter_id is None:
+            return []
+        return await self.settle_invoice_requests(
+            facility_id=facility_id,
+            invoice_id=invoice_id,
+            payment_id=payment_id,
+            amount_cents=amount_cents,
+            created_by=created_by,
+        )
+
     # Receipt
 
     async def service_receipt_data(
         self, payment_id: uuid.UUID, facility_id: uuid.UUID
-    ) -> tuple[Payment, Invoice, list[InvoiceItem]] | None:
+    ) -> tuple[Payment, Invoice, list[InvoiceItem], int] | None:
         """
         Load the receipt payload for a point-of-sale payment.
 
+        A payment that settled the whole bill was applied to several requests,
+        so every allocation it made is read back and the receipt lists all of
+        the services it released, not only the last one.
+
+        The allocated total is the part of the payment that went to these
+        services, which is what the receipt must show against them: a payment
+        can also carry money for lines that are not ordered services (the
+        consultation fee, for one), and that money belongs on the invoice.
+
         @param payment_id: Payment UUID
         @param facility_id: Facility UUID
-        @returns (payment, invoice, charged items) or None when unknown
+        @returns (payment, invoice, charged items, allocated cents) or None
         """
         result = await self.db.execute(
             select(EventBase.event_data)
@@ -707,11 +850,10 @@ class ServiceBillingService:
                 EventBase.event_type == SERVICE_PAYMENT_EVENT,
                 EventBase.event_data["payment_id"].as_string() == str(payment_id),
             )
-            .order_by(EventBase.created_at.desc())
-            .limit(1)
+            .order_by(EventBase.created_at.asc())
         )
-        event_data = result.scalar_one_or_none()
-        if not event_data:
+        event_rows = list(result.scalars().all())
+        if not event_rows:
             return None
 
         payment = (
@@ -734,27 +876,37 @@ class ServiceBillingService:
             return None
 
         items: list[InvoiceItem] = []
-        reference_id = event_data.get("reference_id")
-        reference_type = event_data.get("reference_type")
-        if reference_id and reference_type:
+        seen: set[tuple[str, uuid.UUID]] = set()
+        for event_data in event_rows:
+            reference_id = event_data.get("reference_id")
+            reference_type = event_data.get("reference_type")
+            if not reference_id or not reference_type:
+                continue
             try:
                 parsed_id = uuid.UUID(str(reference_id))
             except (ValueError, AttributeError):
-                parsed_id = None
-            if parsed_id is not None:
-                rows = await self.db.execute(
-                    select(InvoiceItem)
-                    .where(
-                        InvoiceItem.facility_id == facility_id,
-                        InvoiceItem.reference_type == reference_type,
-                        InvoiceItem.reference_id == parsed_id,
-                        InvoiceItem.is_deleted == False,  # noqa: E712
-                    )
-                    .order_by(InvoiceItem.created_at.asc())
+                continue
+            key = (str(reference_type), parsed_id)
+            if key in seen:
+                continue
+            seen.add(key)
+            rows = await self.db.execute(
+                select(InvoiceItem)
+                .where(
+                    InvoiceItem.facility_id == facility_id,
+                    InvoiceItem.reference_type == reference_type,
+                    InvoiceItem.reference_id == parsed_id,
+                    InvoiceItem.is_deleted == False,  # noqa: E712
                 )
-                items = list(rows.scalars().all())
+                .order_by(InvoiceItem.created_at.asc())
+            )
+            items.extend(rows.scalars().all())
 
-        return payment, invoice, items
+        allocated_cents = sum(
+            int(event_data.get("amount_cents") or 0) for event_data in event_rows
+        )
+
+        return payment, invoice, items, allocated_cents
 
 
 async def post_service_charge(

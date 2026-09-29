@@ -30,6 +30,8 @@ export interface LabWorklistItem {
   patient_name: string | null;
   patient_mrn: string | null;
   ordered_by: string;
+  /** Display name of the clinician who ordered the tests. */
+  ordered_by_name: string | null;
   priority: LabPriority;
   status: LabOrderStatus;
   specimen_type: string | null;
@@ -38,6 +40,11 @@ export interface LabWorklistItem {
   test_count: number;
   pending_count: number;
   critical_count: number;
+  charge_total_cents: number | null;
+  charge_paid_cents: number | null;
+  charge_balance_cents: number | null;
+  /** not_charged when the order never reached the bill (free/uncatalogued). */
+  charge_status: "not_charged" | "paid" | "partial" | "unpaid";
   created_at: string;
 }
 

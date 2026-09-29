@@ -12,6 +12,7 @@ import {
   Loader2,
   FolderOpen,
   Eye,
+  AlertCircle,
 } from "lucide-react";
 import { Link } from "@/i18n/routing";
 import { useKnowledgeDocuments } from "@/hooks/useKnowledge";
@@ -36,6 +37,7 @@ const CATEGORY_OPTIONS: { value: string; label: string }[] = [
   { value: "manual", label: "Manual" },
   { value: "protocol", label: "Protocol" },
   { value: "formulary", label: "Formulary" },
+  { value: "circular", label: "Circular" },
   { value: "training", label: "Training" },
   { value: "other", label: "Other" },
 ];
@@ -127,7 +129,7 @@ export default function KnowledgeBasePage() {
 
   const searchTerm = searchQuery.trim().length >= 2 ? searchQuery.trim() : undefined;
 
-  const { data, isLoading } = useKnowledgeDocuments(
+  const { data, isLoading, isError, error, refetch } = useKnowledgeDocuments(
     page,
     PAGE_SIZE,
     activeCategory,
@@ -250,6 +252,31 @@ export default function KnowledgeBasePage() {
       </div>
 
       {/* Filters */}
+      {isError && (
+        <div className="flex flex-col gap-3 rounded-lg border border-destructive/40 bg-destructive/10 p-4 sm:flex-row sm:items-start sm:justify-between">
+          <div className="flex items-start gap-3">
+            <AlertCircle className="mt-0.5 h-5 w-5 flex-shrink-0 text-destructive" />
+            <div>
+              <p className="text-sm font-medium text-foreground">
+                {t("loadErrorTitle")}
+              </p>
+              <p className="mt-0.5 text-sm text-muted-foreground">
+                {error instanceof Error
+                  ? error.message
+                  : t("loadErrorDescription")}
+              </p>
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={() => refetch()}
+            className="inline-flex items-center justify-center rounded-lg border border-border bg-background px-3 py-1.5 text-sm font-medium text-foreground transition-colors hover:bg-muted"
+          >
+            {t("tryAgain")}
+          </button>
+        </div>
+      )}
+
       <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
         <FilterChips
           options={CATEGORY_OPTIONS}
@@ -269,7 +296,7 @@ export default function KnowledgeBasePage() {
       </div>
 
       {/* Documents Table */}
-      {!isLoading && documents.length === 0 ? (
+      {isError ? null : !isLoading && documents.length === 0 ? (
         <EmptyState
           icon={BookOpen}
           title={t("emptyTitle")}

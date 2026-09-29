@@ -14,12 +14,14 @@ import {
   AlertTriangle,
   FileDown,
   Lock,
+  UserX,
 } from "lucide-react";
 import { Link } from "@/i18n/routing";
 import {
   usePayrollRun,
   useApprovePayrollRun,
   useRecalculatePayrollRun,
+  useRetryPayrollGLPost,
 } from "@/hooks/usePayroll";
 import { useAuth } from "@/components/providers/AuthProvider";
 import { PageHeader } from "@/components/ui/PageHeader";
@@ -27,7 +29,6 @@ import { StatCard } from "@/components/ui/StatCard";
 import { PayrollStatusBadge } from "@/components/payroll/PayrollStatusBadge";
 import { PayslipPreview } from "@/components/payroll/PayslipPreview";
 import { formatKES, formatDate } from "@/lib/utils";
-import { centsToUnits, sumCents } from "@/lib/money";
 
 const MONTHS_EN = [
   "January",
@@ -44,6 +45,12 @@ const MONTHS_EN = [
   "December",
 ];
 
+/** Machine-readable engine skip reason -> message key. */
+const SKIP_REASON_KEYS: Record<string, string> = {
+  no_salary: "skipReason_no_salary",
+  zero_gross: "skipReason_zero_gross",
+};
+
 /**
  * Payroll Run detail — header, summary cards, line items table, approve/recalculate.
  *
@@ -59,6 +66,7 @@ export default function PayrollRunDetailPage() {
   const { data: run, isLoading } = usePayrollRun(runId);
   const approve = useApprovePayrollRun(runId);
   const recalc = useRecalculatePayrollRun(runId);
+  const retryGl = useRetryPayrollGLPost(runId);
 
   const [confirmApprove, setConfirmApprove] = useState(false);
   const [previewEmployee, setPreviewEmployee] = useState<{
@@ -66,11 +74,18 @@ export default function PayrollRunDetailPage() {
     name: string;
   } | null>(null);
 
-  const isFinanceAdmin = true;
-
-  const totalStatutory = centsToUnits(
-    sumCents([run?.total_nssf, run?.total_shif, run?.total_hl]),
+  // Approving posts the run to the general ledger; the API allows the same
+  // roles, so the button is offered to exactly those.
+  const canApprove = (user?.roles ?? []).some((r) =>
+    ["admin", "facility_admin", "finance_admin", "super_admin"].includes(r),
   );
+
+  // Run totals are KES, not cents. formatKES() converts from cents, so the
+  // statutory total is summed in KES and scaled once at format time.
+  const totalStatutory =
+    Number(run?.total_nssf ?? 0) +
+    Number(run?.total_shif ?? 0) +
+    Number(run?.total_hl ?? 0);
 
   if (isLoading) {
     return (
@@ -87,6 +102,10 @@ export default function PayrollRunDetailPage() {
       </div>
     );
   }
+
+  // Employees the engine left out are listed so a short run total is not
+  // mistaken for a complete one.
+  const skippedEmployees = run.skipped_employees ?? [];
 
   const handleApprove = () => {
     if (!user) return;
@@ -137,7 +156,7 @@ export default function PayrollRunDetailPage() {
                   <RefreshCw className="h-4 w-4" />
                   {t("recalculate")}
                 </button>
-                {isFinanceAdmin && (
+                {canApprove && (
                   <button
                     type="button"
                     onClick={() => setConfirmApprove(true)}
@@ -168,6 +187,68 @@ export default function PayrollRunDetailPage() {
           <p className="text-sm text-emerald-900 dark:text-emerald-200">
             {t("postedToGL", { txId: run.gl_transaction_id })}
           </p>
+        </div>
+      )}
+      {run.status !== "draft" && run.gl_posting_error && (
+        <div className="flex flex-wrap items-start gap-3 rounded-xl border border-red-200 bg-red-50 p-4 dark:border-red-900 dark:bg-red-950/30">
+          <AlertTriangle className="mt-0.5 h-5 w-5 shrink-0 text-red-700 dark:text-red-400" />
+          <div className="min-w-0 flex-1">
+            <p className="text-sm font-semibold text-red-900 dark:text-red-200">
+              {t("glPostFailedTitle")}
+            </p>
+            <p className="break-words text-sm text-red-800 dark:text-red-300">
+              {t("glPostFailedBody", { error: run.gl_posting_error })}
+            </p>
+            {retryGl.isError && (
+              <p className="mt-1 text-sm text-red-800 dark:text-red-300">
+                {t("glRetryFailed")}
+              </p>
+            )}
+          </div>
+          {canApprove && (
+            <button
+              type="button"
+              onClick={() => retryGl.mutate()}
+              disabled={retryGl.isPending}
+              className="inline-flex shrink-0 items-center gap-1.5 rounded-lg bg-red-600 px-3 py-2 text-sm font-medium text-white hover:bg-red-700 disabled:opacity-50"
+            >
+              <RefreshCw
+                className={`h-4 w-4 ${retryGl.isPending ? "animate-spin" : ""}`}
+              />
+              {retryGl.isPending ? t("glRetrying") : t("glRetry")}
+            </button>
+          )}
+        </div>
+      )}
+      {skippedEmployees.length > 0 && (
+        <div className="rounded-xl border border-amber-200 bg-amber-50 p-4 dark:border-amber-900 dark:bg-amber-950/30">
+          <div className="flex items-start gap-3">
+            <UserX className="mt-0.5 h-5 w-5 shrink-0 text-amber-700 dark:text-amber-400" />
+            <div>
+              <p className="text-sm font-semibold text-amber-900 dark:text-amber-200">
+                {t("skippedEmployeesTitle", { count: skippedEmployees.length })}
+              </p>
+              <p className="text-sm text-amber-800 dark:text-amber-300">
+                {t("skippedEmployeesBody")}
+              </p>
+            </div>
+          </div>
+          <ul className="mt-3 space-y-1 pl-8 text-sm">
+            {skippedEmployees.map((emp) => (
+              <li key={`${emp.employee_id}-${emp.reason}`}>
+                <Link
+                  href={`/hr/employees/${emp.employee_id}`}
+                  className="font-medium text-amber-900 underline hover:no-underline dark:text-amber-200"
+                >
+                  {emp.employee_name}
+                </Link>
+                <span className="text-amber-800 dark:text-amber-300">
+                  {` (${emp.staff_id}) - `}
+                  {t(SKIP_REASON_KEYS[emp.reason] ?? "skipReason_unknown")}
+                </span>
+              </li>
+            ))}
+          </ul>
         </div>
       )}
       {run.status === "locked" && (

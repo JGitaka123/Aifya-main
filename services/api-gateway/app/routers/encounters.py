@@ -1,9 +1,23 @@
 import uuid
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
+from fastapi import (
+    APIRouter,
+    Depends,
+    Header,
+    HTTPException,
+    Query,
+    Response,
+    status,
+)
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.auth import CurrentUser, get_current_user, require_roles
+from app.auth import (
+    CurrentUser,
+    Permission,
+    get_current_user,
+    require_permission,
+    require_roles,
+)
 from app.auth.license_check import require_module
 from app.database import get_db
 from app.schemas.diagnosis import DiagnosisCreate, DiagnosisResponse
@@ -17,12 +31,20 @@ from app.schemas.encounter import (
     ConsultationPaymentRequest,
     ConsultationPaymentResponse,
     DepartmentOption,
+    DepartmentWorkload,
     EncounterCreate,
     EncounterResponse,
+    EncounterRouteItem,
+    EncounterRouteRequest,
+    EncounterRouteResponse,
     EncounterUpdate,
     QueueResponse,
 )
 from app.schemas.lab import LabOrderCreate, LabOrderResponse
+from app.schemas.point_of_care import (
+    PointOfCareTestCreate,
+    PointOfCareTestResponse,
+)
 from app.schemas.prescription import (
     DrugInteractionAlert,
     PrescriptionCreate,
@@ -39,10 +61,14 @@ from app.services.clinical_workspace import (
     is_facility_wide,
 )
 from app.services.diagnosis_service import DiagnosisService
-from app.services.encounter_service import EncounterService
+from app.services.encounter_service import (
+    EncounterService,
+    OutcomeRequiredError,
+)
 from app.services.lab_service import LabService
+from app.services.point_of_care_service import PointOfCareService
 from app.services.prescription_service import PrescriptionService
-from app.services.vitals_service import VitalsService
+from app.services.vitals_service import VitalsService, vitals_report_payload
 
 router = APIRouter(dependencies=[Depends(require_module("encounters"))])
 
@@ -87,6 +113,25 @@ async def get_opd_queue(
         alias="status",
         pattern=r"^(waiting|in_consultation|completed|admitted|discharged|cancelled)$",
     ),
+    department_id: uuid.UUID | None = Query(
+        None,
+        description="Show one department's queue instead of the whole facility",
+    ),
+    stage: str | None = Query(
+        None,
+        description=(
+            "assessment: still with OPD. consultation: assessed and waiting "
+            "for a doctor. Omit for both."
+        ),
+        pattern=r"^(assessment|consultation)$",
+    ),
+    include_past: bool = Query(
+        False,
+        description=(
+            "Include earlier days. Off by default: the live board is today's "
+            "queue, and older visits belong in the patient's history."
+        ),
+    ),
     db: AsyncSession = Depends(get_db),
     current_user: CurrentUser = Depends(get_current_user),
 ) -> QueueResponse:
@@ -94,6 +139,9 @@ async def get_opd_queue(
     Get the OPD queue ordered by triage priority then queue number.
 
     @param status_filter: Optional status filter
+    @param department_id: Optional department filter, so a unit can work its
+        own queue rather than reading the whole facility's board
+    @param stage: Optional stage filter - with OPD, or ready for a doctor
     @param db: Database session
     @param current_user: Authenticated user from JWT
     @returns Queue of encounters
@@ -102,13 +150,25 @@ async def get_opd_queue(
     encounters = await service.get_opd_queue(
         facility_id=current_user.facility_id,
         status_filter=status_filter,
+        department_id=department_id,
+        stage=stage,
+        include_past=include_past,
     )
+    department_names, staff_names = await ClinicalWorkspaceService(
+        db
+    ).labels_for(encounters)
     items = []
     for e in encounters:
         item = EncounterResponse.model_validate(e)
         if e.patient:
             item.patient_name = f"{e.patient.first_name} {e.patient.last_name}"
             item.patient_mrn = e.patient.mrn
+        if e.department_id:
+            item.department_name = department_names.get(e.department_id)
+        if e.attending_doctor_id:
+            item.attending_doctor_name = staff_names.get(e.attending_doctor_id)
+        if e.nurse_id:
+            item.nurse_name = staff_names.get(e.nurse_id)
         items.append(item)
     return QueueResponse(items=items, total=len(items))
 
@@ -117,21 +177,33 @@ async def get_opd_queue(
 async def call_next_patient(
     db: AsyncSession = Depends(get_db),
     current_user: CurrentUser = Depends(
-        require_roles("doctor", "admin", "facility_admin")
+        require_permission(Permission.CLINICAL_CONSULT)
     ),
 ) -> EncounterResponse:
     """
-    Call the next patient in the OPD queue (highest priority waiting).
+    Call the next patient the doctor can treat (highest priority waiting).
+
+    The patient comes from the doctor's own reach - their own assignments and
+    their department's queue - so calling the next patient never pulls someone
+    who is waiting for another unit. Administrators keep the facility queue.
+    Only a patient the nurse has finished assessing is called.
 
     @param db: Database session
     @param current_user: Authenticated doctor
     @returns Next encounter or 404 if queue empty
+    @raises HTTPException 409: When the only waiting patients are still with OPD
     """
     service = EncounterService(db)
+    worklist = ClinicalWorkspaceService(db)
+    clinician = await worklist.get_clinician(
+        current_user.facility_id, current_user.user_id
+    )
     try:
         encounter = await service.call_next(
             facility_id=current_user.facility_id,
             doctor_id=current_user.user_id,
+            department_id=clinician.department_id,
+            facility_wide=is_facility_wide(current_user.roles),
         )
     except ValueError as exc:
         raise HTTPException(
@@ -141,10 +213,106 @@ async def call_next_patient(
     if not encounter:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail="No patients waiting in queue",
+            detail=(
+                "No patients waiting for you or your department"
+                if not is_facility_wide(current_user.roles)
+                else "No patients waiting in queue"
+            ),
         )
     return EncounterResponse.model_validate(encounter)
 
+
+@router.post("/{encounter_id}/call-in", response_model=EncounterResponse)
+async def call_in_patient(
+    encounter_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: CurrentUser = Depends(
+        require_permission(Permission.CLINICAL_CONSULT)
+    ),
+) -> EncounterResponse:
+    """
+    Bring one chosen patient into the consultation room.
+
+    "Call next" takes the queue in order; this lets a doctor take the patient
+    they actually mean from their own workspace. The gates are identical, so
+    choosing a row by hand can never do more than the queue button would.
+
+    @param encounter_id: Encounter UUID the doctor chose
+    @param db: Database session
+    @param current_user: Authenticated doctor
+    @returns The claimed encounter
+    @raises HTTPException 404: When the patient is not in the doctor's queue
+    @raises HTTPException 409: When the visit is not waiting, not assessed, or unpaid
+    """
+    service = EncounterService(db)
+    worklist = ClinicalWorkspaceService(db)
+    clinician = await worklist.get_clinician(
+        current_user.facility_id, current_user.user_id
+    )
+    try:
+        encounter = await service.call_in(
+            encounter_id,
+            facility_id=current_user.facility_id,
+            doctor_id=current_user.user_id,
+            department_id=clinician.department_id,
+            facility_wide=is_facility_wide(current_user.roles),
+        )
+    except LookupError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)
+        ) from exc
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail=str(exc)
+        ) from exc
+    return EncounterResponse.model_validate(encounter)
+
+
+@router.post(
+    "/{encounter_id}/assessment",
+    response_model=EncounterResponse,
+)
+async def complete_opd_assessment(
+    encounter_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: CurrentUser = Depends(
+        require_permission(
+            Permission.TRIAGE_RECORD,
+            Permission.CLINICAL_CONSULT,
+            any_of=True,
+        )
+    ),
+) -> EncounterResponse:
+    """
+    Finish the OPD assessment, handing the patient to the consultation room.
+
+    This is the nurse's hand-off to the doctor. Recording vitals completes the
+    assessment already; this is for the visit that needs no measurements taken,
+    so a patient is never stranded in a stage nobody can clear.
+
+    @param encounter_id: Encounter UUID
+    @param db: Database session
+    @param current_user: Authenticated nurse or clinician
+    @returns Updated encounter
+    """
+    service = EncounterService(db)
+    try:
+        encounter = await service.complete_assessment(
+            encounter_id,
+            current_user.facility_id,
+            current_user.user_id,
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(exc),
+        ) from exc
+    if encounter is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Encounter not found",
+        )
+    return EncounterResponse.model_validate(encounter)
 
 @router.get("/worklist", response_model=ClinicalWorklistResponse)
 async def get_clinical_worklist(
@@ -154,8 +322,29 @@ async def get_clinical_worklist(
         alias="status",
         pattern=r"^(waiting|in_consultation|completed)$",
     ),
+    triaged: bool | None = Query(
+        None,
+        description=(
+            "true: only patients the nurse has assessed. false: only those "
+            "still with OPD. Omit for both."
+        ),
+    ),
+    q: str | None = Query(
+        None,
+        max_length=100,
+        description="Patient name, MRN or queue number to narrow the list by",
+    ),
+    department_id: uuid.UUID | None = Query(
+        None,
+        description=(
+            "Narrow the list to one unit; ignored when it is outside the "
+            "caller's scope"
+        ),
+    ),
     db: AsyncSession = Depends(get_db),
-    current_user: CurrentUser = Depends(get_current_user),
+    current_user: CurrentUser = Depends(
+        require_permission(Permission.CLINICAL_VIEW)
+    ),
 ) -> ClinicalWorklistResponse:
     """
     Today's patients for the signed-in clinician.
@@ -170,6 +359,9 @@ async def get_clinical_worklist(
 
     @param scope: mine, department or facility; defaults by role
     @param status_filter: Optional single status to narrow the list
+    @param triaged: Filter by whether the OPD assessment is finished
+    @param q: Patient name, MRN or queue number to narrow the list by
+    @param department_id: Optional single unit to narrow the list to
     @param db: Database session
     @param current_user: Authenticated user from JWT
     @returns The clinician's profile, counts and today's encounters
@@ -197,8 +389,13 @@ async def get_clinical_worklist(
         department_id=clinician.department_id,
         scope=resolved,
         status=status_filter,
+        triaged=triaged,
+        search=q,
+        only_department_id=department_id,
     )
     department_names, staff_names = await service.labels_for(encounters)
+    emergency_links = await service.emergency_links(encounters)
+    referral_sources = await service.referral_sources(encounters)
 
     items: list[ClinicalWorklistItem] = []
     for encounter in encounters:
@@ -214,6 +411,19 @@ async def get_clinical_worklist(
             item.attending_doctor_name = staff_names.get(
                 encounter.attending_doctor_id
             )
+        if encounter.nurse_id:
+            item.nurse_name = staff_names.get(encounter.nurse_id)
+        source = referral_sources.get(encounter.id)
+        if source is not None:
+            item.source_department_name, item.referred_at = source
+        emergency = emergency_links.get(encounter.id)
+        if emergency is not None:
+            (
+                item.emergency_visit_id,
+                item.emergency_visit_number,
+                item.emergency_status,
+                item.emergency_triage_color,
+            ) = emergency
         items.append(item)
 
     return ClinicalWorklistResponse(
@@ -242,7 +452,11 @@ async def get_clinical_worklist(
 async def get_consultation_fee(
     encounter_id: uuid.UUID,
     db: AsyncSession = Depends(get_db),
-    current_user: CurrentUser = Depends(get_current_user),
+    # The quote carries the invoice and the receipt link, so reading it is
+    # billing work even though reception is the one who collects the money.
+    current_user: CurrentUser = Depends(
+        require_permission(Permission.BILLING_VIEW)
+    ),
 ) -> ConsultationFeeQuote:
     """
     Quote what the patient owes at reception to see the doctor.
@@ -410,6 +624,34 @@ async def update_consultation_fee(
     return _fee_quote(quote)
 
 
+@router.get("/department-load", response_model=list[DepartmentWorkload])
+async def get_department_load(
+    db: AsyncSession = Depends(get_db),
+    current_user: CurrentUser = Depends(require_permission(Permission.CLINICAL_VIEW)),
+) -> list[DepartmentWorkload]:
+    """
+    Today's patient load for each department the caller may see.
+
+    The clinical workspace is organised by department, so this is the number a
+    clinician actually works against: how many patients their unit has today.
+    A clinician sees their own unit; an administrator sees every unit at once.
+
+    @param db: Database session
+    @param current_user: Authenticated user from JWT
+    @returns One row per visible department, with a count per status
+    """
+    service = ClinicalWorkspaceService(db)
+    clinician = await service.get_clinician(
+        current_user.facility_id, current_user.user_id
+    )
+    load = await service.department_load(
+        current_user.facility_id,
+        department_id=clinician.department_id,
+        facility_wide=is_facility_wide(current_user.roles),
+    )
+    return [DepartmentWorkload(**row) for row in load]
+
+
 @router.get("/departments", response_model=list[DepartmentOption])
 async def list_departments(
     include_inactive: bool = Query(False),
@@ -427,9 +669,9 @@ async def list_departments(
     @param current_user: Authenticated user from JWT
     @returns Departments ordered by name
     """
-    from sqlalchemy import select
+    from sqlalchemy import func, select
 
-    from app.models.staff import Department
+    from app.models.staff import Department, Staff
 
     stmt = select(Department).where(
         Department.facility_id == current_user.facility_id,
@@ -438,7 +680,31 @@ async def list_departments(
     if not include_inactive:
         stmt = stmt.where(Department.is_active == True)  # noqa: E712
     rows = (await db.execute(stmt.order_by(Department.name.asc()))).scalars().all()
-    return [DepartmentOption.model_validate(row) for row in rows]
+
+    # Whether anybody is on duty in a unit decides whether a patient sent
+    # there will actually be seen, so the routing picker can warn before the
+    # hand-off rather than let the patient vanish into an empty queue.
+    counts = dict(
+        (
+            await db.execute(
+                select(Staff.department_id, func.count())
+                .where(
+                    Staff.facility_id == current_user.facility_id,
+                    Staff.is_deleted == False,  # noqa: E712
+                    Staff.is_active == True,  # noqa: E712
+                    Staff.department_id.is_not(None),
+                )
+                .group_by(Staff.department_id)
+            )
+        ).all()
+    )
+
+    options = []
+    for row in rows:
+        option = DepartmentOption.model_validate(row)
+        option.staff_count = counts.get(row.id, 0)
+        options.append(option)
+    return options
 
 
 @router.get("/{encounter_id}", response_model=EncounterResponse)
@@ -464,7 +730,21 @@ async def get_encounter(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Encounter not found",
         )
-    return EncounterResponse.model_validate(encounter)
+    response = EncounterResponse.model_validate(encounter)
+    # The doctor opening this record needs the triaging nurse named, not a
+    # UUID, so the same label lookup the queue uses runs for the one row.
+    department_names, staff_names = await ClinicalWorkspaceService(
+        db
+    ).labels_for([encounter])
+    if encounter.department_id:
+        response.department_name = department_names.get(encounter.department_id)
+    if encounter.attending_doctor_id:
+        response.attending_doctor_name = staff_names.get(
+            encounter.attending_doctor_id
+        )
+    if encounter.nurse_id:
+        response.nurse_name = staff_names.get(encounter.nurse_id)
+    return response
 
 
 @router.patch("/{encounter_id}", response_model=EncounterResponse)
@@ -472,7 +752,13 @@ async def update_encounter(
     encounter_id: uuid.UUID,
     data: EncounterUpdate,
     db: AsyncSession = Depends(get_db),
-    current_user: CurrentUser = Depends(get_current_user),
+    current_user: CurrentUser = Depends(
+        require_permission(
+            Permission.CLINICAL_CONSULT,
+            Permission.TRIAGE_RECORD,
+            any_of=True,
+        )
+    ),
 ) -> EncounterResponse:
     """
     Update encounter (status, triage, disposition, etc.).
@@ -482,14 +768,21 @@ async def update_encounter(
     @param db: Database session
     @param current_user: Authenticated user from JWT
     @returns Updated encounter
+    @raises HTTPException 422: When a completion carries no outcome note
     """
     service = EncounterService(db)
-    encounter = await service.update_encounter(
-        encounter_id=encounter_id,
-        data=data,
-        facility_id=current_user.facility_id,
-        updated_by=current_user.user_id,
-    )
+    try:
+        encounter = await service.update_encounter(
+            encounter_id=encounter_id,
+            data=data,
+            facility_id=current_user.facility_id,
+            updated_by=current_user.user_id,
+        )
+    except OutcomeRequiredError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(exc),
+        ) from exc
     if not encounter:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -510,7 +803,13 @@ async def record_vitals(
     encounter_id: uuid.UUID,
     data: VitalSignCreate,
     db: AsyncSession = Depends(get_db),
-    current_user: CurrentUser = Depends(get_current_user),
+    current_user: CurrentUser = Depends(
+        require_permission(
+            Permission.TRIAGE_RECORD,
+            Permission.CLINICAL_CONSULT,
+            any_of=True,
+        )
+    ),
 ) -> VitalSignResponse:
     """
     Record vital signs for an encounter. Critical values trigger alerts.
@@ -532,7 +831,7 @@ async def record_vitals(
         facility_id=current_user.facility_id,
         recorded_by=current_user.user_id,
     )
-    return VitalSignResponse.model_validate(vital)
+    return _vital_response(vital)
 
 
 @router.get(
@@ -556,7 +855,116 @@ async def get_encounter_vitals(
     vitals = await service.get_encounter_vitals(
         encounter_id, current_user.facility_id
     )
-    return [VitalSignResponse.model_validate(v) for v in vitals]
+    return [_vital_response(v) for v in vitals]
+
+
+def _vital_response(vital) -> VitalSignResponse:
+    """
+    Shape a vitals row into its API response, including the report link.
+
+    @param vital: Persisted vital signs row
+    @returns Vital signs response carrying the printable report URL
+    """
+    response = VitalSignResponse.model_validate(vital)
+    response.report_url = (
+        f"/encounters/{vital.encounter_id}/vitals/{vital.id}/report"
+    )
+    return response
+
+
+@router.get("/{encounter_id}/vitals/{vital_id}/report")
+async def get_vitals_report(
+    encounter_id: uuid.UUID,
+    vital_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: CurrentUser = Depends(get_current_user),
+) -> Response:
+    """
+    Render the numbered vitals report the nurse issues after triage.
+
+    The same report is what the patient's history lists and what the nurse
+    hands over, so critical values are printed on it rather than left to the
+    screen the nurse has already walked away from.
+
+    @param encounter_id: Encounter UUID
+    @param vital_id: Vitals recording UUID
+    @param db: Database session
+    @param current_user: Authenticated user from JWT
+    @returns application/pdf response
+    """
+    from sqlalchemy import select as sa_select
+
+    from app.models.facility import Facility
+    from app.models.patient import Patient
+    from app.models.staff import Staff
+    from app.services.vitals_report_pdf import (
+        render_vitals_report_pdf,
+        vitals_report_filename,
+    )
+
+    service = VitalsService(db)
+    vital = await service.get_vital(vital_id, current_user.facility_id)
+    if vital is None or vital.encounter_id != encounter_id:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Vitals recording not found",
+        )
+
+    facility_name = (
+        await db.execute(
+            sa_select(Facility.name).where(Facility.id == current_user.facility_id)
+        )
+    ).scalar_one_or_none() or "Aifya Health Facility"
+
+    patient = (
+        await db.execute(sa_select(Patient).where(Patient.id == vital.patient_id))
+    ).scalar_one_or_none()
+    patient_name = (
+        " ".join(
+            part
+            for part in (
+                patient.first_name if patient else None,
+                patient.middle_name if patient else None,
+                patient.last_name if patient else None,
+            )
+            if part
+        )
+        or None
+    )
+
+    recorder = (
+        await db.execute(sa_select(Staff).where(Staff.id == vital.recorded_by))
+    ).scalar_one_or_none()
+    recorded_by_name = (
+        " ".join(
+            part
+            for part in (
+                recorder.title if recorder else None,
+                recorder.first_name if recorder else None,
+                recorder.last_name if recorder else None,
+            )
+            if part
+        )
+        or None
+    )
+
+    pdf = render_vitals_report_pdf(
+        facility_name=facility_name,
+        vital=vitals_report_payload(vital),
+        patient_name=patient_name,
+        patient_mrn=patient.mrn if patient else None,
+        recorded_by_name=recorded_by_name,
+    )
+    return Response(
+        content=pdf,
+        media_type="application/pdf",
+        headers={
+            "Content-Disposition": (
+                f'inline; filename="{vitals_report_filename(vital.report_number or str(vital.id))}"'
+            )
+        },
+    )
+
 
 
 # ── Diagnoses ──────────────────────────────────────────────────────────────
@@ -572,7 +980,7 @@ async def add_diagnosis(
     data: DiagnosisCreate,
     db: AsyncSession = Depends(get_db),
     current_user: CurrentUser = Depends(
-        require_roles("doctor", "admin", "facility_admin")
+        require_permission(Permission.CLINICAL_CONSULT)
     ),
 ) -> DiagnosisResponse:
     """
@@ -635,7 +1043,7 @@ async def create_prescription(
     data: PrescriptionCreate,
     db: AsyncSession = Depends(get_db),
     current_user: CurrentUser = Depends(
-        require_roles("doctor", "admin", "facility_admin")
+        require_permission(Permission.CLINICAL_CONSULT)
     ),
 ) -> PrescriptionWithInteractions:
     """
@@ -725,7 +1133,7 @@ async def create_lab_order(
     data: LabOrderCreate,
     db: AsyncSession = Depends(get_db),
     current_user: CurrentUser = Depends(
-        require_roles("doctor", "admin", "facility_admin")
+        require_permission(Permission.CLINICAL_CONSULT)
     ),
 ) -> LabOrderResponse:
     """
@@ -778,3 +1186,181 @@ async def get_encounter_lab_orders(
         encounter_id, current_user.facility_id
     )
     return [LabOrderResponse.model_validate(o) for o in orders]
+
+
+# -- Consultation room: directing the patient to another unit --------------
+
+
+@router.post("/{encounter_id}/route", response_model=EncounterRouteResponse)
+async def route_encounter(
+    encounter_id: uuid.UUID,
+    data: EncounterRouteRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: CurrentUser = Depends(
+        require_permission(
+            Permission.CLINICAL_CONSULT,
+            Permission.OPD_MANAGE,
+            any_of=True,
+        )
+    ),
+) -> EncounterRouteResponse:
+    """
+    Direct a patient from the consultation room to another unit.
+
+    This is the clinician's hand-off. It records an internal referral and
+    re-queues the encounter in the destination department, so a patient sent
+    to Dental, Physiotherapy, Laboratory or Pharmacy actually turns up in that
+    unit's queue instead of merely being marked as sent.
+
+    @param encounter_id: Encounter UUID (path)
+    @param data: Destination, optional clinician, urgency and reason
+    @param db: Database session
+    @param current_user: Authenticated clinician
+    @returns The re-queued encounter and the referral that records it
+    @raises HTTPException 404: When the encounter is unknown
+    @raises HTTPException 409: When the visit is closed or already in the unit
+    """
+    service = EncounterService(db)
+    try:
+        encounter, referral, department_name = await service.route_to_department(
+            encounter_id=encounter_id,
+            data=data,
+            facility_id=current_user.facility_id,
+            routed_by=current_user.user_id,
+        )
+    except LookupError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)
+        ) from exc
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail=str(exc)
+        ) from exc
+
+    return EncounterRouteResponse(
+        encounter=EncounterResponse.model_validate(encounter),
+        referral_id=referral.id,
+        referral_number=referral.referral_number,
+        receiving_department_id=data.receiving_department_id,
+        receiving_department_name=department_name,
+    )
+
+
+@router.get("/{encounter_id}/routes", response_model=list[EncounterRouteItem])
+async def get_encounter_routes(
+    encounter_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: CurrentUser = Depends(get_current_user),
+) -> list[EncounterRouteItem]:
+    """
+    The internal routing trail for an encounter.
+
+    @param encounter_id: Encounter UUID
+    @param db: Database session
+    @param current_user: Authenticated user from JWT
+    @returns Internal routings, newest first
+    """
+    service = EncounterService(db)
+    referrals = await service.get_encounter_routes(
+        encounter_id, current_user.facility_id
+    )
+    names = await service.department_names(
+        {
+            referral.referring_department_id
+            for referral in referrals
+        }
+        | {referral.receiving_department_id for referral in referrals}
+    )
+    return [
+        EncounterRouteItem(
+            id=referral.id,
+            referral_number=referral.referral_number,
+            urgency=referral.urgency,
+            reason=referral.reason,
+            notes=referral.notes,
+            status=referral.status,
+            referral_date=referral.referral_date,
+            referring_department_id=referral.referring_department_id,
+            referring_department_name=names.get(
+                referral.referring_department_id
+            ),
+            receiving_department_id=referral.receiving_department_id,
+            receiving_department_name=names.get(
+                referral.receiving_department_id
+            ),
+            referring_doctor_id=referral.referring_doctor_id,
+            receiving_doctor_id=referral.receiving_doctor_id,
+        )
+        for referral in referrals
+    ]
+
+
+# -- Consultation room: general (point-of-care) testing ---------------------
+
+
+@router.post(
+    "/{encounter_id}/tests",
+    response_model=PointOfCareTestResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def record_point_of_care_test(
+    encounter_id: uuid.UUID,
+    data: PointOfCareTestCreate,
+    db: AsyncSession = Depends(get_db),
+    current_user: CurrentUser = Depends(
+        require_permission(
+            Permission.TRIAGE_RECORD,
+            Permission.CLINICAL_CONSULT,
+            any_of=True,
+        )
+    ),
+) -> PointOfCareTestResponse:
+    """
+    Record a general test done in the room (HIV, malaria RDT, urinalysis...).
+
+    @param encounter_id: Encounter UUID (path)
+    @param data: Test, result and interpretation
+    @param db: Database session
+    @param current_user: Authenticated clinician
+    @returns The recorded test
+    @raises HTTPException 404: When the encounter is unknown
+    @raises HTTPException 409: When the visit is already closed
+    """
+    service = PointOfCareService(db)
+    try:
+        test = await service.record_test(
+            encounter_id=encounter_id,
+            data=data,
+            facility_id=current_user.facility_id,
+            performed_by=current_user.user_id,
+        )
+    except ValueError as exc:
+        detail = str(exc)
+        status_code = (
+            status.HTTP_404_NOT_FOUND
+            if detail == "Encounter not found"
+            else status.HTTP_409_CONFLICT
+        )
+        raise HTTPException(status_code=status_code, detail=detail) from exc
+    return PointOfCareTestResponse.model_validate(test)
+
+
+@router.get("/{encounter_id}/tests", response_model=list[PointOfCareTestResponse])
+async def get_encounter_tests(
+    encounter_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: CurrentUser = Depends(get_current_user),
+) -> list[PointOfCareTestResponse]:
+    """
+    General tests recorded in the room for an encounter, newest first.
+
+    @param encounter_id: Encounter UUID
+    @param db: Database session
+    @param current_user: Authenticated user from JWT
+    @returns List of recorded tests
+    """
+    service = PointOfCareService(db)
+    tests = await service.get_encounter_tests(
+        encounter_id, current_user.facility_id
+    )
+    return [PointOfCareTestResponse.model_validate(t) for t in tests]

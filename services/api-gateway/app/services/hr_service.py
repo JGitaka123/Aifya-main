@@ -1,10 +1,13 @@
 import uuid
 from datetime import UTC, date, datetime, timedelta
 
-from sqlalchemy import func, select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.auth.permissions import normalise_role
 from app.models.hr import Attendance, LeaveRequest, Shift, ShiftAssignment, StaffProfile
+from app.models.payroll import Employee
+from app.models.payroll_extra import LeaveType, PayrollLeaveRequest
 from app.models.staff import Department, Staff
 from app.schemas.hr import (
 
@@ -22,6 +25,12 @@ from app.schemas.hr import (
     StaffProfileCreate,
 )
 from app.services.leave_overlap import staff_ids_on_approved_leave
+from app.services.staff_access import (
+    find_login,
+    set_login_active,
+    set_login_password,
+    staff_with_login_ids,
+)
 
 
 class HRService:
@@ -47,14 +56,21 @@ class HRService:
         @returns Staff UUID
         @raises ValueError: If no active staff profile is linked to the user
         """
+        # The token subject is the clinical staff id when Aifya's own login
+        # issues it, and the Keycloak user id under the OIDC provider, so both
+        # are accepted here; matching only one 404s leave/attendance for the
+        # other login path.
         result = await self.db.execute(
             select(Staff.id).where(
-                Staff.keycloak_user_id == keycloak_user_id,
+                or_(
+                    Staff.id == keycloak_user_id,
+                    Staff.keycloak_user_id == keycloak_user_id,
+                ),
                 Staff.facility_id == facility_id,
                 Staff.is_deleted == False,  # noqa: E712
             )
         )
-        staff_id = result.scalar_one_or_none()
+        staff_id = result.scalars().first()
         if staff_id is None:
             raise ValueError("No staff profile is linked to this user")
         return staff_id
@@ -111,7 +127,151 @@ class HRService:
             item.department_name = dept_name
             items.append(item)
 
+        # Mark who can already sign in, so HR can see at a glance whose access
+        # is still missing rather than discovering it when the person cannot
+        # log in. One IN(...) for the whole page instead of a query per row.
+        with_login = await staff_with_login_ids(
+            self.db, [item.id for item in items]
+        )
+        for item in items:
+            item.has_login = item.id in with_login
+
         return items
+
+    async def set_staff_active(
+        self,
+        facility_id: uuid.UUID,
+        staff_id: uuid.UUID,
+        is_active: bool,
+    ) -> StaffDirectoryItem | None:
+        """
+        Activate or deactivate a staff member.
+
+        Deactivation is a soft state change on the staff record: the row and
+        its history stay in place so payroll, shifts and audit trail keep
+        their references.
+
+        @param facility_id: Facility UUID
+        @param staff_id: Staff UUID to change
+        @param is_active: Desired active state
+        @returns The updated directory item, or None when not found here
+        """
+        staff = (
+            await self.db.execute(
+                select(Staff).where(
+                    Staff.id == staff_id,
+                    Staff.facility_id == facility_id,
+                    Staff.is_deleted == False,  # noqa: E712
+                )
+            )
+        ).scalar_one_or_none()
+        if staff is None:
+            return None
+
+        staff.is_active = is_active
+        # The login follows the staff record: deactivating an employee has to
+        # stop them signing in, not just hide them from the directory.
+        await set_login_active(self.db, staff=staff, is_active=is_active)
+        # Never commit mid-request: the RLS facility context is transaction
+        # local, so a commit here blanks it and the refresh reads nothing.
+        # The request-scoped dependency commits when the handler returns.
+        await self.db.flush()
+        await self.db.refresh(staff)
+
+        item = StaffDirectoryItem.model_validate(staff)
+        item.has_login = (await find_login(self.db, staff.id)) is not None
+        if staff.department_id is not None:
+            item.department_name = (
+                await self.db.execute(
+                    select(Department.name).where(Department.id == staff.department_id)
+                )
+            ).scalar_one_or_none()
+        return item
+
+    async def set_staff_role(
+        self,
+        facility_id: uuid.UUID,
+        staff_id: uuid.UUID,
+        role: str,
+    ) -> StaffDirectoryItem | None:
+        """
+        Change which role a staff member holds.
+
+        The role is what the permission matrix is keyed on, so this is the
+        single edit that changes what the person may open. The caller has
+        already checked the role is one HR may assign.
+
+        @param facility_id: Facility UUID
+        @param staff_id: Staff UUID to change
+        @param role: New role name
+        @returns The updated directory entry, or None when not found here
+        """
+        staff = (
+            await self.db.execute(
+                select(Staff).where(
+                    Staff.id == staff_id,
+                    Staff.facility_id == facility_id,
+                    Staff.is_deleted == False,  # noqa: E712
+                )
+            )
+        ).scalar_one_or_none()
+        if staff is None:
+            return None
+
+        staff.role = normalise_role(role)
+        await self.db.flush()
+        await self.db.refresh(staff)
+
+        item = StaffDirectoryItem.model_validate(staff)
+        item.has_login = (await find_login(self.db, staff.id)) is not None
+        if staff.department_id is not None:
+            item.department_name = (
+                await self.db.execute(
+                    select(Department.name).where(Department.id == staff.department_id)
+                )
+            ).scalar_one_or_none()
+        return item
+
+    async def get_staff(
+        self, facility_id: uuid.UUID, staff_id: uuid.UUID
+    ) -> Staff | None:
+        """
+        Load one staff member, confined to the caller's facility.
+
+        @param facility_id: Facility UUID
+        @param staff_id: Staff UUID
+        @returns The staff row, or None when it is not this facility's
+        """
+        return (
+            await self.db.execute(
+                select(Staff).where(
+                    Staff.id == staff_id,
+                    Staff.facility_id == facility_id,
+                    Staff.is_deleted == False,  # noqa: E712
+                )
+            )
+        ).scalar_one_or_none()
+
+    async def set_staff_password(
+        self,
+        facility_id: uuid.UUID,
+        staff_id: uuid.UUID,
+        password: str,
+    ) -> Staff | None:
+        """
+        Set or reset the sign-in password of a staff member.
+
+        @param facility_id: Facility UUID
+        @param staff_id: Staff UUID
+        @param password: New plaintext password
+        @returns The staff row, or None when not found here
+        @raises StaffAccessError: When the password is weak or no login exists
+        """
+        staff = await self.get_staff(facility_id, staff_id)
+        if staff is None:
+            return None
+        await set_login_password(self.db, staff=staff, password=password)
+        return staff
 
     # ── Staff Profiles ───────────────────────────────────────────────────
 
@@ -585,6 +745,73 @@ class HRService:
 
     # ── Summary ──────────────────────────────────────────────────────────
 
+    async def payroll_leave_days_by_type(
+        self,
+        staff_id: uuid.UUID,
+        facility_id: uuid.UUID,
+    ) -> dict[str, int]:
+        """Approved payroll-register leave days for a staff member, by type.
+
+        The Leave tab records leave in ``payroll_leave_requests`` against the
+        payroll employee row, while the HR register records it in
+        ``leave_requests`` against the staff row and decrements the balances on
+        ``staff_profiles`` directly. The balance cards therefore have to
+        subtract the payroll-approved days on read, otherwise leave approved in
+        the Leave tab never reaches the HR & Staff screens.
+
+        @param staff_id: Staff UUID
+        @param facility_id: Facility UUID
+        @returns Days taken keyed by mapped balance name (annual, sick, ...)
+        """
+        balance_fields = {
+            "annual": "annual_leave_balance",
+            "sick": "sick_leave_balance",
+            "maternity": "maternity_leave_balance",
+            "paternity": "paternity_leave_balance",
+        }
+        rows = (
+            await self.db.execute(
+                select(
+                    LeaveType.name,
+                    func.coalesce(
+                        func.sum(PayrollLeaveRequest.days_requested), 0
+                    ),
+                )
+                .select_from(Staff)
+                .join(
+                    Employee,
+                    and_(
+                        Employee.facility_id == Staff.facility_id,
+                        Employee.staff_id == Staff.employee_number,
+                    ),
+                )
+                .join(
+                    PayrollLeaveRequest,
+                    PayrollLeaveRequest.employee_id == Employee.id,
+                )
+                .join(
+                    LeaveType,
+                    LeaveType.id == PayrollLeaveRequest.leave_type_id,
+                )
+                .where(
+                    Staff.id == staff_id,
+                    Staff.facility_id == facility_id,
+                    Staff.is_deleted.is_(False),
+                    Employee.is_deleted.is_(False),
+                    PayrollLeaveRequest.is_deleted.is_(False),
+                    PayrollLeaveRequest.status == "approved",
+                )
+                .group_by(LeaveType.name)
+            )
+        ).all()
+
+        taken: dict[str, int] = {}
+        for name, days in rows:
+            key = (name or "").strip().lower()
+            if key in balance_fields:
+                taken[key] = taken.get(key, 0) + int(days or 0)
+        return taken
+
     async def get_summary(self, facility_id: uuid.UUID) -> HRSummary:
         """
         Get HR dashboard summary.
@@ -631,20 +858,26 @@ class HRService:
                 ShiftAssignment.status.in_(["assigned", "confirmed"]),
             )
         )
-        on_leave = await self.db.execute(
-            select(func.count(LeaveRequest.id)).where(
-                LeaveRequest.facility_id == facility_id,
-                LeaveRequest.is_deleted == False,  # noqa: E712
-                LeaveRequest.status == "approved",
-                LeaveRequest.start_date <= today,
-                LeaveRequest.end_date >= today,
-            )
+        # Leave is recorded in two registers: the HR leave_requests table and
+        # the payroll payroll_leave_requests table that the Leave tab writes
+        # to. The dashboard must count both, otherwise approving leave in the
+        # Leave tab never moves these KPIs. staff_ids_on_approved_leave already
+        # unions the two registers without double counting a person.
+        on_leave_ids = await staff_ids_on_approved_leave(
+            self.db, facility_id, today
         )
-        pending_leave = await self.db.execute(
+        pending_hr = await self.db.execute(
             select(func.count(LeaveRequest.id)).where(
                 LeaveRequest.facility_id == facility_id,
                 LeaveRequest.is_deleted == False,  # noqa: E712
                 LeaveRequest.status == "pending",
+            )
+        )
+        pending_payroll = await self.db.execute(
+            select(func.count(PayrollLeaveRequest.id)).where(
+                PayrollLeaveRequest.facility_id == facility_id,
+                PayrollLeaveRequest.is_deleted == False,  # noqa: E712
+                PayrollLeaveRequest.status == "pending",
             )
         )
         # Contracts expiring within 30 days
@@ -664,7 +897,8 @@ class HRService:
             doctors=doctors.scalar() or 0,
             nurses=nurses.scalar() or 0,
             on_duty_today=on_duty.scalar() or 0,
-            on_leave_today=on_leave.scalar() or 0,
-            pending_leave_requests=pending_leave.scalar() or 0,
+            on_leave_today=len(on_leave_ids),
+            pending_leave_requests=(pending_hr.scalar() or 0)
+            + (pending_payroll.scalar() or 0),
             expiring_contracts=expiring.scalar() or 0,
         )

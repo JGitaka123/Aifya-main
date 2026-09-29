@@ -114,6 +114,12 @@ export interface AssignDoctorRequest {
   doctor_id: string;
 }
 
+/** Move a visit to the next stage of care: in treatment, or observation. */
+export interface StageRequest {
+  status: "in_treatment" | "observation";
+  notes?: string | null;
+}
+
 /** Disposition request */
 export interface DispositionRequest {
   disposition: DispositionType;

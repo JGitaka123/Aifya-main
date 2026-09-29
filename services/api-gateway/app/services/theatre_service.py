@@ -4,6 +4,7 @@ from datetime import UTC, date, datetime
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.services.numbering import highest_sequence
 from app.models.base import EventBase
 from app.models.patient import Patient
 from app.models.staff import Staff
@@ -42,13 +43,17 @@ class TheatreService:
         @param created_by: Staff UUID
         @returns Created theatre
         """
-        count_result = await self.db.execute(
-            select(func.count(OperatingTheatre.id)).where(
-                OperatingTheatre.facility_id == facility_id,
-                OperatingTheatre.is_deleted == False,  # noqa: E712
+        # Retired rows still hold their number, so counting only the live ones
+        # hands back a number already in use. Start from the highest number
+        # issued, deleted or not.
+        highest = (
+            await self.db.execute(
+                select(highest_sequence(OperatingTheatre.code)).where(
+                    OperatingTheatre.facility_id == facility_id,
+                )
             )
-        )
-        seq = (count_result.scalar() or 0) + 1
+        ).scalar_one_or_none()
+        seq = (highest or 0) + 1
         code = f"OT-{seq:03d}"
 
         theatre = OperatingTheatre(
@@ -102,14 +107,18 @@ class TheatreService:
         """
         now = datetime.now(UTC)
         date_part = now.strftime("%Y%m%d")
-        count_result = await self.db.execute(
-            select(func.count(SurgicalCase.id)).where(
-                SurgicalCase.facility_id == facility_id,
-                SurgicalCase.case_number.like(f"SC-{date_part}-%"),
-                SurgicalCase.is_deleted == False,  # noqa: E712
+        # The unique key covers retired rows too, so counting only the live ones
+        # hands back a number already in use. Start from the highest number
+        # issued, deleted or not.
+        highest = (
+            await self.db.execute(
+                select(highest_sequence(SurgicalCase.case_number)).where(
+                    SurgicalCase.facility_id == facility_id,
+                    SurgicalCase.case_number.like(f"SC-{date_part}-%"),
+                )
             )
-        )
-        seq = (count_result.scalar() or 0) + 1
+        ).scalar_one_or_none()
+        seq = (highest or 0) + 1
         case_number = f"SC-{date_part}-{seq:04d}"
 
         case = SurgicalCase(

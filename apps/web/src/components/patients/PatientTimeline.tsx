@@ -140,8 +140,19 @@ function summarizeEventData(
       return `${data.drug_name ?? ""} ${data.dosage ?? ""} ${data.frequency ?? ""}`;
     case "DiagnosisCreated":
       return `${data.icd10_code ?? ""}: ${data.icd10_description ?? ""}`;
-    case "VitalsRecorded":
-      return `BP: ${data.systolic_bp ?? "—"}/${data.diastolic_bp ?? "—"}, HR: ${data.heart_rate ?? "—"}, Temp: ${data.temperature ?? "—"}°C`;
+    case "VitalsRecorded": {
+      // Newer recordings carry the report summary and its number; older
+      // ones only have the raw fields.
+      const summary =
+        typeof data.summary === "string" && data.summary
+          ? data.summary
+          : `BP: ${data.systolic_bp ?? "—"}/${data.diastolic_bp ?? "—"}, HR: ${data.heart_rate ?? "—"}, Temp: ${data.temperature ?? "—"}°C`;
+      const report =
+        typeof data.report_number === "string" && data.report_number
+          ? `${data.report_number} · `
+          : "";
+      return `${report}${summary}`;
+    }
     case "LabOrderCreated":
       return `${data.order_number ?? ""} — ${data.priority ?? "routine"}`;
     default:

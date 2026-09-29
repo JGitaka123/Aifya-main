@@ -319,6 +319,19 @@ async def record_payment(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(e),
         ) from e
+
+    # The money has to land on the visit's ordered services, otherwise the
+    # bill reads "paid" while the lab, x-ray or pharmacy desk still refuses to
+    # release the work. Nothing here names a request, so the payment is spread
+    # across whatever the visit still owes, oldest first.
+    await ServiceBillingService(db).settle_invoice_payment(
+        facility_id=current_user.facility_id,
+        invoice_id=invoice_id,
+        payment_id=payment.id,
+        amount_cents=payment.amount_cents,
+        created_by=current_user.user_id,
+    )
+
     return PaymentResponse.model_validate(payment)
 
 
@@ -514,8 +527,9 @@ async def get_service_receipt(
     """
     Render the receipt a patient shows at the lab, x-ray or pharmacy desk.
 
-    The receipt lists only the request the payment settled, so the service
-    desk can see at a glance what has been released.
+    The receipt lists every request the payment settled: one service for a
+    desk payment, all of them for a payment that cleared the whole bill, so
+    the desk can see at a glance what has been released.
 
     @param payment_id: Payment UUID
     @param db: Database session
@@ -535,10 +549,10 @@ async def get_service_receipt(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Payment not found",
         )
-    payment, invoice, items = data
+    payment, invoice, items, allocated_cents = data
     if not items:
-        # A bill-wide payment names no single request, so there is no service
-        # receipt to print; the invoice receipt covers that case.
+        # The payment released no ordered service, so there is nothing to
+        # print; the invoice receipt covers a plain bill payment.
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="This payment has no service receipt; use the invoice receipt",
@@ -556,7 +570,10 @@ async def get_service_receipt(
     facility_name = facility_row.scalar_one_or_none() or "Aifya Health Facility"
 
     subtotal = sum(int(i.total_cents or 0) for i in items)
-    amount = int(payment.amount_cents or 0)
+    # The receipt accounts for the service lines it lists, so the money shown
+    # against them is what this payment put towards those lines - not the whole
+    # payment when part of it went to a non-service line such as the fee.
+    amount = int(allocated_cents or 0)
 
     pdf = render_receipt_pdf(
         facility_name=facility_name,

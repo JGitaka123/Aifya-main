@@ -1,5 +1,6 @@
 "use client";
 
+import { useMemo, useState } from "react";
 import { useParams } from "next/navigation";
 import { useTranslations } from "next-intl";
 import {
@@ -8,12 +9,18 @@ import {
   MapPin,
   Shield,
   Calendar,
+  CalendarCheck,
   Briefcase,
   Heart,
   GraduationCap,
+  ShieldCheck,
 } from "lucide-react";
 import { Link } from "@/i18n/routing";
-import { useStaffProfile } from "@/hooks/useHR";
+import { useStaffDirectory, useStaffProfile } from "@/hooks/useHR";
+import { useEmployees, useLeaveRequests } from "@/hooks/usePayroll";
+import { StaffAccessDialog } from "@/components/hr/StaffAccessDialog";
+import type { StaffDirectoryItem } from "@aifya/shared";
+import { formatDate } from "@/lib/utils";
 
 /**
  * Staff Detail Page — extended profile with employment, qualifications,
@@ -28,6 +35,33 @@ export default function StaffDetailPage() {
   const staffId = params.staffId as string;
 
   const { data: profile, isLoading } = useStaffProfile(staffId);
+
+  // Leave is recorded against the payroll employee row, which is linked to the
+  // staff register through employees.staff_id === staff.employee_number.
+  //
+  // Deactivated staff are included: this is the page HR lands on to switch an
+  // account back on, so the row has to be here even when access is off.
+  const { data: directory } = useStaffDirectory(
+    undefined,
+    undefined,
+    undefined,
+    true
+  );
+  const member: StaffDirectoryItem | undefined = useMemo(
+    () => directory?.items?.find((item) => item.id === staffId),
+    [directory, staffId],
+  );
+  const employeeNumber = member?.employee_number;
+  const [accessOpen, setAccessOpen] = useState(false);
+  const { data: employees } = useEmployees({ page_size: 200 });
+  const employeeId = useMemo(
+    () => employees?.items?.find((e) => e.staff_id === employeeNumber)?.id,
+    [employees, employeeNumber],
+  );
+  const { data: staffLeave } = useLeaveRequests(
+    employeeId ? { employee_id: employeeId } : {},
+    Boolean(employeeId),
+  );
 
   if (isLoading) {
     return (
@@ -58,6 +92,16 @@ export default function StaffDetailPage() {
         <h1 className="text-2xl font-bold text-foreground">
           {t("staffProfile")}
         </h1>
+        {member && (
+          <button
+            type="button"
+            onClick={() => setAccessOpen(true)}
+            className="ml-auto inline-flex items-center gap-1.5 rounded-lg border border-border bg-card px-3 py-2 text-sm font-medium text-foreground hover:bg-muted/50"
+          >
+            <ShieldCheck className="h-4 w-4" />
+            {t("systemAccess")}
+          </button>
+        )}
       </div>
 
       <div className="grid gap-6 lg:grid-cols-2">
@@ -198,6 +242,68 @@ export default function StaffDetailPage() {
           </div>
         </div>
 
+        {/* Leave Requests */}
+        <div className="rounded-xl border border-border bg-card p-6 shadow-[var(--shadow-card)] lg:col-span-2">
+          <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+            <h2 className="flex items-center gap-2 text-lg font-semibold text-foreground">
+              <CalendarCheck className="h-5 w-5" />
+              {t("leaveRequests")}
+            </h2>
+            <Link
+              href="/hr/leave"
+              className="text-sm font-medium text-primary hover:underline"
+            >
+              {t("manageLeave")}
+            </Link>
+          </div>
+          {!employeeId ? (
+            <p className="text-sm text-muted-foreground">
+              {t("notLinkedToPayroll")}
+            </p>
+          ) : !staffLeave?.items?.length ? (
+            <p className="text-sm text-muted-foreground">
+              {t("noLeaveRequests")}
+            </p>
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="w-full text-left text-sm">
+                <thead className="border-b border-border text-xs uppercase text-muted-foreground">
+                  <tr>
+                    <th className="px-3 py-2">{t("leaveType")}</th>
+                    <th className="px-3 py-2">{t("dates")}</th>
+                    <th className="px-3 py-2">{t("days")}</th>
+                    <th className="px-3 py-2">{t("status")}</th>
+                    <th className="px-3 py-2">{t("reason")}</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-border">
+                  {staffLeave.items.map((leave) => (
+                    <tr key={leave.id}>
+                      <td className="px-3 py-2 font-medium text-foreground">
+                        {leave.leave_type_name ?? "-"}
+                      </td>
+                      <td className="px-3 py-2 text-muted-foreground">
+                        {formatDate(leave.start_date)} — {formatDate(leave.end_date)}
+                      </td>
+                      <td className="px-3 py-2 text-foreground">
+                        {leave.days_requested}
+                      </td>
+                      <td className="px-3 py-2">
+                        <span className="inline-block rounded-full bg-muted px-2 py-0.5 text-xs font-medium text-foreground">
+                          {t(`leaveStatus_${leave.status}`)}
+                        </span>
+                      </td>
+                      <td className="max-w-xs truncate px-3 py-2 text-muted-foreground">
+                        {leave.reason ?? "-"}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+
         {/* Emergency Contact */}
         {profile.emergency_contact_name && (
           <div className="rounded-xl border border-border bg-card p-6 shadow-[var(--shadow-card)]">
@@ -257,6 +363,11 @@ export default function StaffDetailPage() {
           </div>
         )}
       </div>
+
+      <StaffAccessDialog
+        staff={accessOpen ? member ?? null : null}
+        onClose={() => setAccessOpen(false)}
+      />
     </div>
   );
 }

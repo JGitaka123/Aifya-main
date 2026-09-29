@@ -1415,17 +1415,25 @@ async def run_demo_payroll(
     run.approved_at = NOW
     await db.flush()
 
-    # Post to GL (uses different account codes — falls back to warning if
-    # accounts don't match — that's OK for demo).
+    # Post to GL. A failure is recorded on the run rather than swallowed.
+    run.gl_attempted_at = NOW
     try:
-        gl_id = await post_payroll_to_gl(db=db, run=run, user_id=user_id)
-        if gl_id is not None:
-            run.gl_transaction_id = gl_id
+        result = await post_payroll_to_gl(db=db, run=run, user_id=user_id)
+        if result.ok:
+            run.gl_transaction_id = result.transaction_id
+            run.gl_posting_error = None
             run.status = "posted"
             await db.flush()
             print(f"  Payroll: run {year}-{month:02d} approved + posted to GL")
         else:
-            print(f"  Payroll: run {year}-{month:02d} approved (GL post skipped)")
+            run.gl_posting_error = (
+                f"{result.error_code}: {result.error_detail or ''}"
+            ).rstrip(": ")
+            await db.flush()
+            print(
+                f"  Payroll: run {year}-{month:02d} approved "
+                f"(GL post failed: {result.error_code})"
+            )
     except Exception as exc:
         print(f"  WARN: payroll GL post failed: {exc}")
     return run

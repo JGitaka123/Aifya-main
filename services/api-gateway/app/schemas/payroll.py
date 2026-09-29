@@ -34,6 +34,22 @@ class EmployeeCreate(BaseModel):
     phone: str | None = Field(None, max_length=20)
     email: str | None = Field(None, max_length=255)
     notes: str | None = Field(None, max_length=2000)
+    # Opening pay for the employee. Payroll prices every run from
+    # employee_salaries, so these become the first salary record on create -
+    # without it a newly-registered employee is skipped by every run.
+    basic_salary: Decimal | None = Field(None, ge=0)
+    house_allowance: Decimal = Field(Decimal("0"), ge=0)
+    transport_allowance: Decimal = Field(Decimal("0"), ge=0)
+    other_allowances: Decimal = Field(Decimal("0"), ge=0)
+    #: Clinical role HR assigns to this employee, from the catalogue HR may
+    #: pick from. When set it replaces the role the job title would otherwise
+    #: have been guessed from - the access is HR's decision, not a side effect
+    #: of how the title happens to be worded.
+    role: str | None = Field(None, max_length=64)
+    #: Initial sign-in password. Supplying one creates this employee's Aifya
+    #: login (AUTH_PROVIDER=internal) at the same time as the record; leaving
+    #: it blank registers the person without a login until HR sets one.
+    login_password: str | None = Field(None, min_length=8, max_length=128)
 
 
 class EmployeeUpdate(BaseModel):
@@ -90,6 +106,9 @@ class EmployeeResponse(BaseModel):
     email: str | None
     notes: str | None
     created_at: datetime
+    #: Whether this employee can sign in. Their access is the staff role, which
+    #: lives in the staff directory; this only says whether credentials exist.
+    has_login: bool = False
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -212,6 +231,9 @@ class PayrollRunResponse(BaseModel):
     approved_by: uuid.UUID | None
     approved_at: datetime | None
     gl_transaction_id: uuid.UUID | None
+    gl_posting_error: str | None = None
+    gl_attempted_at: datetime | None = None
+    skipped_employees: list[dict] = Field(default_factory=list)
     total_gross: Decimal
     total_paye: Decimal
     total_nssf: Decimal
@@ -242,7 +264,7 @@ class StatutoryRateCreate(BaseModel):
 
     name: str = Field(..., max_length=100)
     category: str = Field(
-        ..., pattern=r"^(paye|nssf|shif|housing_levy|relief)$"
+        ..., pattern=r"^(paye|nssf|shif|housing_levy|relief|insurance)$"
     )
     rate: Decimal | None = None
     fixed_amount: Decimal | None = None
@@ -269,6 +291,88 @@ class StatutoryRateResponse(BaseModel):
     created_at: datetime
 
     model_config = ConfigDict(from_attributes=True)
+
+
+class EmployeeDeductionCreate(BaseModel):
+    """Record a recurring or one-time deduction against an employee.
+
+    Insurance premiums are ordinary deductions whose name matches a
+    configured ``insurance`` statutory rate, which is what makes them
+    eligible for insurance relief.
+    """
+
+    employee_id: uuid.UUID
+    name: str = Field(..., max_length=100)
+    amount: Decimal = Field(..., gt=0)
+    frequency: str = Field(default="monthly", pattern=r"^(monthly|one_time)$")
+    start_date: date
+    end_date: date | None = None
+    is_active: bool = True
+    notes: str | None = Field(None, max_length=500)
+
+
+class EmployeeDeductionResponse(BaseModel):
+    """Employee deduction API response."""
+
+    id: uuid.UUID
+    employee_id: uuid.UUID
+    name: str
+    amount: Decimal
+    frequency: str
+    start_date: date
+    end_date: date | None
+    is_active: bool
+    notes: str | None
+    created_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class InsuranceProductResponse(BaseModel):
+    """An insurance product that can be deducted from staff pay."""
+
+    id: uuid.UUID
+    name: str
+    rate: Decimal | None
+    fixed_amount: Decimal | None
+    effective_from: date
+    effective_to: date | None
+
+
+class InsuranceCoverageItem(BaseModel):
+    """One employee's current insurance coverage."""
+
+    employee_id: uuid.UUID
+    employee_name: str
+    products: list[str]
+    monthly_premium: Decimal
+
+
+class InsuranceUsagePoint(BaseModel):
+    """Premium and relief the payroll produced for one period."""
+
+    month: int
+    year: int
+    label: str
+    run_status: str | None = None
+    covered_employees: int
+    premium: Decimal
+    relief: Decimal
+
+
+class InsuranceUtilisationResponse(BaseModel):
+    """Insurance configuration plus how it has been used in payroll."""
+
+    year: int
+    relief_rate: Decimal
+    relief_cap: Decimal
+    products: list[InsuranceProductResponse]
+    coverage: list[InsuranceCoverageItem]
+    covered_employees: int
+    monthly_premium: Decimal
+    periods: list[InsuranceUsagePoint]
+    total_premium: Decimal
+    total_relief: Decimal
 
 
 class PAYEBandResponse(BaseModel):
@@ -396,6 +500,23 @@ class LeaveApprovalRequest(BaseModel):
     rejection_reason: str | None = Field(None, max_length=500)
 
 
+class LeaveBalanceBucket(BaseModel):
+    """One leave bucket: entitlement, days already approved, and the rest."""
+
+    key: str
+    entitled_days: int
+    taken_days: int
+    remaining_days: int
+
+
+class LeaveBalanceResponse(BaseModel):
+    """A staff member's own leave balance for the self-service My Leave panel."""
+
+    employee_id: uuid.UUID
+    employee_name: str
+    buckets: list[LeaveBalanceBucket]
+
+
 # ── Reports ─────────────────────────────────────────────────────────────────
 
 
@@ -488,6 +609,8 @@ class PAYEScheduleResponse(BaseModel):
 
     month: int
     year: int
+    run_id: uuid.UUID | None = None
+    run_status: str | None = None
     rows: list[PAYEScheduleRow]
     total_taxable: Decimal
     total_paye: Decimal
@@ -510,6 +633,8 @@ class NSSFScheduleResponse(BaseModel):
 
     month: int
     year: int
+    run_id: uuid.UUID | None = None
+    run_status: str | None = None
     rows: list[NSSFScheduleRow]
     total_employee: Decimal
     total_employer: Decimal
@@ -531,7 +656,34 @@ class SHIFScheduleResponse(BaseModel):
 
     month: int
     year: int
+    run_id: uuid.UUID | None = None
+    run_status: str | None = None
     rows: list[SHIFScheduleRow]
+    total: Decimal
+
+
+class HousingLevyScheduleRow(BaseModel):
+    """One employee line on the monthly Affordable Housing Levy schedule."""
+
+    employee_id: uuid.UUID
+    employee_name: str
+    kra_pin: str | None
+    gross_salary: Decimal
+    employee_contribution: Decimal
+    employer_contribution: Decimal
+    total: Decimal
+
+
+class HousingLevyScheduleResponse(BaseModel):
+    """Monthly Affordable Housing Levy schedule (1.5% employee + employer)."""
+
+    month: int
+    year: int
+    run_id: uuid.UUID | None = None
+    run_status: str | None = None
+    rows: list[HousingLevyScheduleRow]
+    total_employee: Decimal
+    total_employer: Decimal
     total: Decimal
 
 

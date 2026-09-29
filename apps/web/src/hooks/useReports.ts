@@ -16,6 +16,8 @@ import type {
   GeneratedReportListResponse,
   GeneratedReportResponse,
   ReportGenerateRequest,
+  UsageBillingReport,
+  UsageBillingTrend,
 } from "@aifya/shared";
 
 // ── Summary ────────────────────────────────────────────────────────────────
@@ -214,5 +216,62 @@ export function useGeneratedReport(reportId?: string) {
     queryFn: () =>
       apiClient.get<GeneratedReportResponse>(`/reports/generated/${reportId}`),
     enabled: !!reportId,
+  });
+}
+
+// ── Facility Usage Billing ──────────────────────────────────────────────────
+
+/**
+ * Hook for the facility's usage charge for one billing month.
+ *
+ * Aifya meters reception registrations, emergency registrations and inpatient
+ * bed-days at a flat rate per event. Passing a rate overrides the platform
+ * default so the page can be used as a what-if calculator.
+ *
+ * @param month - Billing month as YYYY-MM (defaults to the current month)
+ * @param rateCents - Optional rate override in KES cents
+ * @returns Query result with the priced usage report
+ */
+export function useUsageBilling(month?: string, rateCents?: number) {
+  const params = new URLSearchParams();
+  if (month) params.set("month", month);
+  if (rateCents !== undefined) params.set("rate_cents", String(rateCents));
+  const qs = params.toString();
+
+  return useOfflineQuery<UsageBillingReport>({
+    queryKey: ["reports", "usage-billing", month, rateCents],
+    queryFn: () =>
+      apiClient.get<UsageBillingReport>(
+        `/reports/usage-billing${qs ? `?${qs}` : ""}`
+      ),
+    refetchInterval: 60_000,
+  });
+}
+
+/**
+ * Hook for the rolling month-by-month usage charge.
+ *
+ * @param months - Number of months to include
+ * @param endMonth - Last month to include as YYYY-MM
+ * @param rateCents - Optional rate override in KES cents
+ * @returns Query result with the rolling usage trend
+ */
+export function useUsageBillingTrend(
+  months: number = 12,
+  endMonth?: string,
+  rateCents?: number
+) {
+  const params = new URLSearchParams();
+  params.set("months", String(months));
+  if (endMonth) params.set("end_month", endMonth);
+  if (rateCents !== undefined) params.set("rate_cents", String(rateCents));
+
+  return useOfflineQuery<UsageBillingTrend>({
+    queryKey: ["reports", "usage-billing", "trend", months, endMonth, rateCents],
+    queryFn: () =>
+      apiClient.get<UsageBillingTrend>(
+        `/reports/usage-billing/monthly?${params.toString()}`
+      ),
+    refetchInterval: 60_000,
   });
 }

@@ -1,10 +1,11 @@
 import uuid
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from jose import JWTError
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
@@ -105,7 +106,112 @@ async def _set_request_facility_context(
 
     db = getattr(request.state, "db", None)
     if isinstance(db, AsyncSession):
-        await set_facility_context(db, str(current_user.facility_id))
+        await set_facility_context(
+            db,
+            str(current_user.facility_id),
+            user_id=current_user.user_id,
+            email=current_user.email,
+            roles=current_user.roles,
+        )
+
+
+#: Why a Keycloak sign-in could not be tied to a staff record. The identity
+#: provider proves who someone is; the staff record says where they work and
+#: what they may do, so a token with no staff record behind it has no tenant,
+#: no department and no role the hospital has actually assigned.
+_KEYCLOAK_BINDING_MESSAGES: dict[str, str] = {
+    "no_staff": (
+        "Your sign-in is not linked to a staff record at this facility. "
+        "Ask an administrator to check your account."
+    ),
+    "inactive_staff": (
+        "Your staff record is not active. Ask an administrator to re-enable it."
+    ),
+}
+
+
+async def _linked_staff(
+    facility_id: uuid.UUID,
+    keycloak_user_id: uuid.UUID,
+) -> tuple[uuid.UUID | None, str | None]:
+    """
+    Find the Aifya staff record a Keycloak sign-in belongs to.
+
+    The two identifiers are deliberately different. Keycloak owns the login and
+    the database owns the clinical record, and ``staff.keycloak_user_id`` is the
+    only join between them. Nothing upstream of this performs that join, so
+    without it every later use of the user id - doctor assignment, the
+    department-scoped queue, per-person permission grants and the clinical audit
+    trail - would be keyed on a value no staff row carries.
+
+    ``staff`` is row level security scoped, so the tenant is published to the
+    session before the read. A lookup that skipped that step would return no row
+    and read as "unlinked account" rather than as a bug.
+
+    The session is opened here rather than shared with the request: which of
+    FastAPI's dependencies is resolved first decides whether the request already
+    has one, and a security decision should not depend on that ordering.
+
+    @param facility_id: Facility claim from the access token
+    @param keycloak_user_id: ``sub`` claim from the access token
+    @returns Tuple of (staff UUID, refusal reason); reason is None when found
+    """
+    from app.database import async_session
+    from app.models.staff import Staff
+
+    async with async_session() as db:
+        await set_facility_context(db, str(facility_id))
+        result = await db.execute(
+            select(Staff).where(
+                Staff.facility_id == facility_id,
+                Staff.keycloak_user_id == keycloak_user_id,
+                Staff.is_deleted == False,  # noqa: E712
+            )
+        )
+        staff = result.scalars().first()
+        if staff is None:
+            return None, "no_staff"
+        if not staff.is_active:
+            return None, "inactive_staff"
+        # Read inside the session: the row is detached once it closes.
+        return staff.id, None
+
+
+def _keycloak_binding_detail(reason: str | None) -> str:
+    """
+    Explain, in the hospital's terms, which record to go and fix.
+
+    @param reason: Refusal reason, or None
+    @returns Human-readable refusal message
+    """
+    return _KEYCLOAK_BINDING_MESSAGES.get(
+        reason or "", "Your sign-in is not linked to a staff record at this "
+        "facility. Ask an administrator to check your account."
+    )
+
+
+async def _bind_keycloak_identity(current_user: CurrentUser) -> CurrentUser:
+    """
+    Re-key a Keycloak-derived user onto the staff record it belongs to.
+
+    Refuses rather than falling back to the provider's own id. A wrong user id
+    is quiet: the row saves, the queue just never shows the patient, and the
+    audit trail names a user that does not exist. A refusal is loud and says
+    which record to fix, which is the better failure for a clinical system.
+
+    @param current_user: User built from the Keycloak token
+    @returns The same user, keyed on their staff record
+    @raises HTTPException 403: When no active staff record is linked
+    """
+    staff_id, reason = await _linked_staff(
+        current_user.facility_id, current_user.user_id
+    )
+    if staff_id is None:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=_keycloak_binding_detail(reason),
+        )
+    return replace(current_user, user_id=staff_id)
 
 
 async def get_current_user(
@@ -132,11 +238,15 @@ async def get_current_user(
             )
 
             payload = decode_internal_token(token)
+            current_user = _current_user_from_payload(payload)
         else:
             from app.auth.keycloak import decode_token as decode_keycloak_token
 
             payload = await decode_keycloak_token(token)
-        current_user = _current_user_from_payload(payload)
+            current_user = _current_user_from_payload(payload)
+            # The token names a Keycloak user; every clinical table names a
+            # staff record. Re-key before anything downstream reads the id.
+            current_user = await _bind_keycloak_identity(current_user)
     except (JWTError, ValueError, TypeError):
         raise _auth_error() from None
 

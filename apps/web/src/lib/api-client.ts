@@ -215,6 +215,27 @@ export class ApiError extends Error {
   }
 }
 
+/**
+ * Whether a failed request means the Aifya server could not be reached.
+ *
+ * The web app proxies /api/v1 to the API gateway, so a gateway that is not
+ * running arrives as a 5xx from the proxy rather than as a connection error.
+ * Both mean the same thing to the person on screen: the list is not empty and
+ * the data is not wrong - nobody answered. Saying so out loud is the
+ * difference between a support ticket about a broken queue and a restart of
+ * the service.
+ *
+ * @param error - Error thrown by an apiClient call
+ * @returns True when the server could not be reached or answered with a 5xx
+ */
+export function isServerUnavailable(error: unknown): boolean {
+  if (error instanceof ApiError) {
+    return error.status >= 500;
+  }
+  // A failed fetch (server down, DNS, offline) rejects with a TypeError.
+  return error instanceof TypeError;
+}
+
 /** One field error from a FastAPI validation failure. */
 interface ValidationErrorItem {
   loc?: unknown[];

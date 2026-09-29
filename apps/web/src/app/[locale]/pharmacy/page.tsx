@@ -12,6 +12,7 @@ import { Link } from "@/i18n/routing";
 import { usePharmacyQueue, useStockAlerts } from "@/hooks/usePharmacy";
 import { formatDateTime } from "@/lib/utils";
 import { PageHeader } from "@/components/ui/PageHeader";
+import { ServiceChargeBadge } from "@/components/billing/ServiceChargeBadge";
 import { DrugStockBadge } from "@/components/pharmacy/DrugStockBadge";
 import { StatusBadge } from "@/components/ui/StatusBadge";
 import { Avatar } from "@/components/ui/Avatar";
@@ -26,6 +27,7 @@ import { PageSkeleton } from "@/components/ui/Skeleton";
  */
 export default function PharmacyQueuePage() {
   const t = useTranslations("pharmacy");
+  const tsc = useTranslations("serviceCharge");
 
   const { data: queue, isLoading } = usePharmacyQueue();
   const { data: alerts } = useStockAlerts();
@@ -148,11 +150,28 @@ export default function PharmacyQueuePage() {
                         {rx.duration_days ? ` — ${rx.duration_days}d` : ""}
                         {rx.quantity ? ` — Qty: ${rx.quantity}` : ""}
                       </p>
+                      {rx.instructions && (
+                        <p className="mt-0.5 truncate text-xs italic text-muted-foreground">
+                          {tsc("clinicalInfo")}: {rx.instructions}
+                        </p>
+                      )}
                       <DrugStockBadge
                         className="mt-1"
                         drugName={rx.drug_name}
                         genericName={rx.generic_name}
                         requiredQuantity={rx.quantity}
+                      />
+                    </div>
+                    <div className="hidden max-w-[200px] flex-shrink-0 flex-col items-end gap-1 text-xs text-muted-foreground lg:flex">
+                      {rx.prescriber_name && (
+                        <span className="truncate">
+                          {tsc("prescribedBy")}: {rx.prescriber_name}
+                        </span>
+                      )}
+                      <ServiceChargeBadge
+                        status={rx.charge_status}
+                        totalCents={rx.charge_total_cents}
+                        balanceCents={rx.charge_balance_cents}
                       />
                     </div>
                     <div className="hidden items-center gap-1 text-xs text-muted-foreground sm:flex">

@@ -2,7 +2,7 @@
 
 import React, { useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
-import { useParams, useRouter } from "next/navigation";
+import { useParams, useSearchParams } from "next/navigation";
 import { useTranslations } from "next-intl";
 import {
   Stethoscope,
@@ -25,13 +25,14 @@ import {
   Ruler,
   ArrowLeft,
   ChevronRight,
+  ClipboardCheck,
+  CheckCircle2,
   type LucideIcon,
 } from "lucide-react";
 import { Link } from "@/i18n/routing";
 import {
   useEncounter,
   useEncounterVitals,
-  useRecordVitals,
   useEncounterDiagnoses,
   useAddDiagnosis,
   useEncounterPrescriptions,
@@ -39,16 +40,26 @@ import {
   useEncounterLabOrders,
   useCreateLabOrder,
   useUpdateEncounter,
+  useDepartments,
+  useCompleteAssessment,
 } from "@/hooks/useEncounters";
+import { useAdmissionOrders } from "@/hooks/useIPD";
 import { useCreateImagingOrder, useImagingWorklist } from "@/hooks/useRadiology";
+import { usePermissions } from "@/hooks/usePermissions";
 import { PageHeader } from "@/components/ui/PageHeader";
-import { AdmitToIPDPanel } from "@/components/opd/AdmitToIPDPanel";
+import { RequestAdmissionPanel } from "@/components/opd/RequestAdmissionPanel";
+import { OpdTestsPanel } from "@/components/opd/OpdTestsPanel";
+import { OpdHandoffPanel } from "@/components/opd/OpdHandoffPanel";
+import { BookAppointmentPanel } from "@/components/opd/BookAppointmentPanel";
+import { RoutePatientPanel } from "@/components/opd/RoutePatientPanel";
+import { PatientHistoryPanel } from "@/components/patients/PatientHistoryPanel";
 import { DrugAutocomplete } from "@/components/opd/DrugAutocomplete";
 import { DrugStockBadge } from "@/components/pharmacy/DrugStockBadge";
 import { StatusBadge } from "@/components/ui/StatusBadge";
 import { PageSkeleton } from "@/components/ui/Skeleton";
 import { ConsultationFeePanel } from "@/components/billing/ConsultationFeePanel";
 import { EncounterServiceCharges } from "@/components/billing/EncounterServiceCharges";
+import { PERMISSIONS } from "@/lib/auth/permissions";
 import { cn, formatDateTime } from "@/lib/utils";
 import type {
   DiagnosisCreate,
@@ -63,7 +74,6 @@ import type {
   Laterality,
   PregnancyStatus,
   PrescriptionWithInteractions,
-  VitalSignCreate,
 } from "@aifya/shared";
 
 // ── Triage color map ──────────────────────────────────────────────────────
@@ -120,6 +130,7 @@ const IMAGING_STATUS_STYLE: Record<ImagingOrderStatus, string> = {
 
 const TABS = [
   { id: "vitals", labelKey: "vitalsTab", icon: Activity },
+  { id: "consultation", labelKey: "consultationRoomTab", icon: ClipboardCheck },
   { id: "diagnoses", labelKey: "diagnosesTab", icon: FileText },
   { id: "prescriptions", labelKey: "prescriptionsTab", icon: Pill },
   { id: "lab", labelKey: "labOrdersTab", icon: FlaskConical },
@@ -128,6 +139,10 @@ const TABS = [
 ] as const;
 
 type TabId = typeof TABS[number]["id"];
+
+// Step order for the progress strip. The billing step drops out for a user who
+// cannot read billing data, so the strip never leads somewhere that 403s.
+const FLOW_TABS = ["vitals", "consultation", "diagnoses", "prescriptions", "lab", "imaging", "billing"] as const;
 type DiagnosisType = DiagnosisCreate["diagnosis_type"];
 type LabPriority = NonNullable<LabOrderCreate["priority"]>;
 
@@ -189,12 +204,26 @@ export default function EncounterDetailPage() {
   const tl = useTranslations("lab");
   const tr = useTranslations("radiology");
   const tb = useTranslations("billing");
+  // Admission-order status labels live with the IPD queue that sets them.
+  const ta = useTranslations("ipd");
+  const tc = useTranslations("common");
   const params = useParams();
+  const searchParams = useSearchParams();
   const encounterId = params.encounterId as string;
-  const router = useRouter();
 
-  const [activeTab, setActiveTab] = useState<TabId>("vitals");
-  const [showAdmitForm, setShowAdmitForm] = useState(false);
+  // The consultation room opens a record on the consultation tab; the OPD
+  // queue opens it on vitals. Anything unknown falls back to vitals.
+  const [activeTab, setActiveTab] = useState<TabId>(() => {
+    const requested = searchParams.get("tab");
+    return TABS.some((tab) => tab.id === requested) ? (requested as TabId) : "vitals";
+  });
+  const [showAdmissionForm, setShowAdmissionForm] = useState(false);
+  // Completing a visit asks for the outcome note first, so "completed" always
+  // records what the department actually did rather than only that the
+  // patient left.
+  const [showOutcomeForm, setShowOutcomeForm] = useState(false);
+  const [outcomeNote, setOutcomeNote] = useState("");
+  const [outcomeError, setOutcomeError] = useState("");
   const routeLabels: Record<string, string> = {
     oral: tp("oral"), iv: tp("iv"), im: tp("im"), sc: tp("sc"),
     topical: tp("topical"), inhaled: tp("inhaled"), rectal: tp("rectal"),
@@ -207,61 +236,51 @@ export default function EncounterDetailPage() {
 
   // ── Data fetching ─────────────────────────────────────────────────────
   const { data: encounter, isLoading } = useEncounter(encounterId);
+  // Where reception routed this patient, so the visit agrees with the OPD
+  // queue and the clinical worklist.
+  const { data: departmentDirectory } = useDepartments();
+  const routedDepartment = (departmentDirectory ?? []).find(
+    (d) => d.id === encounter?.department_id
+  )?.name;
   const { data: vitals } = useEncounterVitals(encounterId);
   const { data: diagnoses } = useEncounterDiagnoses(encounterId);
   const { data: prescriptions, refetch: refetchPrescriptions } = useEncounterPrescriptions(encounterId);
   const { data: labOrders } = useEncounterLabOrders(encounterId);
   const { data: imagingWorklist } = useImagingWorklist();
   const imagingOrders = imagingWorklist?.items.filter((item) => item.encounter_id === encounterId) ?? [];
+  // The admission request raised from this visit, so the clinician can see it
+  // is still with the admission desk instead of wondering where it went.
+  const { data: admissionOrders } = useAdmissionOrders("open", encounterId);
+  const openAdmissionOrder = admissionOrders?.items[0];
 
   // ── Mutations ─────────────────────────────────────────────────────────
-  const recordVitals = useRecordVitals(encounterId);
   const addDiagnosis = useAddDiagnosis(encounterId);
   const createPrescription = useCreatePrescription(encounterId);
   const createLabOrder = useCreateLabOrder(encounterId);
   const createImagingOrder = useCreateImagingOrder();
   const updateEncounter = useUpdateEncounter(encounterId);
+  const completeAssessment = useCompleteAssessment(encounterId);
+  // Moving an encounter through waiting -> in_consultation -> completed is a
+  // clinical act, so the API admits only clinical.consult or triage.record.
+  const { hasAnyPermission, hasPermission } = usePermissions();
+  const canUpdateStatus = hasAnyPermission([
+    PERMISSIONS.CLINICAL_CONSULT,
+    PERMISSIONS.TRIAGE_RECORD,
+  ]);
+  // The fee quote, the service charges and the invoice state are front-desk
+  // and billing data, so the billing step is offered only to billing.view.
+  const canViewBilling = hasPermission(PERMISSIONS.BILLING_VIEW);
 
-  // ── Vitals form state ─────────────────────────────────────────────────
-  const [vitalsForm, setVitalsForm] = useState({
-    systolic_bp: "", diastolic_bp: "", heart_rate: "",
-    temperature: "", respiratory_rate: "", oxygen_saturation: "",
-    weight_kg: "", height_cm: "", pain_score: "", blood_glucose: "",
-  });
-  const [vitalsSubmitting, setVitalsSubmitting] = useState(false);
-
-  const handleVitalsSubmit = () => {
-    if (!encounter) return;
-    setVitalsSubmitting(true);
-
-    const payload: VitalSignCreate = {
-      encounter_id: encounterId,
-      patient_id: encounter.patient_id,
-    };
-
-    // Only include filled fields
-    if (vitalsForm.systolic_bp) payload.systolic_bp = Number(vitalsForm.systolic_bp);
-    if (vitalsForm.diastolic_bp) payload.diastolic_bp = Number(vitalsForm.diastolic_bp);
-    if (vitalsForm.heart_rate) payload.heart_rate = Number(vitalsForm.heart_rate);
-    if (vitalsForm.temperature) payload.temperature = Number(vitalsForm.temperature);
-    if (vitalsForm.respiratory_rate) payload.respiratory_rate = Number(vitalsForm.respiratory_rate);
-    if (vitalsForm.oxygen_saturation) payload.oxygen_saturation = Number(vitalsForm.oxygen_saturation);
-    if (vitalsForm.weight_kg) payload.weight_kg = Number(vitalsForm.weight_kg);
-    if (vitalsForm.height_cm) payload.height_cm = Number(vitalsForm.height_cm);
-    if (vitalsForm.pain_score) payload.pain_score = Number(vitalsForm.pain_score);
-    if (vitalsForm.blood_glucose) payload.blood_glucose = Number(vitalsForm.blood_glucose);
-
-    recordVitals.mutate(payload, {
-      onSettled: () => {
-        setVitalsSubmitting(false);
-        setVitalsForm({
-          systolic_bp: "", diastolic_bp: "", heart_rate: "",
-          temperature: "", respiratory_rate: "", oxygen_saturation: "",
-          weight_kg: "", height_cm: "", pain_score: "", blood_glucose: "",
-        });
-      },
-    });
-  };
+  // Handing the patient on to another unit is a clinician's act, so the
+  // referral half of the Consultation Room is offered only to a clinician.
+  const canRefer = hasPermission(PERMISSIONS.CLINICAL_CONSULT);
+  // Booking the next visit is a clinician's follow-up, so it follows the same
+  // consult permission rather than being hidden from the doctor by the
+  // appointment permission front desk holds.
+  const canBookAppointment = hasAnyPermission([
+    PERMISSIONS.APPOINTMENTS_MANAGE,
+    PERMISSIONS.CLINICAL_CONSULT,
+  ]);
 
   // ── Diagnosis form state ──────────────────────────────────────────────
   const [diagForm, setDiagForm] = useState<DiagnosisFormState>({
@@ -306,10 +325,20 @@ export default function EncounterDetailPage() {
   } | null>(null);
   const queryClient = useQueryClient();
   const [rxSubmitting, setRxSubmitting] = useState(false);
+  const [rxError, setRxError] = useState("");
   const [rxInteractions, setRxInteractions] = useState<DrugInteractionAlert[]>([]);
 
   const handleRxSubmit = () => {
-    if (!encounter || !rxForm.drug_name || !rxForm.dosage) return;
+    if (!encounter) return;
+    if (!rxForm.drug_name) {
+      setRxError(tp("drugNameRequired"));
+      return;
+    }
+    if (!rxForm.dosage) {
+      setRxError(tp("dosageRequired"));
+      return;
+    }
+    setRxError("");
     setRxSubmitting(true);
     setRxInteractions([]);
     createPrescription.mutate(
@@ -326,12 +355,19 @@ export default function EncounterDetailPage() {
       },
       {
         onSuccess: (result: PrescriptionWithInteractions) => {
+          if (result.blocked) {
+            // Nothing was saved; keep the form so the prescriber can revise it.
+            setRxInteractions(result.interactions ?? []);
+            setRxError(tp("interactionBlocked"));
+            return;
+          }
           if (result.interactions?.length) setRxInteractions(result.interactions);
           setRxForm({ drug_name: "", dosage: "", route: "oral", frequency: "bd", duration_days: "", instructions: "", quantity: "" });
           setSelectedDrug(null);
           queryClient.invalidateQueries({ queryKey: ["encounters", encounterId, "prescriptions"] });
           refetchPrescriptions();
         },
+        onError: (error: Error) => setRxError(error.message),
         onSettled: () => setRxSubmitting(false),
       }
     );
@@ -400,7 +436,37 @@ export default function EncounterDetailPage() {
 
   // ── Status update ─────────────────────────────────────────────────────
   const handleStatusChange = (newStatus: EncounterStatus) => {
+    if (newStatus === "completed") {
+      // The closing note is required, so collect it before the PATCH.
+      setOutcomeError("");
+      setOutcomeNote(encounter?.outcome ?? "");
+      setShowOutcomeForm(true);
+      return;
+    }
     updateEncounter.mutate({ status: newStatus });
+  };
+
+  /**
+   * Close the visit, sending the department's outcome note with it.
+   */
+  const handleCompleteVisit = () => {
+    const note = outcomeNote.trim();
+    if (!note) {
+      setOutcomeError(t("outcomeRequired"));
+      return;
+    }
+    setOutcomeError("");
+    updateEncounter.mutate(
+      { status: "completed", outcome: note },
+      {
+        onSuccess: () => {
+          setShowOutcomeForm(false);
+          setOutcomeNote("");
+        },
+        onError: (error: Error) =>
+          setOutcomeError(error.message || t("outcomeRequired")),
+      },
+    );
   };
 
   // ── Loading state ─────────────────────────────────────────────────────
@@ -426,7 +492,7 @@ export default function EncounterDetailPage() {
         <span className="text-muted-foreground mx-1">›</span>
         <Link href={`/patients/${encounter.patient_id}`} className="text-muted-foreground hover:text-foreground">{encounter.patient_name}</Link>
         <span className="text-muted-foreground mx-1">›</span>
-        {(["vitals","diagnoses","prescriptions","lab","imaging","billing"] as const).map((tab, i) => (
+        {FLOW_TABS.filter((tab) => tab !== "billing" || canViewBilling).map((tab, i) => (
           <span key={tab} className="flex items-center gap-1">
             {i > 0 && <span className="text-muted-foreground mx-1">›</span>}
             <button
@@ -477,6 +543,10 @@ export default function EncounterDetailPage() {
                 {t(`status.${encounter.status}`)}
               </StatusBadge>
               <span className="flex items-center gap-1 text-xs text-muted-foreground">
+                <Stethoscope className="h-3 w-3" />
+                {routedDepartment ?? t("unassignedDepartment")}
+              </span>
+              <span className="flex items-center gap-1 text-xs text-muted-foreground">
                 <Clock className="h-3 w-3" />
                 {formatDateTime(encounter.created_at)}
               </span>
@@ -486,7 +556,7 @@ export default function EncounterDetailPage() {
 
         {/* Status controls */}
         <div className="flex flex-wrap items-center gap-2">
-          {encounter.status === "waiting" && (
+          {canUpdateStatus && encounter.status === "waiting" && (
             <button
               onClick={() => handleStatusChange("in_consultation")}
               disabled={updateEncounter.isPending}
@@ -495,7 +565,7 @@ export default function EncounterDetailPage() {
               {t("startConsultation")}
             </button>
           )}
-          {encounter.status === "in_consultation" && !showAdmitForm && (
+          {canUpdateStatus && encounter.status === "in_consultation" && !showAdmissionForm && (
             <>
               <button
                 onClick={() => handleStatusChange("completed")}
@@ -505,10 +575,10 @@ export default function EncounterDetailPage() {
                 {t("completeConsultation")}
               </button>
               <button
-                onClick={() => setShowAdmitForm(true)}
+                onClick={() => setShowAdmissionForm(true)}
                 className="rounded-lg bg-purple-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-purple-700 disabled:opacity-50"
               >
-                {t("admitInpatient")}
+                {t("admissionRequestAction")}
               </button>
             </>
           )}
@@ -516,18 +586,126 @@ export default function EncounterDetailPage() {
         </div>
       </div>
 
-      {showAdmitForm && (
-        <AdmitToIPDPanel
+      {/* The form that closes the visit: an outcome note is required, so the
+          department's record says what was done. */}
+      {showOutcomeForm && (
+        <div className="rounded-xl border border-green-300 bg-green-50/60 p-4 dark:border-green-800 dark:bg-green-950/20">
+          <div className="flex items-center gap-2">
+            <CheckCircle2 className="h-4 w-4 text-green-600 dark:text-green-400" />
+            <h3 className="text-sm font-semibold text-foreground">
+              {t("outcomeTitle")}
+            </h3>
+          </div>
+          <p className="mt-1 text-xs text-muted-foreground">
+            {t("outcomeHint")}
+          </p>
+          <label
+            htmlFor="encounter-outcome"
+            className="mt-3 block text-xs font-medium text-foreground"
+          >
+            {t("outcomeLabel")}
+          </label>
+          <textarea
+            id="encounter-outcome"
+            value={outcomeNote}
+            onChange={(event) => setOutcomeNote(event.target.value)}
+            rows={3}
+            maxLength={2000}
+            placeholder={t("outcomePlaceholder")}
+            className="mt-1 w-full rounded-lg border border-border bg-card px-3 py-2 text-sm text-foreground shadow-sm transition-colors placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-primary/30"
+          />
+          {outcomeError && (
+            <p className="mt-1 text-xs font-medium text-red-600 dark:text-red-400">
+              {outcomeError}
+            </p>
+          )}
+          <div className="mt-3 flex flex-wrap gap-2">
+            <button
+              type="button"
+              onClick={handleCompleteVisit}
+              disabled={updateEncounter.isPending}
+              className="rounded-lg bg-green-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-green-700 disabled:opacity-50"
+            >
+              {updateEncounter.isPending ? tc("saving") : t("outcomeSave")}
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setShowOutcomeForm(false);
+                setOutcomeError("");
+              }}
+              disabled={updateEncounter.isPending}
+              className="rounded-lg border border-border bg-card px-3 py-1.5 text-xs font-semibold text-foreground hover:bg-muted disabled:opacity-50"
+            >
+              {tc("cancel")}
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* What the department wrote when it closed the visit. */}
+      {encounter.outcome && !showOutcomeForm && (
+        <div className="rounded-xl border border-border bg-card p-4 shadow-[var(--shadow-card)]">
+          <div className="flex items-center gap-2">
+            <CheckCircle2 className="h-4 w-4 text-green-600 dark:text-green-400" />
+            <h3 className="text-sm font-semibold text-foreground">
+              {t("outcomeTitle")}
+            </h3>
+            {encounter.completed_at && (
+              <span className="text-xs text-muted-foreground">
+                {t("outcomeRecordedAt", {
+                  date: formatDateTime(encounter.completed_at),
+                })}
+              </span>
+            )}
+          </div>
+          <p className="mt-2 whitespace-pre-wrap text-sm text-foreground">
+            {encounter.outcome}
+          </p>
+        </div>
+      )}
+
+      {/* Prior care: allergies, chronic conditions and previous visits. */}
+      <PatientHistoryPanel
+        patientId={encounter.patient_id}
+        excludeEncounterId={encounter.id}
+      />
+
+      {openAdmissionOrder && !showAdmissionForm && (
+        <div className="flex flex-wrap items-center gap-2 rounded-xl border border-amber-300 bg-amber-50/50 px-4 py-3 text-xs dark:border-amber-800 dark:bg-amber-950/20">
+          <Clock className="h-4 w-4 shrink-0 text-amber-600 dark:text-amber-400" />
+          <span className="font-semibold text-foreground">
+            {t("admissionOpenTitle")}
+          </span>
+          <span className="text-muted-foreground">
+            {t("admissionOpenBody", {
+              number: openAdmissionOrder.order_number,
+              status: ta(`status${openAdmissionOrder.status
+                .split("_")
+                .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+                .join("")}` as "statusPending"),
+            })}
+          </span>
+        </div>
+      )}
+
+      {showAdmissionForm && (
+        <RequestAdmissionPanel
           encounter={encounter}
-          onCancel={() => setShowAdmitForm(false)}
-          onAdmitted={() => router.push("/ipd")}
+          onCancel={() => setShowAdmissionForm(false)}
+          onSubmitted={() => {
+            setShowAdmissionForm(false);
+            queryClient.invalidateQueries({
+              queryKey: ["ipd", "admission-orders"],
+            });
+          }}
         />
       )}
 
       {/* ── Tabs ── */}
       <div className="border-b border-border">
         <div className="flex gap-0 overflow-x-auto">
-          {TABS.map((tab) => {
+          {TABS.filter((tab) => tab.id !== "billing" || canViewBilling).map((tab) => {
             const Icon = tab.icon;
             return (
               <button
@@ -553,6 +731,41 @@ export default function EncounterDetailPage() {
       ══════════════════════════════════════════════════════════════════ */}
       {activeTab === "vitals" && (
         <div className="space-y-4">
+          {/* The nurse's hand-off. Vitals are what release a patient to the
+              doctor, so the state of the assessment sits at the top of the
+              vitals tab rather than in a field nobody looks at. */}
+          {encounter.triaged_at ? (
+            <div className="flex items-center gap-2 rounded-lg border border-green-300 bg-green-50 px-4 py-3 dark:border-green-800 dark:bg-green-950/30">
+              <ClipboardCheck className="h-4 w-4 shrink-0 text-green-600 dark:text-green-400" />
+              <p className="text-sm text-green-800 dark:text-green-200">
+                {t("assessmentDoneBanner")}
+              </p>
+            </div>
+          ) : (
+            <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-amber-300 bg-amber-50 px-4 py-3 dark:border-amber-800 dark:bg-amber-950/30">
+              <p className="flex items-center gap-2 text-sm text-amber-800 dark:text-amber-200">
+                <AlertTriangle className="h-4 w-4 shrink-0 text-amber-600 dark:text-amber-400" />
+                {t("assessmentPendingBanner")}
+              </p>
+              {canUpdateStatus && (
+                <button
+                  onClick={() => completeAssessment.mutate(undefined)}
+                  disabled={completeAssessment.isPending}
+                  className="flex items-center gap-2 rounded-lg border border-amber-400 bg-card px-3 py-1.5 text-xs font-semibold text-foreground shadow-sm transition-colors hover:bg-muted disabled:opacity-50"
+                >
+                  {completeAssessment.isPending ? (
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                  ) : (
+                    <ClipboardCheck className="h-4 w-4" />
+                  )}
+                  {completeAssessment.isPending
+                    ? t("completingAssessment")
+                    : t("completeAssessment")}
+                </button>
+              )}
+            </div>
+          )}
+
           {/* Previous vitals */}
           {vitals && vitals.length > 0 && (
             <div className="rounded-xl border border-border bg-card p-5 shadow-[var(--shadow-card)]">
@@ -605,51 +818,26 @@ export default function EncounterDetailPage() {
             </div>
           )}
 
-          {/* Record vitals form */}
-          <div className="rounded-xl border border-border bg-card p-5 shadow-[var(--shadow-card)]">
-            <h3 className="mb-4 text-sm font-semibold text-foreground">{t("recordVitals")}</h3>
-            <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5">
-              <VitalsInput label={t("systolicBloodPressure")} unit="mmHg" value={vitalsForm.systolic_bp}
-                onChange={(v) => setVitalsForm((f) => ({ ...f, systolic_bp: v }))} />
-              <VitalsInput label={t("diastolicBloodPressure")} unit="mmHg" value={vitalsForm.diastolic_bp}
-                onChange={(v) => setVitalsForm((f) => ({ ...f, diastolic_bp: v }))} />
-              <VitalsInput label={t("heartRate")} unit="bpm" value={vitalsForm.heart_rate}
-                onChange={(v) => setVitalsForm((f) => ({ ...f, heart_rate: v }))} />
-              <VitalsInput label={t("temperature")} unit="°C" value={vitalsForm.temperature}
-                onChange={(v) => setVitalsForm((f) => ({ ...f, temperature: v }))} />
-              <VitalsInput label={t("respiratoryRate")} unit="/min" value={vitalsForm.respiratory_rate}
-                onChange={(v) => setVitalsForm((f) => ({ ...f, respiratory_rate: v }))} />
-              <VitalsInput label={t("oxygenSaturationShort")} unit="%" value={vitalsForm.oxygen_saturation}
-                onChange={(v) => setVitalsForm((f) => ({ ...f, oxygen_saturation: v }))} />
-              <VitalsInput label={t("weight")} unit="kg" value={vitalsForm.weight_kg}
-                onChange={(v) => setVitalsForm((f) => ({ ...f, weight_kg: v }))} />
-              <VitalsInput label={t("height")} unit="cm" value={vitalsForm.height_cm}
-                onChange={(v) => setVitalsForm((f) => ({ ...f, height_cm: v }))} />
-              <VitalsInput label={t("painScore")} unit="/10" value={vitalsForm.pain_score}
-                onChange={(v) => setVitalsForm((f) => ({ ...f, pain_score: v }))} />
-              <VitalsInput label={t("bloodGlucose")} unit="mmol/L" value={vitalsForm.blood_glucose}
-                onChange={(v) => setVitalsForm((f) => ({ ...f, blood_glucose: v }))} />
-            </div>
-            <div className="mt-4 flex items-center justify-between">
-              <button onClick={() => setActiveTab("diagnoses")} className="flex items-center gap-1.5 rounded-lg border border-border px-4 py-2 text-sm font-medium text-muted-foreground hover:bg-muted transition-colors">
-                {t("nextDiagnoses")}
-              </button>
-              <button
-                onClick={handleVitalsSubmit}
-                disabled={vitalsSubmitting}
-                className="flex items-center gap-2 rounded-lg bg-primary px-4 py-2 text-sm font-semibold text-primary-foreground disabled:opacity-50"
-              >
-                {vitalsSubmitting ? <Loader2 className="h-4 w-4 animate-spin" /> : <Activity className="h-4 w-4" />}
-                {t("saveVitals")}
-              </button>
-            </div>
-          </div>
+          {/* The nurse's general testing: observations plus bedside screening */}
+          <OpdTestsPanel encounter={encounter} />
         </div>
       )}
 
       {/* ══════════════════════════════════════════════════════════════════
           TAB: DIAGNOSES (ICD-10)
       ══════════════════════════════════════════════════════════════════ */}
+      {activeTab === "consultation" && (
+        <div className="space-y-6">
+          {/* The nurse's OPD findings, so the doctor inherits the hand-off
+              instead of walking back to the testing tab. */}
+          <OpdHandoffPanel encounter={encounter} />
+          {canRefer && <RoutePatientPanel encounter={encounter} />}
+          {canBookAppointment && (
+            <BookAppointmentPanel encounter={encounter} />
+          )}
+        </div>
+      )}
+
       {activeTab === "diagnoses" && (
         <div className="space-y-4">
           {/* Existing diagnoses */}
@@ -810,8 +998,13 @@ export default function EncounterDetailPage() {
               <div className="sm:col-span-2 lg:col-span-3">
                 <DrugAutocomplete
                   onSelect={(drugName, genericName, _isKeml, _stock, _unit, strength) => {
+                    setRxError("");
                     setRxForm((f) => ({ ...f, drug_name: drugName, dosage: strength || f.dosage }));
                     setSelectedDrug({ name: drugName, generic: genericName });
+                  }}
+                  onClear={() => {
+                    setRxForm((f) => ({ ...f, drug_name: "" }));
+                    setSelectedDrug(null);
                   }}
                 />
                 {selectedDrug && (
@@ -860,6 +1053,7 @@ export default function EncounterDetailPage() {
               </div>
             </div>
             <p className="mt-2 text-xs text-muted-foreground">{t("interactionCheckNotice")}</p>
+            {rxError && <p className="mt-2 text-xs font-medium text-destructive">{rxError}</p>}
             <div className="mt-3 flex items-center justify-between">
               <button onClick={() => setActiveTab("diagnoses")} className="flex items-center gap-1.5 rounded-lg border border-border px-4 py-2 text-sm font-medium text-muted-foreground hover:bg-muted transition-colors">
                 {t("backDiagnoses")}
@@ -1054,9 +1248,11 @@ export default function EncounterDetailPage() {
                 {t("backLabOrders")}
               </button>
               <div className="flex items-center gap-2">
-                <button onClick={() => setActiveTab("billing")} className="flex items-center gap-1.5 rounded-lg border border-primary px-4 py-2 text-sm font-medium text-primary hover:bg-primary/10 transition-colors">
-                  {t("nextBilling")} <ChevronRight className="h-4 w-4" />
-                </button>
+                {canViewBilling && (
+                  <button onClick={() => setActiveTab("billing")} className="flex items-center gap-1.5 rounded-lg border border-primary px-4 py-2 text-sm font-medium text-primary hover:bg-primary/10 transition-colors">
+                    {t("nextBilling")} <ChevronRight className="h-4 w-4" />
+                  </button>
+                )}
                 <button onClick={handleImagingSubmit} disabled={imagingSubmitting}
                   className="flex items-center gap-2 rounded-lg bg-primary px-4 py-2 text-sm font-semibold text-primary-foreground disabled:opacity-50">
                   {imagingSubmitting ? <Loader2 className="h-4 w-4 animate-spin" /> : <Scan className="h-4 w-4" />}
@@ -1072,7 +1268,7 @@ export default function EncounterDetailPage() {
           TAB: BILLING
           Invoice was auto-generated when encounter was created
       ══════════════════════════════════════════════════════════════════ */}
-      {activeTab === "billing" && (
+      {activeTab === "billing" && canViewBilling && (
         <div className="rounded-xl border border-border bg-card p-6 shadow-[var(--shadow-card)]">
           <div className="mb-4 flex items-center justify-between">
             <h3 className="text-sm font-semibold text-foreground">{t("billingTab")}</h3>
@@ -1133,25 +1329,6 @@ function VitalCard({ icon: Icon, label, value, unit }: {
   );
 }
 
-function VitalsInput({ label, unit, value, onChange }: {
-  label: string; unit: string; value: string; onChange: (v: string) => void;
-}) {
-  return (
-    <div>
-      <label className="mb-1 block text-xs font-medium text-muted-foreground">
-        {label} <span className="text-muted-foreground/60">({unit})</span>
-      </label>
-      <input
-        type="number"
-        value={value}
-        onChange={(e) => onChange(e.target.value)}
-        className="w-full rounded-lg border border-border bg-background px-3 py-2 text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-primary/30"
-        placeholder="—"
-      />
-    </div>
-  );
-}
-
 function FormInput({ label, placeholder, value, onChange }: {
   label: string; placeholder?: string; value: string; onChange: (v: string) => void;
 }) {
@@ -1168,4 +1345,3 @@ function FormInput({ label, placeholder, value, onChange }: {
     </div>
   );
 }
-

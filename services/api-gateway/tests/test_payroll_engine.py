@@ -9,6 +9,8 @@ from decimal import Decimal
 import pytest
 from sqlalchemy import select
 
+from app.auth.dependencies import CurrentUser
+
 # Import models so they register with Base.metadata before setup_database runs
 from app.models import payroll as _payroll  # noqa: F401
 from app.models import payroll_extra as _payroll_extra  # noqa: F401
@@ -21,6 +23,7 @@ from app.models.payroll import (
     StatutoryRate,
 )
 from app.models.payroll_extra import LeaveType, PayrollLeaveRequest
+from app.routers.payroll import _post_run_to_gl, post_payroll_run_to_gl
 from app.services.payroll.engine import run_monthly_payroll
 from app.services.payroll.payslip import (
     PayslipNotAvailableError,
@@ -407,3 +410,139 @@ async def test_salary_effective_dating_picks_correct_record() -> None:
         )
         assert line is not None
         assert line.basic_salary == Decimal("80000.00")
+
+
+# -- Skipped employees and general-ledger posting visibility ---------------
+
+
+@pytest.mark.asyncio
+async def test_skipped_employees_are_recorded_on_the_run() -> None:
+    """Employees with no salary, or a zero gross, are named on the run."""
+    async with session_factory() as db:
+        await _seed_rates(db)
+        payable = await _make_employee_with_salary(
+            db, full_name="Paid Employee", basic=Decimal("50000")
+        )
+        no_salary = Employee(
+            facility_id=FACILITY_ID,
+            staff_id="NOSAL-1",
+            full_name="No Salary Employee",
+            kra_pin="A012345678X",
+            nssf_number="NSSF-9",
+            shif_number="SHIF-9",
+            hire_date=date(2020, 1, 1),
+            is_active=True,
+            disability_exemption=False,
+            created_by=USER_ID,
+            updated_by=USER_ID,
+        )
+        db.add(no_salary)
+        await db.flush()
+        zero = await _make_employee_with_salary(
+            db, full_name="Zero Gross Employee", basic=Decimal("0")
+        )
+        await db.commit()
+
+        run = await run_monthly_payroll(
+            db=db, facility_id=FACILITY_ID, month=8, year=2026, user_id=USER_ID
+        )
+        await db.commit()
+
+        skipped = {e["employee_id"]: e for e in run.skipped_employees}
+        assert set(skipped) == {str(no_salary.id), str(zero.id)}
+        assert skipped[str(no_salary.id)]["reason"] == "no_salary"
+        assert skipped[str(no_salary.id)]["employee_name"] == "No Salary Employee"
+        assert skipped[str(no_salary.id)]["staff_id"] == "NOSAL-1"
+        assert skipped[str(zero.id)]["reason"] == "zero_gross"
+        # The run total counts only the employee who could actually be paid.
+        assert run.total_gross == Decimal("50000.00")
+        assert payable.id is not None
+
+
+@pytest.mark.asyncio
+async def test_gl_failure_is_recorded_then_cleared_by_retry(monkeypatch) -> None:
+    """A failed ledger post is stored on the run; a retry clears it."""
+    async with session_factory() as db:
+        await _seed_rates(db)
+        await _make_employee_with_salary(
+            db, full_name="Grace Mwangi", basic=Decimal("80000")
+        )
+        await db.commit()
+        run = await run_monthly_payroll(
+            db=db, facility_id=FACILITY_ID, month=9, year=2026, user_id=USER_ID
+        )
+        run.status = "approved"
+        await db.commit()
+
+        async def _boom(**_kwargs):
+            raise RuntimeError("ledger offline")
+
+        monkeypatch.setattr(
+            "app.services.finance.post_compound_transaction", _boom, raising=True
+        )
+        await _post_run_to_gl(db, run, USER_ID)
+        await db.commit()
+
+        assert run.status == "approved"
+        assert run.gl_transaction_id is None
+        assert run.gl_attempted_at is not None
+        assert run.gl_posting_error is not None
+        assert "posting_failed" in run.gl_posting_error
+        assert "ledger offline" in run.gl_posting_error
+
+        class _Txn:
+            id = uuid.uuid4()
+
+        async def _ok(**_kwargs):
+            return _Txn()
+
+        monkeypatch.setattr(
+            "app.services.finance.post_compound_transaction", _ok, raising=True
+        )
+        current_user = CurrentUser(
+            user_id=USER_ID,
+            facility_id=FACILITY_ID,
+            email="test@aifya.health",
+            roles=["admin"],
+            name="Test User",
+        )
+        result = await post_payroll_run_to_gl(
+            run_id=run.id, db=db, current_user=current_user
+        )
+        await db.commit()
+
+        assert result.status == "posted"
+        assert run.status == "posted"
+        assert run.gl_posting_error is None
+        assert run.gl_transaction_id == _Txn.id
+
+
+@pytest.mark.asyncio
+async def test_post_to_gl_endpoint_rejects_draft_run() -> None:
+    """Retrying the ledger post before approval is rejected."""
+    from fastapi import HTTPException
+
+    async with session_factory() as db:
+        await _seed_rates(db)
+        await _make_employee_with_salary(
+            db, full_name="Peter Kamau", basic=Decimal("40000")
+        )
+        await db.commit()
+        run = await run_monthly_payroll(
+            db=db, facility_id=FACILITY_ID, month=10, year=2026, user_id=USER_ID
+        )
+        await db.commit()
+        assert run.status == "draft"
+
+        current_user = CurrentUser(
+            user_id=USER_ID,
+            facility_id=FACILITY_ID,
+            email="test@aifya.health",
+            roles=["admin"],
+            name="Test User",
+        )
+        with pytest.raises(HTTPException) as exc:
+            await post_payroll_run_to_gl(
+                run_id=run.id, db=db, current_user=current_user
+            )
+        assert exc.value.status_code == 400

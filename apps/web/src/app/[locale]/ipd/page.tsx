@@ -19,6 +19,7 @@ import {
 import { formatDateTime, elapsedDuration } from "@/lib/utils";
 import { cn } from "@/lib/utils";
 import { WardSetup } from "@/components/ipd/WardSetup";
+import { AdmissionOrderQueue } from "@/components/ipd/AdmissionOrderQueue";
 import { StatCard } from "@/components/ui/StatCard";
 
 /** Admission status badge styling. */
@@ -157,6 +158,11 @@ export default function IPDWardBoardPage() {
           </div>
         </div>
       )}
+
+      {/* Admission queue: the requests clinicians raised in consultation. */}
+      <div className="mb-6">
+        <AdmissionOrderQueue />
+      </div>
 
       {/* Admissions list */}
       <h2 className="mb-3 font-semibold text-foreground">{t("activeAdmissions")}</h2>

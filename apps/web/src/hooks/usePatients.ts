@@ -48,12 +48,14 @@ export function useCheckDuplicates() {
  * @param query - Search string
  * @param page - Page number
  * @param pageSize - Results per page
+ * @param options - Optional query controls, e.g. run only once a term is typed
  * @returns Query result with patient list
  */
 export function usePatientSearch(
   query?: string,
   page: number = 1,
-  pageSize: number = 20
+  pageSize: number = 20,
+  options?: { enabled?: boolean }
 ) {
   const params: Record<string, string> = {
     page: String(page),
@@ -66,6 +68,7 @@ export function usePatientSearch(
   return useOfflineQuery<PatientListResponse>({
     queryKey: ["patients", "search", query ?? "", page, pageSize],
     queryFn: () => apiClient.get<PatientListResponse>("/patients", params),
+    enabled: options?.enabled ?? true,
   });
 }
 
@@ -79,6 +82,78 @@ export function usePatient(patientId: string) {
   return useOfflineQuery<Patient>({
     queryKey: ["patients", patientId],
     queryFn: () => apiClient.get<Patient>(`/patients/${patientId}`),
+    enabled: !!patientId,
+  });
+}
+
+export interface PatientHistoryDiagnosis {
+  icd10_code: string;
+  icd10_description: string;
+  diagnosis_type: string;
+  clinical_status: string;
+  is_chronic: boolean;
+}
+
+export interface PatientHistoryPrescription {
+  drug_name: string;
+  dosage: string;
+  frequency: string;
+  status: string;
+}
+
+export interface PatientHistoryVisit {
+  encounter_id: string;
+  encounter_date: string;
+  encounter_type: string;
+  status: string;
+  department_name: string | null;
+  attending_doctor_name: string | null;
+  chief_complaint: string | null;
+  disposition: string | null;
+  diagnoses: PatientHistoryDiagnosis[];
+  prescriptions: PatientHistoryPrescription[];
+}
+
+export interface PatientHistory {
+  patient_id: string;
+  mrn: string;
+  full_name: string;
+  date_of_birth: string;
+  gender: string;
+  age_years: number | null;
+  blood_group: string | null;
+  allergies: string[];
+  chronic_conditions: string[];
+  visit_count: number;
+  last_visit_date: string | null;
+  visits: PatientHistoryVisit[];
+}
+
+/**
+ * Hook for a patient's clinical history at the point of care.
+ *
+ * Returns the safety-critical patient-level fields (allergies, chronic
+ * conditions, blood group) plus previous visits with their diagnoses and
+ * prescriptions, so a clinician who has just been handed a redirected
+ * patient can see prior care without leaving the consultation screen.
+ *
+ * @param patientId - Patient UUID
+ * @param excludeEncounterId - Encounter to omit (the visit being worked on)
+ * @returns Query result with the patient's clinical history
+ */
+export function usePatientHistory(
+  patientId: string,
+  excludeEncounterId?: string
+) {
+  const params: Record<string, string> = { limit: "10" };
+  if (excludeEncounterId) {
+    params["exclude_encounter_id"] = excludeEncounterId;
+  }
+
+  return useOfflineQuery<PatientHistory>({
+    queryKey: ["patients", patientId, "history", excludeEncounterId ?? ""],
+    queryFn: () =>
+      apiClient.get<PatientHistory>(`/patients/${patientId}/history`, params),
     enabled: !!patientId,
   });
 }

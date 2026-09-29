@@ -4,6 +4,7 @@ from datetime import UTC, datetime
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.services.numbering import highest_sequence
 from app.models.facility import Facility
 from app.models.insurance import (
     InsuranceClaim,
@@ -39,13 +40,17 @@ class InsuranceService:
         @param created_by: Staff UUID
         @returns Created scheme
         """
-        count = await self.db.execute(
-            select(func.count(InsuranceScheme.id)).where(
-                InsuranceScheme.facility_id == facility_id,
-                InsuranceScheme.is_deleted == False,  # noqa: E712
+        # Retired rows still hold their number, so counting only the live ones
+        # hands back a number already in use. Start from the highest number
+        # issued, deleted or not.
+        highest = (
+            await self.db.execute(
+                select(highest_sequence(InsuranceScheme.scheme_code)).where(
+                    InsuranceScheme.facility_id == facility_id,
+                )
             )
-        )
-        seq = (count.scalar() or 0) + 1
+        ).scalar_one_or_none()
+        seq = (highest or 0) + 1
         code = f"SCH-{seq:04d}"
 
         scheme = InsuranceScheme(

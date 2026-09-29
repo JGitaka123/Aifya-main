@@ -30,6 +30,7 @@ from app.bootstrap_internal import (
 )
 from app.routers import (
     agents,
+    aifya_usage,
     analytics,
     appointments,
     auth_session,
@@ -41,6 +42,7 @@ from app.routers import (
     dhis2,
     emergency,
     encounters,
+    facility,
     federated,
     fhir,
     finance,
@@ -65,6 +67,9 @@ from app.routers import (
     reports,
     theatre,
 )
+from app.knowledge.main import app as knowledge_app
+from app.knowledge.main import shutdown as knowledge_shutdown
+from app.knowledge.main import startup as knowledge_startup
 
 # Disable OpenAPI/Swagger docs in production to avoid exposing API surface
 _is_dev: bool = settings.debug
@@ -108,7 +113,13 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             await session.commit()
     except Exception:
         _logger.exception("payroll_statutory_seed_failed")
+    # The Knowledge RAG routes are mounted in this process, and Starlette does
+    # not run a mounted app's lifespan, so start it from here.
+    with suppress(Exception):
+        await knowledge_startup()
     yield
+    with suppress(Exception):
+        await knowledge_shutdown()
 
 
 _logger = logging.getLogger(__name__)
@@ -176,6 +187,7 @@ app.include_router(
 )
 app.include_router(cds.router, prefix="/api/v1/cds", tags=["cds"])
 app.include_router(encounters.router, prefix="/api/v1/encounters", tags=["encounters"])
+app.include_router(facility.router, prefix="/api/v1/facility", tags=["facility"])
 app.include_router(icd10.router, prefix="/api/v1/icd10", tags=["icd10"])
 app.include_router(pharmacy.router, prefix="/api/v1/pharmacy", tags=["pharmacy"])
 app.include_router(laboratory.router, prefix="/api/v1/laboratory", tags=["laboratory"])
@@ -188,6 +200,9 @@ app.include_router(appointments.router, tags=["appointments"])
 app.include_router(reports.router, prefix="/api/v1/reports", tags=["reports"])
 app.include_router(hr.router, prefix="/api/v1/hr", tags=["hr"])
 app.include_router(payroll.router, prefix="/api/v1/payroll", tags=["payroll"])
+app.include_router(
+    aifya_usage.router, prefix="/api/v1/aifya-usage", tags=["aifya-usage"]
+)
 app.include_router(emergency.router, prefix="/api/v1/emergency", tags=["emergency"])
 app.include_router(inventory.router, prefix="/api/v1/inventory", tags=["inventory"])
 app.include_router(theatre.router, prefix="/api/v1/theatre", tags=["theatre"])
@@ -218,6 +233,11 @@ app.include_router(
     tags=["performance"],
 )
 app.include_router(help_bot.router, prefix="/api/v1/help", tags=["help-bot"])
+
+# Institutional Knowledge (RAG). This used to be a separate service on :8025;
+# it now runs inside this process so there is one backend, one port and one
+# entry point (see app/knowledge/main.py).
+app.mount("/api/v1/knowledge", knowledge_app)
 
 
 @app.get("/api/health")

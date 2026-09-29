@@ -9,6 +9,7 @@ import {
   XCircle,
   UserCheck,
   AlertTriangle,
+  Info,
   Users,
   Plus,
 } from "lucide-react";
@@ -17,9 +18,11 @@ import {
   useAppointmentSummary,
   useAppointmentList,
 } from "@/hooks/useAppointments";
-import { cn } from "@/lib/utils";
+import { cn, formatDate, todayISO } from "@/lib/utils";
 import { PageHeader } from "@/components/ui/PageHeader";
 import { StatCard } from "@/components/ui/StatCard";
+import { DoctorAvailabilityPanel } from "@/components/appointments/DoctorAvailabilityPanel";
+import { useAuth } from "@/components/providers/AuthProvider";
 
 /** Status badge styling. */
 const STATUS_STYLES: Record<string, string> = {
@@ -73,9 +76,21 @@ const TYPE_STYLES: Record<string, string> = {
 export default function AppointmentsPage() {
   const t = useTranslations("appointments");
   const tc = useTranslations("common");
-  const today = new Date().toISOString().slice(0, 10);
-  const [dateFilter, setDateFilter] = useState<string>(today);
+  const today = todayISO();
+  const [dateFilter, setDateFilter] = useState<string>("");
   const [statusFilter, setStatusFilter] = useState<string>("");
+
+  const { user } = useAuth();
+  // Creating a session is an administrative act on the API, so only the roles
+  // that can perform it are shown the form.
+  const canManageSchedules = (user?.roles ?? []).some(
+    (role) =>
+      role === "admin" ||
+      role === "facility_admin" ||
+      role === "hr" ||
+      role === "hr_admin" ||
+      role === "hr_officer",
+  );
 
   const { data: summary } = useAppointmentSummary();
   const { data: list, isLoading } = useAppointmentList(
@@ -84,6 +99,17 @@ export default function AppointmentsPage() {
     undefined,
     statusFilter || undefined
   );
+
+  // The summary cards above count today only, so a booking made for a later
+  // date would otherwise look like it never saved. Point at the next one.
+  const nextBooking = (list?.items ?? [])
+    .filter(
+      (appointment) =>
+        appointment.appointment_date > today &&
+        (appointment.status === "scheduled" ||
+          appointment.status === "confirmed")
+    )
+    .sort((a, b) => a.appointment_date.localeCompare(b.appointment_date))[0];
 
   const summaryCards = [
     {
@@ -149,6 +175,7 @@ export default function AppointmentsPage() {
       />
 
       {/* Summary Cards */}
+      <h2 className="text-sm font-semibold text-muted-foreground">{t("todaySummary")}</h2>
       <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-7">
         {summaryCards.map((card) => (
           <StatCard
@@ -161,8 +188,44 @@ export default function AppointmentsPage() {
         ))}
       </div>
 
+      {summary?.total_today === 0 && nextBooking && (
+        <div className="flex flex-wrap items-center gap-2 rounded-lg border border-blue-200 bg-blue-50 px-3 py-2 text-sm text-blue-800 dark:border-blue-800 dark:bg-blue-950 dark:text-blue-200">
+          <Info className="h-4 w-4 shrink-0" />
+          <span>
+            {t("nextBooking", {
+              number: nextBooking.appointment_number,
+              date: formatDate(nextBooking.appointment_date),
+            })}
+          </span>
+        </div>
+      )}
+
       {/* Filters */}
-      <div className="flex flex-wrap gap-3">
+      <div className="flex flex-wrap items-center gap-3">
+        <button
+          type="button"
+          onClick={() => setDateFilter(today)}
+          className={cn(
+            "rounded-lg border px-3 py-2 text-sm transition-colors",
+            dateFilter === today
+              ? "border-primary bg-primary/10 font-medium text-primary"
+              : "border-border bg-card text-foreground hover:bg-muted"
+          )}
+        >
+          {t("today")}
+        </button>
+        <button
+          type="button"
+          onClick={() => setDateFilter("")}
+          className={cn(
+            "rounded-lg border px-3 py-2 text-sm transition-colors",
+            dateFilter === ""
+              ? "border-primary bg-primary/10 font-medium text-primary"
+              : "border-border bg-card text-foreground hover:bg-muted"
+          )}
+        >
+          {t("allDates")}
+        </button>
         <input
           type="date"
           value={dateFilter}
@@ -201,6 +264,7 @@ export default function AppointmentsPage() {
               <thead className="border-b border-border bg-muted/30 text-xs uppercase text-muted-foreground">
                 <tr>
                   <th className="px-4 py-3">{t("appointmentNumber")}</th>
+                  <th className="px-4 py-3">{t("date")}</th>
                   <th className="px-4 py-3">{t("patient")}</th>
                   <th className="px-4 py-3">{t("doctor")}</th>
                   <th className="px-4 py-3">{t("time")}</th>
@@ -223,6 +287,9 @@ export default function AppointmentsPage() {
                       >
                         {appt.appointment_number}
                       </Link>
+                    </td>
+                    <td className="px-4 py-3 text-foreground">
+                      {formatDate(appt.appointment_date)}
                     </td>
                     <td className="px-4 py-3">
                       <div className="font-medium text-foreground">
@@ -285,6 +352,8 @@ export default function AppointmentsPage() {
           </div>
         )}
       </div>
+
+      {canManageSchedules && <DoctorAvailabilityPanel />}
     </div>
   );
 }

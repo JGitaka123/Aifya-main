@@ -1,8 +1,17 @@
 # Authentication & Onboarding — setup and go-live runbook
 
-Aifya authenticates staff with an **email and password held in its own
-database**: the Next.js **BFF** proxies the credentials to the FastAPI API,
-which issues Aifya's own tokens, and the BFF keeps them in httpOnly cookies.
+Aifya has two ways to authenticate staff, selected by `AUTH_PROVIDER`, and the
+Next.js **BFF** drives both so the browser never holds a token:
+
+- `internal` - an **email and password held in Aifya's own database**. The BFF
+  proxies the credentials to the FastAPI API, which issues Aifya's own tokens,
+  and the BFF keeps them in httpOnly cookies.
+- `keycloak` - the browser is redirected to **Keycloak** (OpenID Connect
+  authorization code flow with PKCE), and the tokens Keycloak issues are stored
+  in those same cookies. The FastAPI API validates them against Keycloak's
+  published JWKS, so Keycloak decides *who* the user is while
+  `role_permissions` still decides *what* they may do.
+
 Today the public beta **bypasses** all of this via `BETA_PUBLIC_ACCESS=true`.
 
 This document explains the sign-in / sign-up / invite flows that ship in the
@@ -48,6 +57,7 @@ created but no email is sent — you'd share a temporary password out-of-band.
 ### 3. Backend env (`server.env` on Contabo)
 ```
 BETA_PUBLIC_ACCESS=false                      # turn OFF the bypass to enforce auth
+AUTH_PROVIDER=keycloak                        # browser redirect + JWKS validation
 KEYCLOAK_URL=https://auth.aifyamed.com
 KEYCLOAK_REALM=aifya
 KEYCLOAK_CLIENT_ID=aifya-api                  # audience the API validates
@@ -61,6 +71,7 @@ CORS_ORIGINS=https://www.aifyamed.com,https://aifyamed.com
 ### 4. Frontend env (Vercel)
 ```
 NEXT_PUBLIC_BETA_PUBLIC_ACCESS=false
+AUTH_PROVIDER=keycloak                        # must match the API
 NEXT_PUBLIC_KEYCLOAK_URL=https://auth.aifyamed.com
 KEYCLOAK_URL=https://auth.aifyamed.com
 KEYCLOAK_REALM=aifya
@@ -69,7 +80,12 @@ KEYCLOAK_CLIENT_SECRET=                        # empty (public client)
 COOKIE_DOMAIN=.aifyamed.com                    # so cookies reach api.aifyamed.com
 NEXTAUTH_URL=https://www.aifyamed.com
 ```
-The built-in sign-in posts to `/api/auth/login` on the same origin, so no Keycloak redirect URI is needed for it.
+With `AUTH_PROVIDER=keycloak` the sign-in button sends the browser through
+`/api/auth/login` -> `/api/auth/keycloak/start` -> Keycloak. The `aifya-web`
+client must list the callback as a valid redirect URI:
+`https://www.aifyamed.com/api/auth/keycloak/callback` (this repo's realm import
+already covers it with `https://www.aifyamed.com/*`), and it must accept the
+same origin as a web origin.
 
 ### 5. Seed the first super-admin
 Approvals require a user holding a `SUPER_ADMIN_ROLES` role (`admin`). Create the
@@ -86,49 +102,61 @@ console), giving them the `admin` realm role and a `facility_id` attribute.
 
 ## Sign-in modes
 
-There is one sign-in mode in the web app: **Aifya's own email and password form**.
+`AUTH_PROVIDER` selects how a token is produced. The web app reads the **same
+variable** as the API, so the two can never disagree about which flow is in
+force.
 
-- `/en/login` posts the credentials to the BFF (`POST /api/auth/login`), which
-  calls `POST /api/v1/auth/login` on the API and stores the returned tokens in
+### `internal` (the default)
+
+- `/en/login` renders the branded email + password form and posts the
+  credentials to the BFF (`POST /api/auth/login`), which calls
+  `POST /api/v1/auth/login` on the API and stores the returned HS256 tokens in
   httpOnly cookies.
-- `/en/signup` collects the facility request and posts it to
-  `POST /api/v1/onboarding/facility-signup`. Registering a facility is a request,
-  not a login, so it never needs an identity provider.
-- `GET /api/auth/login?returnTo=...` is the redirect used by `middleware.ts` for
-  an unauthenticated page hit. It sends the browser to `/en/login`, so there is
-  no external hop.
+- `POST /api/auth/refresh` renews them against `POST /api/v1/auth/refresh`.
 
-The API selects its token strategy with `AUTH_PROVIDER` in
-`services/api-gateway/.env`:
+### `keycloak`
 
-- `internal` (the default) - `POST /auth/login` verifies the password against
-  `auth_accounts` and issues Aifya's own HS256 tokens.
-- `keycloak` - `POST /auth/login` returns `405` and the API expects realm RS256
-  tokens instead. Nothing in the web app can authenticate in this mode, so leave
-  it unset unless you are deliberately running Keycloak as the token issuer.
+- `/en/login` renders a single **Continue with your hospital account** button
+  instead of the password form. `/en/signup` is unchanged: registering a facility
+  is a request, not a login, so it never needs an identity provider.
+- That button goes to `GET /api/auth/login`, which redirects to
+  `GET /api/auth/keycloak/start`. The route mints an anti-CSRF `state` and a PKCE
+  verifier, parks them in short-lived httpOnly cookies (`lib/auth/oidc.ts`), and
+  sends the browser to
+  `{KEYCLOAK_URL}/realms/{KEYCLOAK_REALM}/protocol/openid-connect/auth`.
+- Keycloak returns the browser to `GET /api/auth/keycloak/callback`. That route
+  checks the `state` it set, exchanges the one-time code for tokens over a back
+  channel (PKCE `code_verifier`, plus a client secret if the client is
+  confidential), and stores them in the same `access_token` / `refresh_token`
+  cookies the internal flow uses. Every failure path lands back on `/en/login`
+  with an `?error=` code and no partial session.
+- `POST /api/auth/refresh` renews against Keycloak's token endpoint, storing the
+  rotated refresh token. `GET /api/auth/logout` redirects to Keycloak's
+  end-session endpoint so the SSO session is cleared too, not just our cookies.
+- The API validates the RS256 access token - signature against the realm JWKS,
+  plus `issuer` and `audience=aifya-api` - so Keycloak authenticates and
+  `role_permissions` still authorizes.
 
-If the API is left on `keycloak` while the web app runs the branded form, every
-sign-in fails with *Password login is disabled. Use the OIDC redirect flow.* Set
-`AUTH_PROVIDER=internal` in `services/api-gateway/.env` and restart the API.
+`middleware.ts` is identical in both modes: an unauthenticated page hit is sent
+to `GET /api/auth/login?returnTo=...`.
 
-### What was removed
+Do not set `AUTH_PROVIDER=keycloak` until a realm is actually reachable. With no
+Keycloak running, `POST /auth/login` returns `405` and the redirect has nowhere
+to land, so nobody can sign in. `AUTH_PROVIDER` must be set on **both** tiers.
 
-The browser never talks to Keycloak any more. These were deleted from the web app
-so that no request can be bounced to port 8080:
+### History
 
-- `GET /api/auth/login` no longer builds an authorization-code + PKCE redirect.
-- `/api/auth/callback` (the OIDC token exchange) is gone, along with the legacy
-  `/{locale}/auth/callback` shim.
-- `lib/auth/oidc.ts` and `lib/auth/sso.ts` are gone. The cookie helpers they also
-  held now live in `lib/auth/session.ts`.
-- `docker-compose.keycloak.yml` (the standalone Keycloak service) is gone.
+An earlier revision deliberately removed the browser-side Keycloak flow: the OIDC
+redirect, `/api/auth/callback`, `lib/auth/oidc.ts` and `docker-compose.keycloak.yml`
+were all deleted, which is why the header comment in `lib/auth/session.ts` still
+said there was no third-party identity provider. The `keycloak` mode above
+restores the redirect through **new** BFF routes under `/api/auth/keycloak/`;
+the old `/api/auth/callback` path was not brought back.
 
-The Keycloak **service definitions** in `docker-compose.yml` and
-`docker-compose.prod.yml` are still present, and `infrastructure/keycloak/` still
-holds the realm import. The documented dev commands never start them, and other
-compose services list `keycloak` in `depends_on`, so deleting the entries would
-break `docker compose up`. The API also still ships `app/utils/keycloak_admin.py`
-for the `keycloak` provider mode.
+The Keycloak **service definition** in `docker-compose.yml` and the realm import
+in `infrastructure/keycloak/` were kept, so `docker compose up` can bring a realm
+up alongside the API and the web app. The API also still ships
+`app/utils/keycloak_admin.py` for the `keycloak` provider mode.
 
 ### Google sign-in
 

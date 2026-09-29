@@ -1,10 +1,11 @@
 /**
  * Session cookie helpers shared by the auth route handlers.
  *
- * Aifya signs users in with its own credentials: the BFF posts the email and
- * password to the Aifya API and stores the tokens the API returns in httpOnly
- * cookies. The browser never sees a token, and there is no third-party
- * identity provider anywhere in the flow.
+ * Whoever mints the token - Aifya's own API (AUTH_PROVIDER=internal) or
+ * Keycloak (AUTH_PROVIDER=keycloak) - the BFF stores it in the same httpOnly
+ * cookies, so the browser never holds one either way. Keeping the cookie policy
+ * here means both flows get identical Secure / SameSite / COOKIE_DOMAIN
+ * handling, and one place decides what counts as a safe returnTo target.
  */
 
 /**

@@ -18,9 +18,38 @@ import type {
   DocumentStatus,
 } from "@aifya/shared";
 
-// Same-origin proxy that swaps the httpOnly session cookie for the
-// Bearer header the knowledge service expects (see app/api/knowledge).
-const KNOWLEDGE_API = "/api/knowledge";
+// Same-origin API path. Knowledge lives inside the api-gateway now, so the
+// session cookie authenticates it exactly like every other module - there is
+// no separate service or /api/knowledge proxy any more.
+const KNOWLEDGE_API = "/api/v1/knowledge";
+
+/**
+ * Turn a failed knowledge request into an Error carrying the server's own
+ * explanation.
+ *
+ * Knowledge is served by the api-gateway, which answers with a plain `detail`
+ * string for both backend failures and validation problems. Surfacing that
+ * instead of a generic message is what lets the Knowledge tab say why it is
+ * empty rather than implying the facility has uploaded nothing.
+ *
+ * @param resp - Failed fetch Response
+ * @param fallback - Message to use when the body carries no usable detail
+ * @returns Error ready to be thrown by a query or mutation
+ */
+async function knowledgeApiError(
+  resp: Response,
+  fallback: string
+): Promise<Error> {
+  try {
+    const body = (await resp.json()) as { detail?: unknown };
+    if (typeof body.detail === "string" && body.detail.trim().length > 0) {
+      return new Error(body.detail);
+    }
+  } catch {
+    // Not JSON (an upstream gateway error, for example) - fall back below.
+  }
+  return new Error(fallback);
+}
 
 /**
  * Hook for listing knowledge documents with pagination and filters.
@@ -57,7 +86,9 @@ export function useKnowledgeDocuments(
       const resp = await fetch(`${KNOWLEDGE_API}/documents?${search}`, {
         credentials: "include",
       });
-      if (!resp.ok) throw new Error("Failed to fetch documents");
+      if (!resp.ok) {
+        throw await knowledgeApiError(resp, "Failed to fetch documents");
+      }
       return resp.json();
     },
   });
@@ -76,7 +107,9 @@ export function useKnowledgeDocument(documentId: string) {
       const resp = await fetch(`${KNOWLEDGE_API}/documents/${documentId}`, {
         credentials: "include",
       });
-      if (!resp.ok) throw new Error("Failed to fetch document");
+      if (!resp.ok) {
+        throw await knowledgeApiError(resp, "Failed to fetch document");
+      }
       return resp.json();
     },
     enabled: !!documentId,
@@ -97,7 +130,9 @@ export function useDocumentChunks(documentId: string) {
         `${KNOWLEDGE_API}/documents/${documentId}/chunks`,
         { credentials: "include" }
       );
-      if (!resp.ok) throw new Error("Failed to fetch chunks");
+      if (!resp.ok) {
+        throw await knowledgeApiError(resp, "Failed to fetch chunks");
+      }
       return resp.json();
     },
     enabled: !!documentId,
@@ -119,7 +154,9 @@ export function useIngestStatus(documentId: string, enabled: boolean = true) {
         `${KNOWLEDGE_API}/documents/${documentId}/ingest-status`,
         { credentials: "include" }
       );
-      if (!resp.ok) throw new Error("Failed to fetch ingest status");
+      if (!resp.ok) {
+        throw await knowledgeApiError(resp, "Failed to fetch ingest status");
+      }
       return resp.json();
     },
     enabled: enabled && !!documentId,
@@ -250,7 +287,9 @@ export function useKnowledgeQuery() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(request),
       });
-      if (!resp.ok) throw new Error("Failed to query knowledge base");
+      if (!resp.ok) {
+        throw await knowledgeApiError(resp, "Failed to query knowledge base");
+      }
       return resp.json();
     },
   });
@@ -274,7 +313,9 @@ export function useKnowledgeContext(query: string, enabled: boolean = false) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ query, top_k: 3, include_chunks: true }),
       });
-      if (!resp.ok) throw new Error("Failed to fetch context");
+      if (!resp.ok) {
+        throw await knowledgeApiError(resp, "Failed to fetch context");
+      }
       return resp.json();
     },
     enabled: enabled && query.length >= 3,

@@ -54,6 +54,12 @@ services:
       # Secure by default; add extra source IPs/CIDRs if your edge rewrites them.
       MPESA_CALLBACK_IP_ENFORCE: ${MPESA_CALLBACK_IP_ENFORCE:-true}
       MPESA_CALLBACK_IP_ALLOWLIST: ${MPESA_CALLBACK_IP_ALLOWLIST:-}
+      # Institutional Knowledge (RAG) is served by this container now. This
+      # deployment has MinIO but no Qdrant, so keep document files in MinIO and
+      # the vectors in Postgres (knowledge_chunk_embeddings, migration 024).
+      # Set VECTOR_BACKEND=qdrant plus QDRANT_ENDPOINT if you add a cluster.
+      STORAGE_BACKEND: ${STORAGE_BACKEND:-minio}
+      VECTOR_BACKEND: ${VECTOR_BACKEND:-postgres}
     restart: unless-stopped
     healthcheck:
       test:

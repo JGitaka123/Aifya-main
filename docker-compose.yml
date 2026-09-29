@@ -38,7 +38,7 @@ services:
     restart: unless-stopped
 
   kafka:
-    image: bitnami/kafka:3.7
+    image: bitnamilegacy/kafka:3.7
     container_name: aifya-kafka
     environment:
       KAFKA_CFG_NODE_ID: 0
@@ -53,7 +53,7 @@ services:
     restart: unless-stopped
 
   minio:
-    image: minio/minio:latest
+    image: quay.io/minio/minio:latest
     container_name: aifya-minio
     command: server /data --console-address ":9001"
     environment:
@@ -142,6 +142,23 @@ services:
       MPESA_CALLBACK_IP_ENFORCE: "false"
       # ClaimFlow SHA claim validator.
       CLAIMFLOW_VALIDATOR_URL: http://claimflow-validator:8030
+      # Institutional Knowledge (RAG) runs inside this process (app/knowledge),
+      # so it shares this container's port, database and auth. The backends are
+      # pinned to the compose services; otherwise APP_ENV=development would
+      # resolve them to the Docker-free local defaults.
+      STORAGE_BACKEND: minio
+      VECTOR_BACKEND: qdrant
+      EMBEDDING_BACKEND: ${EMBEDDING_BACKEND:-sentence-transformers}
+      INGEST_MODE: inline
+      QDRANT_ENDPOINT: http://qdrant:6333
+      MINIO_ENDPOINT: minio:9000
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:-minioadmin}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:-aifya_minio_dev_secret}
+      MINIO_KNOWLEDGE_BUCKET: aifya-knowledge
+      MINIO_SECURE: "false"
+      VLLM_BASE_URL: ${VLLM_BASE_URL:-http://litellm:4000/v1}
+      GENERATION_MODEL: ${GENERATION_MODEL:-claude-sonnet}
+      GENERATION_API_KEY: ${GENERATION_API_KEY:-aifya-dev-key}
     ports:
       - "8000:8000"
     depends_on:
@@ -149,6 +166,10 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      qdrant:
+        condition: service_started
+      minio:
+        condition: service_started
       db-migrate:
         condition: service_completed_successfully
     restart: unless-stopped
@@ -216,9 +237,8 @@ services:
       NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-/api/v1}
       API_REWRITE_URL: ${API_REWRITE_URL:-http://api-gateway:8000/api/v1}
       NEXT_PUBLIC_BETA_PUBLIC_ACCESS: ${NEXT_PUBLIC_BETA_PUBLIC_ACCESS:-false}
-      # Server-side URLs for the /api/knowledge and /api/scribe
-      # cookie-auth proxy routes.
-      KNOWLEDGE_SERVICE_URL: http://knowledge-service:8025
+      # Server-side URL for the /api/scribe cookie-auth proxy route.
+      # (Knowledge runs inside the api-gateway now, so it has no proxy.)
       SCRIBE_SERVICE_URL: http://scribe-service:8000
       NEXT_PUBLIC_KEYCLOAK_URL: http://localhost:8080
       NEXT_PUBLIC_KEYCLOAK_REALM: aifya
@@ -229,6 +249,12 @@ services:
       KEYCLOAK_CLIENT_ID: aifya-web
       KEYCLOAK_CLIENT_SECRET: ${KEYCLOAK_CLIENT_SECRET:-}
       NEXTAUTH_URL: http://localhost:3000
+      # Which sign-in flow the BFF drives. Must match the api-gateway's
+      # AUTH_PROVIDER: internal = Aifya passwords, keycloak = OIDC redirect.
+      AUTH_PROVIDER: ${AUTH_PROVIDER:-internal}
+      # Parent domain for the httpOnly session cookies. Set when the web app
+      # and the API sit on different hosts under one registrable domain.
+      COOKIE_DOMAIN: ${COOKIE_DOMAIN:-}
     ports:
       - "3000:3000"
     depends_on:
@@ -309,113 +335,6 @@ services:
       retries: 3
       start_period: 20s
 
-  knowledge-service:
-    build:
-      context: ./services/ai-service/knowledge
-      dockerfile: Dockerfile
-    container_name: aifya-knowledge
-    environment:
-      APP_ENV: development
-      DEBUG: "true"
-      # Must match services/api-gateway/.env. The web app's /api/knowledge
-      # proxy forwards the api-gateway's HS256 access token, so the knowledge
-      # service verifies it with the same secret instead of Keycloak JWKS.
-      AUTH_PROVIDER: ${AUTH_PROVIDER:-internal}
-      SECRET_KEY: ${SECRET_KEY:?SECRET_KEY must be set in the root .env and match services/api-gateway/.env}
-      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-aifya_user}:${POSTGRES_PASSWORD:-aifya_dev_password}@postgres:5432/${POSTGRES_DB:-aifya}
-      KEYCLOAK_URL: http://keycloak:8080
-      KEYCLOAK_REALM: aifya
-      QDRANT_ENDPOINT: http://qdrant:6333
-      MINIO_ENDPOINT: minio:9000
-      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:-minioadmin}
-      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:-aifya_minio_dev_secret}
-      MINIO_KNOWLEDGE_BUCKET: aifya-knowledge
-      MINIO_SECURE: "false"
-      # The backends are pinned explicitly here. APP_ENV=development would
-      # otherwise resolve them to the Docker-free local defaults (plain files,
-      # embedded Qdrant, inline ingestion) and the containers would ignore the
-      # MinIO / Qdrant / Redis services started below.
-      STORAGE_BACKEND: minio
-      VECTOR_BACKEND: qdrant
-      EMBEDDING_BACKEND: sentence-transformers
-      INGEST_MODE: celery
-      # LiteLLM's virtual key, when the proxy is configured to require one.
-      GENERATION_API_KEY: ${GENERATION_API_KEY:-aifya-dev-key}
-      # Managed AI: generation goes through the LiteLLM proxy. Override
-      # VLLM_BASE_URL to point at a self-hosted vLLM; GENERATION_MODEL must
-      # match a model_name in infrastructure/litellm/config.yaml.
-      VLLM_BASE_URL: ${VLLM_BASE_URL:-http://litellm:4000/v1}
-      GENERATION_MODEL: ${GENERATION_MODEL:-claude-sonnet}
-      CELERY_BROKER_URL: redis://redis:6379/3
-      CELERY_RESULT_BACKEND: redis://redis:6379/4
-      CORS_ORIGINS: http://localhost:3000
-    ports:
-      - "8025:8025"
-    depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-      qdrant:
-        condition: service_started
-      minio:
-        condition: service_started
-      litellm:
-        condition: service_started
-      db-migrate:
-        condition: service_completed_successfully
-    restart: unless-stopped
-    healthcheck:
-      test:
-        [
-          "CMD-SHELL",
-          "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8025/health', timeout=5).read()\"",
-        ]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 30s
-
-  knowledge-worker:
-    build:
-      context: ./services/ai-service/knowledge
-      dockerfile: Dockerfile
-    container_name: aifya-knowledge-worker
-    command: celery -A app.tasks.celery_app worker -l info -Q knowledge -c 2
-    environment:
-      APP_ENV: development
-      # Must match services/api-gateway/.env. The web app's /api/knowledge
-      # proxy forwards the api-gateway's HS256 access token, so the knowledge
-      # service verifies it with the same secret instead of Keycloak JWKS.
-      AUTH_PROVIDER: ${AUTH_PROVIDER:-internal}
-      SECRET_KEY: ${SECRET_KEY:?SECRET_KEY must be set in the root .env and match services/api-gateway/.env}
-      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-aifya_user}:${POSTGRES_PASSWORD:-aifya_dev_password}@postgres:5432/${POSTGRES_DB:-aifya}
-      QDRANT_ENDPOINT: http://qdrant:6333
-      MINIO_ENDPOINT: minio:9000
-      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:-minioadmin}
-      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:-aifya_minio_dev_secret}
-      MINIO_KNOWLEDGE_BUCKET: aifya-knowledge
-      MINIO_SECURE: "false"
-      # The backends are pinned explicitly here. APP_ENV=development would
-      # otherwise resolve them to the Docker-free local defaults (plain files,
-      # embedded Qdrant, inline ingestion) and the containers would ignore the
-      # MinIO / Qdrant / Redis services started below.
-      STORAGE_BACKEND: minio
-      VECTOR_BACKEND: qdrant
-      EMBEDDING_BACKEND: sentence-transformers
-      CELERY_BROKER_URL: redis://redis:6379/3
-      CELERY_RESULT_BACKEND: redis://redis:6379/4
-    depends_on:
-      redis:
-        condition: service_healthy
-      qdrant:
-        condition: service_started
-      minio:
-        condition: service_started
-      db-migrate:
-        condition: service_completed_successfully
-    restart: unless-stopped
-
   # =============================================================================
   # ScribeAI — Ambient Clinical Documentation
   # =============================================================================
@@ -475,7 +394,7 @@ services:
   # =============================================================================
 
   litellm:
-    image: ghcr.io/berriai/litellm:main-stable
+    image: ghcr.io/berriai/litellm:latest
     container_name: aifya-litellm
     command: ["--config", "/app/config.yaml", "--port", "4000", "--num_workers", "2"]
     environment:

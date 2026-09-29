@@ -1,5 +1,5 @@
 import { describe, expect, it, vi, beforeEach } from "vitest";
-import { apiClient, ApiError } from "../api-client";
+import { apiClient, ApiError, isServerUnavailable } from "../api-client";
 
 const mockFetch = vi.fn();
 
@@ -185,5 +185,28 @@ describe("ApiClient", () => {
       const [, opts] = mockFetch.mock.calls[0] as [string, RequestInit];
       expect(opts.credentials).toBe("include");
     });
+  });
+});
+
+describe("isServerUnavailable", () => {
+  it("treats a 5xx from the proxy as the server being down", () => {
+    expect(isServerUnavailable(new ApiError(500, "Internal Server Error"))).toBe(
+      true
+    );
+    expect(isServerUnavailable(new ApiError(502, "Bad Gateway"))).toBe(true);
+  });
+
+  it("leaves an ordinary refusal to the caller's own message", () => {
+    expect(isServerUnavailable(new ApiError(403, "Forbidden"))).toBe(false);
+    expect(isServerUnavailable(new ApiError(422, "Invalid body"))).toBe(false);
+  });
+
+  it("treats a failed fetch as the server being down", () => {
+    expect(isServerUnavailable(new TypeError("Failed to fetch"))).toBe(true);
+  });
+
+  it("does not blame the server for an unrelated error", () => {
+    expect(isServerUnavailable(new Error("boom"))).toBe(false);
+    expect(isServerUnavailable(undefined)).toBe(false);
   });
 });

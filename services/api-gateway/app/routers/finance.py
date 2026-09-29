@@ -488,7 +488,9 @@ async def get_transaction(
 )
 async def reverse_a_transaction(
     transaction_id: uuid.UUID,
-    posting_date: date_type = Query(..., description="Reversal posting date"),
+    posting_date: date_type | None = Query(
+        None, description="Reversal posting date; defaults to today"
+    ),
     db: AsyncSession = Depends(get_db),
     current_user: CurrentUser = Depends(require_roles(*_FINANCE_ROLES)),
 ) -> TransactionResponse:
@@ -498,7 +500,7 @@ async def reverse_a_transaction(
             db=db,
             facility_id=current_user.facility_id,
             transaction_id=transaction_id,
-            posting_date=posting_date,
+            posting_date=posting_date or date_type.today(),
             user_id=current_user.user_id,
         )
     except (PeriodLockedError, UnbalancedTransactionError) as e:
@@ -696,6 +698,21 @@ async def create_opening_balance(
     current_user: CurrentUser = Depends(require_roles(*_FINANCE_ROLES)),
 ) -> OpeningBalanceResponse:
     """Record an opening balance for an account in a period."""
+    already = (
+        await db.execute(
+            select(OpeningBalance.id).where(
+                OpeningBalance.facility_id == current_user.facility_id,
+                OpeningBalance.account_id == data.account_id,
+                OpeningBalance.period_id == data.period_id,
+                OpeningBalance.is_deleted == False,  # noqa: E712
+            )
+        )
+    ).scalar_one_or_none()
+    if already is not None:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            "An opening balance already exists for this account and period",
+        )
     if data.debit_balance > 0 and data.credit_balance > 0:
         raise HTTPException(
             status.HTTP_400_BAD_REQUEST,

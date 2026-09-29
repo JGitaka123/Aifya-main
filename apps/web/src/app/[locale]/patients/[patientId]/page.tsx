@@ -59,12 +59,12 @@ export default function PatientDetailPage() {
           </p>
         </div>
         <div className="flex items-center gap-2">
-          <a
-            href={`/en/opd/new?patient_id=${params.patientId}&patient_name=${encodeURIComponent(`${patient.first_name} ${patient.last_name}`)}`}
+          <Link
+            href={`/patients/register?patient_id=${params.patientId}`}
             className="inline-flex items-center gap-2 rounded-full bg-primary px-4 py-2 text-sm font-semibold text-primary-foreground shadow animate-pulse hover:animate-none hover:bg-primary/90 transition-all"
           >
             → Start OPD Visit
-          </a>
+          </Link>
           <a
             href={`/en/patients/${params.patientId}/edit`}
             className="inline-flex items-center gap-2 rounded-lg border border-border px-3 py-2 text-sm font-medium text-foreground hover:bg-muted"

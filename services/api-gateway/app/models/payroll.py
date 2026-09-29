@@ -101,6 +101,15 @@ class PayrollRun(AuditMixin, Base):
     approved_by: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
     approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     gl_transaction_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    # Why the last Finance general-ledger post failed, NULL when it succeeded.
+    gl_posting_error: Mapped[str | None] = mapped_column(Text)
+    gl_attempted_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True)
+    )
+    # Employees the engine left out, with the reason, captured at calculation time.
+    skipped_employees: Mapped[list] = mapped_column(
+        JSONB, default=list, nullable=False
+    )
     total_gross: Mapped[Decimal] = mapped_column(
         Numeric(14, 2), default=Decimal("0"), nullable=False
     )

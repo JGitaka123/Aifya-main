@@ -1,16 +1,46 @@
 import logging
 import uuid
-from datetime import UTC
+from datetime import UTC, datetime
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.base import EventBase
 from app.models.encounter import Encounter
-from app.schemas.encounter import EncounterCreate, EncounterUpdate
+from app.models.referral import Referral
+from app.models.staff import Department
+from app.schemas.encounter import (
+    EncounterCreate,
+    EncounterRouteRequest,
+    EncounterUpdate,
+)
+from app.schemas.referral import ReferralCreate
+from app.services.clinical_workspace import SCOPE_MINE, scope_filter
 from app.services.consultation_fee import load_consultation_fee_cents
+from app.services.referral_service import ReferralService
 
 _logger = logging.getLogger(__name__)
+
+# How urgent a hand-off is, as a queue priority. Deliberately lower than the
+# triage scale top end so routing a red-triage patient never demotes them.
+URGENCY_PRIORITY = {"emergency": 5, "urgent": 4, "routine": 2}
+
+
+def todays_encounters():
+    """
+    Restrict a live queue to encounters registered today.
+
+    A queue is a one-day thing: numbers restart at 1 each morning, so an
+    unfiltered query can match "queue #1" from weeks ago and offer the doctor a
+    patient who left the building long ago. A visit that was never finished
+    stays in the patient's record and in an explicit history view, not in the
+    working queue.
+    """
+    return func.date(Encounter.encounter_date) == func.current_date()
+
+
+class OutcomeRequiredError(Exception):
+    """A visit was completed without saying what the department did."""
 
 
 class EncounterService:
@@ -145,14 +175,32 @@ class EncounterService:
         self,
         facility_id: uuid.UUID,
         status_filter: str | None = None,
+        department_id: uuid.UUID | None = None,
+        stage: str | None = None,
+        include_past: bool = False,
     ) -> list[Encounter]:
         """
         Get the OPD queue ordered by triage priority then queue number.
 
+        The board covers two stages of one journey. "assessment" is the nurse
+        preparing the patient - registered, nothing measured yet. "consultation"
+        is the hand-off: the assessment is done and the patient is waiting for a
+        doctor. Splitting them is what stops the consultation room reading as a
+        second registration desk.
+
         @param facility_id: Facility UUID
         @param status_filter: Optional status filter
+        @param department_id: Optional department to show one unit's queue
+        @param stage: assessment, consultation, or None for both
+        @param include_past: Include earlier days instead of only today
         @returns List of encounters in queue order
         """
+        if stage == "assessment":
+            stage_filter = Encounter.triaged_at.is_(None)
+        elif stage == "consultation":
+            stage_filter = Encounter.triaged_at.is_not(None)
+        else:
+            stage_filter = None
         from sqlalchemy.orm import selectinload
         stmt = (
             select(Encounter)
@@ -167,6 +215,23 @@ class EncounterService:
                 Encounter.queue_number.asc(),
             )
         )
+
+        if stage_filter is not None:
+            stmt = stmt.where(stage_filter)
+
+        if department_id is not None:
+            # A unit's own board: the patients routed to that unit.
+            stmt = stmt.where(Encounter.department_id == department_id)
+        else:
+            # The front-door board. Once a clinician hands the patient to
+            # Dental, Laboratory or another unit the encounter carries that
+            # unit's id, so it belongs to that unit's queue - leaving it here
+            # as well would tell the OPD doctor that a patient they already
+            # referred is still waiting for them.
+            stmt = stmt.where(Encounter.department_id.is_(None))
+
+        if not include_past:
+            stmt = stmt.where(todays_encounters())
 
         if status_filter:
             stmt = stmt.where(Encounter.status == status_filter)
@@ -228,11 +293,37 @@ class EncounterService:
             return None
 
         update_data = data.model_dump(exclude_unset=True)
+        if update_data.get("outcome") is not None:
+            update_data["outcome"] = update_data["outcome"].strip()
+
+        # A completed visit has to say what was done: the receiving
+        # department's whole record of its responsibility is this one line,
+        # and "completed" on its own tells the next clinician nothing. Checked
+        # before anything is written, so a refused completion leaves the visit
+        # exactly as it was.
+        if data.status == "completed":
+            outcome = update_data.get("outcome")
+            if not outcome and not (encounter.outcome or "").strip():
+                raise OutcomeRequiredError(
+                    "An outcome note is required to complete a visit"
+                )
+            if not outcome:
+                update_data.pop("outcome", None)
+
         for field, value in update_data.items():
             setattr(encounter, field, value)
 
+        if data.status == "completed" and encounter.completed_at is None:
+            encounter.completed_at = datetime.now(UTC)
+
         if data.triage_category:
             encounter.priority = self._triage_priority(data.triage_category)
+
+        # Starting a consultation claims the patient, so the clinical worklist
+        # can show who is holding them. Reception's pre-assignment and any
+        # earlier claim are kept, so this never steals a patient from a doctor.
+        if data.status == "in_consultation" and encounter.attending_doctor_id is None:
+            encounter.attending_doctor_id = updated_by
 
         encounter.updated_by = updated_by
         await self.db.flush()
@@ -241,23 +332,43 @@ class EncounterService:
         return encounter
 
     async def call_next(
-        self, facility_id: uuid.UUID, doctor_id: uuid.UUID
+        self,
+        facility_id: uuid.UUID,
+        doctor_id: uuid.UUID,
+        *,
+        department_id: uuid.UUID | None = None,
+        facility_wide: bool = False,
     ) -> Encounter | None:
         """
-        Call the next patient in the OPD queue (highest priority waiting).
+        Call the next patient the doctor can treat (highest priority waiting).
+
+        A doctor only calls a patient they can treat: one already assigned to
+        them, one reception routed to their department, or - for a doctor with
+        no department of their own - one nobody routed anywhere. Otherwise a
+        patient waiting for Dental could be pulled into an OPD room. Only a
+        patient the nurse has assessed is called; an untriaged one raises so
+        the workspace can say why instead of silently skipping them.
 
         @param facility_id: Facility UUID
         @param doctor_id: Doctor's staff UUID
+        @param department_id: The doctor's department UUID, when they have one
+        @param facility_wide: Whether the caller may work the whole facility
         @returns Next encounter or None if queue empty
         """
+        filters = self.callable_filters(
+            facility_id,
+            doctor_id=doctor_id,
+            department_id=department_id,
+            facility_wide=facility_wide,
+        )
+
+        # OPD prepares the patient; the doctor only picks up a patient the
+        # nurse has finished with. Without this the consultation room becomes
+        # a second registration desk and the vitals are taken after the
+        # decision they were meant to inform.
         result = await self.db.execute(
             select(Encounter)
-            .where(
-                Encounter.facility_id == facility_id,
-                Encounter.encounter_type == "opd",
-                Encounter.status == "waiting",
-                Encounter.is_deleted == False,  # noqa: E712
-            )
+            .where(*filters, Encounter.triaged_at.is_not(None))
             .order_by(
                 Encounter.priority.desc(),
                 Encounter.queue_number.asc(),
@@ -266,8 +377,127 @@ class EncounterService:
         )
         encounter = result.scalar_one_or_none()
         if not encounter:
+            pending = (
+                await self.db.execute(
+                    select(func.count())
+                    .select_from(Encounter)
+                    .where(*filters, Encounter.triaged_at.is_(None))
+                )
+            ).scalar() or 0
+            if pending:
+                raise ValueError(
+                    f"{pending} patient(s) are still with OPD for assessment. "
+                    "Record their vitals, or mark the assessment complete, "
+                    "before calling them into the consultation room."
+                )
             return None
 
+        return await self._bring_into_room(encounter, doctor_id)
+
+    def callable_filters(
+        self,
+        facility_id: uuid.UUID,
+        *,
+        doctor_id: uuid.UUID,
+        department_id: uuid.UUID | None,
+        facility_wide: bool,
+    ) -> list:
+        """
+        The patients a doctor may bring into the room at all.
+
+        Deliberately the same reach the worklist uses - the doctor's own
+        assignments plus the unclaimed patients routed to their unit - so a
+        patient the workspace shows is a patient the room can take. It is
+        shared by :meth:`call_next` and :meth:`call_in` so "the next patient"
+        and "this patient" can never disagree about who is callable.
+
+        The encounter's ``encounter_type`` is NOT part of this: routing a visit
+        to Dental or Physiotherapy keeps the original type, and an emergency
+        visit waiting in a unit is still that unit's work. Filtering on "opd"
+        hid real patients from the queue while the workspace still listed them.
+
+        @param facility_id: Facility UUID
+        @param doctor_id: Doctor's staff UUID
+        @param department_id: The doctor's department UUID, when they have one
+        @param facility_wide: Whether the caller may work the whole facility
+        @returns SQLAlchemy predicates to AND together
+        """
+        filters = [
+            Encounter.facility_id == facility_id,
+            Encounter.status == "waiting",
+            Encounter.is_deleted == False,  # noqa: E712
+            todays_encounters(),
+        ]
+        if not facility_wide:
+            filters.append(
+                scope_filter(
+                    SCOPE_MINE,
+                    staff_id=doctor_id,
+                    department_id=department_id,
+                )
+            )
+        return filters
+
+    async def call_in(
+        self,
+        encounter_id: uuid.UUID,
+        *,
+        facility_id: uuid.UUID,
+        doctor_id: uuid.UUID,
+        department_id: uuid.UUID | None = None,
+        facility_wide: bool = False,
+    ) -> Encounter:
+        """
+        Bring one named patient into the room.
+
+        "Call next" is queue order; this is the doctor picking a patient off
+        their own list - a patient they were told about, or one they are
+        returning to. The gates are the same as :meth:`call_next`, so choosing
+        a row by hand cannot do anything the queue button would refuse.
+
+        @param encounter_id: Encounter UUID the doctor chose
+        @param facility_id: Facility UUID
+        @param doctor_id: Doctor's staff UUID
+        @param department_id: The doctor's department UUID, when they have one
+        @param facility_wide: Whether the caller may work the whole facility
+        @returns The claimed encounter
+        @raises LookupError: When the patient is not in the doctor's queue
+        @raises ValueError: When the visit is not waiting, not assessed, or unpaid
+        """
+        filters = self.callable_filters(
+            facility_id,
+            doctor_id=doctor_id,
+            department_id=department_id,
+            facility_wide=facility_wide,
+        )
+        encounter = (
+            await self.db.execute(
+                select(Encounter).where(*filters, Encounter.id == encounter_id)
+            )
+        ).scalar_one_or_none()
+        if encounter is None:
+            # Covers "no such visit" and "not yours" alike: a doctor has no
+            # business learning whether a patient exists outside their reach.
+            raise LookupError("That patient is not in your queue.")
+        if encounter.triaged_at is None:
+            raise ValueError(
+                "This patient is still with OPD for assessment. Record their "
+                "vitals, or mark the assessment complete, before calling them "
+                "into the consultation room."
+            )
+        return await self._bring_into_room(encounter, doctor_id)
+
+    async def _bring_into_room(
+        self, encounter: Encounter, doctor_id: uuid.UUID
+    ) -> Encounter:
+        """
+        Claim a patient the gates have already cleared and start the consultation.
+
+        @param encounter: Encounter to claim
+        @param doctor_id: Doctor taking the patient
+        @returns The claimed encounter
+        @raises ValueError: When the consultation fee is still outstanding
+        """
         await self.assert_consultation_paid(encounter)
 
         encounter.status = "in_consultation"
@@ -277,6 +507,225 @@ class EncounterService:
         await self.db.refresh(encounter)
 
         return encounter
+
+    async def complete_assessment(
+        self,
+        encounter_id: uuid.UUID,
+        facility_id: uuid.UUID,
+        nurse_id: uuid.UUID,
+    ) -> Encounter | None:
+        """
+        Mark the OPD assessment finished so the patient joins the doctor's queue.
+
+        Vitals are the usual evidence that a nurse has seen the patient, but
+        they are not always the right thing to take - a follow-up review needs
+        no blood pressure cuff. This is the explicit alternative, so a patient
+        can never be stranded in a stage nobody can clear.
+
+        @param encounter_id: Encounter UUID
+        @param facility_id: Facility UUID
+        @param nurse_id: Nurse marking the assessment complete
+        @returns The updated encounter, or None when it does not exist
+        @raises ValueError: When the visit is closed
+        """
+        # Read the row directly: refresh() below drops the display labels
+        # get_encounter() decorates onto the instance, and this response does
+        # not carry them anyway.
+        encounter = (
+            await self.db.execute(
+                select(Encounter).where(
+                    Encounter.id == encounter_id,
+                    Encounter.facility_id == facility_id,
+                    Encounter.is_deleted == False,  # noqa: E712
+                )
+            )
+        ).scalar_one_or_none()
+        if encounter is None:
+            return None
+        if encounter.status in ("discharged", "cancelled"):
+            raise ValueError("This visit is closed.")
+
+        # Already assessed, by vitals or by this call: nothing to move.
+        if encounter.triaged_at is None:
+            encounter.triaged_at = datetime.now(UTC)
+            encounter.nurse_id = nurse_id
+            encounter.updated_by = nurse_id
+            await self.db.flush()
+            await self.db.refresh(encounter)
+            self.db.add(
+                EventBase(
+                    facility_id=facility_id,
+                    stream_type="encounter",
+                    stream_id=encounter.id,
+                    event_type="AssessmentCompleted",
+                    event_data={"nurse_id": str(nurse_id)},
+                    version=1,
+                    created_by=nurse_id,
+                )
+            )
+        return encounter
+
+    async def route_to_department(
+        self,
+        encounter_id: uuid.UUID,
+        data: EncounterRouteRequest,
+        facility_id: uuid.UUID,
+        routed_by: uuid.UUID,
+    ) -> tuple[Encounter, Referral, str | None]:
+        """
+        Direct a patient from this room to another unit.
+
+        Reception routes a patient once, at registration. This is the
+        clinician's hand-off: it records an internal referral so the trail
+        shows who sent the patient where and why, then re-queues the encounter
+        in the destination unit so that unit's worklist picks the patient up.
+
+        @param encounter_id: Encounter UUID
+        @param data: Destination, optional clinician, urgency and reason
+        @param facility_id: Facility UUID
+        @param routed_by: Staff UUID of the clinician handing the patient over
+        @returns Tuple of (updated encounter, internal referral, dept name)
+        @raises LookupError: When the encounter does not exist
+        @raises ValueError: When the destination is invalid or already current
+        """
+        encounter = await self.get_encounter(encounter_id, facility_id)
+        if encounter is None:
+            raise LookupError("Encounter not found")
+        if encounter.status in ("discharged", "cancelled"):
+            raise ValueError("This visit is closed and cannot be routed.")
+
+        # get_encounter joins the display labels onto the instance; refresh()
+        # below reloads only the mapped columns, so keep them to hand back.
+        patient_name = getattr(encounter, "patient_name", None)
+        patient_mrn = getattr(encounter, "patient_mrn", None)
+
+        destination_id = data.receiving_department_id
+        if encounter.department_id == destination_id:
+            raise ValueError("The patient is already in this department.")
+
+        department = (
+            await self.db.execute(
+                select(Department).where(
+                    Department.id == destination_id,
+                    Department.facility_id == facility_id,
+                    Department.is_deleted == False,  # noqa: E712
+                    Department.is_active == True,  # noqa: E712
+                )
+            )
+        ).scalar_one_or_none()
+        if department is None:
+            raise ValueError("Destination department not found")
+
+        referral = await ReferralService(self.db).create_referral(
+            data=ReferralCreate(
+                patient_id=encounter.patient_id,
+                encounter_id=encounter.id,
+                referral_type="internal",
+                direction="outgoing",
+                initial_status="sent",
+                referring_doctor_id=routed_by,
+                referring_department_id=encounter.department_id,
+                receiving_doctor_id=data.receiving_doctor_id,
+                receiving_department_id=destination_id,
+                reason=data.reason,
+                notes=data.notes,
+                urgency=data.urgency,
+            ),
+            facility_id=facility_id,
+            created_by=routed_by,
+            initial_status="sent",
+        )
+
+        # Re-queue in the destination unit. The holder is replaced unless a
+        # named clinician was chosen, so the unit can claim the patient
+        # instead of the visit silently staying with the sender.
+        encounter.department_id = destination_id
+        encounter.attending_doctor_id = data.receiving_doctor_id
+        encounter.status = "waiting"
+        encounter.queue_number = await self._next_queue_number(facility_id)
+        encounter.priority = max(
+            encounter.priority or 0, URGENCY_PRIORITY[data.urgency]
+        )
+        encounter.updated_by = routed_by
+        await self.db.flush()
+        await self.db.refresh(encounter)
+        encounter.patient_name = patient_name  # type: ignore[attr-defined]
+        encounter.patient_mrn = patient_mrn  # type: ignore[attr-defined]
+
+        self.db.add(
+            EventBase(
+                facility_id=facility_id,
+                stream_type="encounter",
+                stream_id=encounter.id,
+                event_type="EncounterRouted",
+                event_data={
+                    "referral_number": referral.referral_number,
+                    "from_department_id": (
+                        str(referral.referring_department_id)
+                        if referral.referring_department_id
+                        else None
+                    ),
+                    "to_department_id": str(destination_id),
+                    "to_doctor_id": (
+                        str(data.receiving_doctor_id)
+                        if data.receiving_doctor_id
+                        else None
+                    ),
+                    "urgency": data.urgency,
+                    "reason": data.reason,
+                },
+                version=1,
+                created_by=routed_by,
+            )
+        )
+        return encounter, referral, department.name
+
+    async def get_encounter_routes(
+        self, encounter_id: uuid.UUID, facility_id: uuid.UUID
+    ) -> list[Referral]:
+        """
+        Internal routings recorded for an encounter, newest first.
+
+        @param encounter_id: Encounter UUID
+        @param facility_id: Facility UUID
+        @returns Internal referrals raised from this encounter
+        """
+        result = await self.db.execute(
+            select(Referral)
+            .where(
+                Referral.encounter_id == encounter_id,
+                Referral.facility_id == facility_id,
+                Referral.referral_type == "internal",
+                Referral.is_deleted == False,  # noqa: E712
+            )
+            .order_by(Referral.referral_date.desc())
+        )
+        return list(result.scalars().all())
+
+    async def department_names(
+        self, department_ids: set[uuid.UUID | None]
+    ) -> dict[uuid.UUID, str]:
+        """
+        Resolve department labels for a page of routings.
+
+        @param department_ids: Department UUIDs to label
+        @returns Department name by id
+        """
+        ids = {
+            department_id
+            for department_id in department_ids
+            if department_id is not None
+        }
+        if not ids:
+            return {}
+        rows = (
+            await self.db.execute(
+                select(Department.id, Department.name).where(
+                    Department.id.in_(ids)
+                )
+            )
+        ).all()
+        return {row[0]: row[1] for row in rows}
 
     async def _get_consultation_fee_cents(
         self, facility_id, department_id=None, doctor_id=None

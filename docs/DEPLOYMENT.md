@@ -131,8 +131,8 @@ $COMPOSE up -d
 
 There is no manual migration step: the one-shot `db-migrate` service runs
 `alembic upgrade head` and every service that reads the schema
-(`api-gateway`, `api-worker`, `api-beat`, `knowledge-service`,
-`knowledge-worker`, `scribe-service`) waits for it to exit 0 before starting.
+(`api-gateway`, `api-worker`, `api-beat`, `scribe-service`) waits for it to
+exit 0 before starting.
 It is idempotent, so re-running it is safe:
 
 ```bash
@@ -177,6 +177,7 @@ CORS_ORIGINS=https://www.aifyamed.com
 |---|---|
 | `NEXT_PUBLIC_API_URL` | `https://api.aifyamed.com` |
 | `COOKIE_DOMAIN` | `.aifyamed.com` |
+| `AUTH_PROVIDER` | `keycloak` to redirect sign-in to Keycloak, `internal` for Aifya passwords. Must match the API. |
 | `NEXTAUTH_URL` | `https://www.aifyamed.com` |
 | `KEYCLOAK_URL` (server-side token calls) | `https://auth.aifyamed.com` |
 | `NEXT_PUBLIC_KEYCLOAK_URL` | `https://auth.aifyamed.com` |
@@ -271,8 +272,15 @@ managed providers. No app code knows which model is behind it.
 Wiring (already in `docker-compose.yml`):
 
 - `scribe-service` → `OPENAI_BASE_URL=http://litellm:4000/v1`
-- `knowledge-service` → `VLLM_BASE_URL=http://litellm:4000/v1`,
+- `api-gateway` (in-process knowledge) → `VLLM_BASE_URL=http://litellm:4000/v1`,
   `GENERATION_MODEL=claude-sonnet`
+
+The `api-gateway` image installs the `embeddings` extra
+(`sentence-transformers` + `torch`) so the knowledge RAG keeps the BGE-M3
+semantic vectors the standalone service produced. Build it with
+`--build-arg INSTALL_EMBEDDINGS=0` for a much smaller image; the embedding
+backend then falls back to hashed lexical vectors and
+`/api/v1/knowledge/health` reports `embeddings: hashing`.
 - LiteLLM maps `gpt-4o`/`claude-sonnet`/`claude-haiku` → Anthropic Claude,
   and `whisper-1` → an OpenAI-compatible **transcription** provider
   (Anthropic can't transcribe audio).

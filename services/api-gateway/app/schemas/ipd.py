@@ -223,3 +223,101 @@ class WardBoardSummary(BaseModel):
     available_beds: int
     active_admissions: int
     occupancy_rate: float
+
+
+# ── Admission Order schemas ───────────────────────────────────────────────────
+#
+# An admission order is a clinician's *request*. It is never an admission:
+# the IPD/admission desk works the queue and only a ward + bed assignment
+# creates the inpatient record. See AdmissionOrder in models.ipd.
+
+
+class AdmissionOrderCreate(BaseModel):
+    """A clinician's request to admit a patient from an open encounter."""
+
+    encounter_id: uuid.UUID
+    patient_id: uuid.UUID
+    reason: str = Field(..., min_length=1, max_length=2000)
+    primary_diagnosis: str | None = Field(None, max_length=500)
+    admission_type: str = Field(
+        default="elective", pattern=r"^(emergency|urgent|elective)$"
+    )
+    priority: str = Field(default="routine", pattern=r"^(routine|urgent|emergency)$")
+    department_id: uuid.UUID | None = None
+    requested_ward_id: uuid.UUID | None = None
+    attending_doctor_id: uuid.UUID | None = None
+    clinical_notes: str | None = Field(None, max_length=4000)
+    requested_at: datetime | None = None
+
+
+class AdmissionOrderDecision(BaseModel):
+    """IPD/admission-desk decision on an order."""
+
+    decision_notes: str | None = Field(None, max_length=2000)
+
+
+class AdmissionOrderAccept(AdmissionOrderDecision):
+    """
+    Accept an order.
+
+    Setting bed_pending records "accepted, but no bed is free yet" — the ward
+    still owes the patient a bed, and the queue keeps showing the order.
+    """
+
+    bed_pending: bool = False
+
+
+class AdmissionOrderAdmit(AdmissionOrderDecision):
+    """Turn an accepted order into a real IPD admission."""
+
+    ward_id: uuid.UUID
+    bed_id: uuid.UUID
+    attending_doctor_id: uuid.UUID | None = None
+
+
+class AdmissionOrderResponse(BaseModel):
+    """Admission order as stored."""
+
+    id: uuid.UUID
+    order_number: str
+    encounter_id: uuid.UUID
+    patient_id: uuid.UUID
+    ordered_by: uuid.UUID | None
+    attending_doctor_id: uuid.UUID | None
+    reason: str
+    primary_diagnosis: str | None
+    admission_type: str
+    priority: str
+    department_id: uuid.UUID | None
+    requested_ward_id: uuid.UUID | None
+    clinical_notes: str | None
+    requested_at: datetime | None
+    status: str
+    decided_by: uuid.UUID | None
+    decided_at: datetime | None
+    decision_notes: str | None
+    admission_id: uuid.UUID | None
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class AdmissionOrderListItem(AdmissionOrderResponse):
+    """Order plus the labels the admission queue renders."""
+
+    patient_name: str | None = None
+    patient_mrn: str | None = None
+    department_name: str | None = None
+    requested_ward_name: str | None = None
+    attending_doctor_name: str | None = None
+    ordered_by_name: str | None = None
+    admitted_ward_name: str | None = None
+    admitted_bed_number: str | None = None
+
+
+class AdmissionOrderListResponse(BaseModel):
+    """Paginated admission-order queue."""
+
+    items: list[AdmissionOrderListItem]
+    total: int

@@ -20,7 +20,10 @@ class InvoiceItemCreate(BaseModel):
     reference_id: uuid.UUID | None = None
     reference_type: str | None = Field(
         None,
-        pattern=r"^(dispensing|lab_order|imaging_order|prescription|encounter)$",
+        pattern=(
+            r"^(dispensing|lab_order|imaging_order|prescription|encounter|"
+            r"point_of_care)$"
+        ),
     )
 
 
@@ -209,7 +212,7 @@ class ServicePaymentRequest(BaseModel):
         ..., pattern=r"^(cash|mpesa|insurance|exemption)$"
     )
     reference_type: str | None = Field(
-        None, pattern=r"^(lab_order|imaging_order|prescription)$"
+        None, pattern=r"^(lab_order|imaging_order|prescription|point_of_care)$"
     )
     reference_id: uuid.UUID | None = None
     reference_number: str | None = Field(None, max_length=100)

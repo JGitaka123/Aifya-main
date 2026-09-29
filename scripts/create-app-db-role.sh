@@ -11,6 +11,13 @@
 #
 # Alembic migrations may keep using the owner role; only the runtime API
 # connection needs to be non-superuser for RLS to bite.
+#
+# NOTE (2026-09): this script targets the docker-compose topology (database
+# `aifya`, role `aifya_app`). The workstation database is `AIFYA-MAIN` and
+# the runtime login there is `aifya_user` (NOSUPERUSER, NOBYPASSRLS, member
+# of `aifya_app_role`), where RLS is already enforced. Run this only when
+# provisioning the compose deployment, and keep the role/database names in
+# the environment in sync with the deployment manifest.
 set -euo pipefail
 
 : "${APP_DB_PASSWORD:?set APP_DB_PASSWORD to a strong random password}"

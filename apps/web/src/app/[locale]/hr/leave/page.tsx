@@ -52,7 +52,7 @@ export default function LeaveManagementPage() {
   const isManager = useMemo(
     () =>
       (user?.roles ?? []).some((r) =>
-        ["manager", "hr_admin", "admin", "super_admin"].includes(r),
+        ["manager", "hr_admin", "hr_officer", "facility_admin", "admin", "super_admin"].includes(r),
       ),
     [user],
   );

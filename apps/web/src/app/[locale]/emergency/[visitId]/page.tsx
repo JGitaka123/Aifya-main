@@ -19,6 +19,7 @@ import {
   useEmergencyVisit,
   useTriageVisit,
   useAssignDoctor,
+  useSetEmergencyStage,
   useRecordDisposition,
   useDoctorsOnDuty,
 } from "@/hooks/useEmergency";
@@ -79,6 +80,7 @@ export default function EmergencyVisitDetailPage() {
 
   const triageMutation = useTriageVisit(visitId);
   const assignMutation = useAssignDoctor(visitId);
+  const stageMutation = useSetEmergencyStage(visitId);
   const dispositionMutation = useRecordDisposition(visitId);
 
   if (isLoading) {
@@ -104,6 +106,10 @@ export default function EmergencyVisitDetailPage() {
   const handleAssign = () => {
     if (!doctorId) return;
     assignMutation.mutate({ doctor_id: doctorId }, { onSuccess: () => setShowAssign(false) });
+  };
+
+  const handleStage = (status: "in_treatment" | "observation") => {
+    stageMutation.mutate({ status });
   };
 
   const handleWardChange = (nextWardId: string) => {
@@ -159,6 +165,15 @@ export default function EmergencyVisitDetailPage() {
           </h1>
           <p className="text-sm text-muted-foreground">{t("visitDetail")}</p>
         </div>
+        {visit.encounter_id && (
+          <Link
+            href={`/opd/${visit.encounter_id}`}
+            className="flex items-center gap-2 rounded-lg border border-border bg-card px-3 py-2 text-sm font-medium text-foreground shadow-sm transition-colors hover:bg-muted"
+          >
+            <Stethoscope className="h-4 w-4" />
+            {t("openClinicalRecord")}
+          </Link>
+        )}
         {visit.triage_color && (
           <span
             className={cn(
@@ -352,6 +367,33 @@ export default function EmergencyVisitDetailPage() {
             className="rounded-md bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700"
           >
             {t("assignDoctor")}
+          </button>
+        )}
+        {visit.status === "triaged" && (
+          <button
+            onClick={() => handleStage("in_treatment")}
+            disabled={stageMutation.isPending}
+            className="rounded-md bg-purple-600 px-4 py-2 text-sm font-medium text-white hover:bg-purple-700 disabled:opacity-50"
+          >
+            {t("startTreatment")}
+          </button>
+        )}
+        {visit.status === "in_treatment" && (
+          <button
+            onClick={() => handleStage("observation")}
+            disabled={stageMutation.isPending}
+            className="rounded-md bg-cyan-600 px-4 py-2 text-sm font-medium text-white hover:bg-cyan-700 disabled:opacity-50"
+          >
+            {t("moveToObservation")}
+          </button>
+        )}
+        {visit.status === "observation" && (
+          <button
+            onClick={() => handleStage("in_treatment")}
+            disabled={stageMutation.isPending}
+            className="rounded-md bg-purple-600 px-4 py-2 text-sm font-medium text-white hover:bg-purple-700 disabled:opacity-50"
+          >
+            {t("returnToTreatment")}
           </button>
         )}
         {["triaged", "in_treatment", "observation"].includes(visit.status) && (

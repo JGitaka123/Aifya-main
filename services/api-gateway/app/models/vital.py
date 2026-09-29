@@ -20,6 +20,7 @@ class VitalSign(AuditMixin, Base):
         Index("ix_vitals_encounter", "facility_id", "encounter_id"),
         Index("ix_vitals_patient", "facility_id", "patient_id"),
         Index("ix_vitals_recorded_at", "facility_id", "recorded_at"),
+        Index("ix_vitals_report_number", "facility_id", "report_number"),
     )
 
     encounter_id: Mapped[uuid.UUID] = mapped_column(
@@ -83,3 +84,9 @@ class VitalSign(AuditMixin, Base):
 
     # FHIR
     fhir_id: Mapped[str | None] = mapped_column(String(100))
+
+    # The small report issued to the patient once triage is done. The number
+    # is what the printed slip, the receipt and the patient's history quote;
+    # the summary is the one-line digest all three show.
+    report_number: Mapped[str | None] = mapped_column(String(30))
+    summary: Mapped[str | None] = mapped_column(String(500))

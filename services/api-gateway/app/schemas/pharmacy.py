@@ -168,7 +168,12 @@ class PharmacyQueueItem(BaseModel):
     quantity: int | None
     instructions: str | None
     prescriber_id: uuid.UUID
+    prescriber_name: str | None = None
     status: str
+    charge_total_cents: int | None = None
+    charge_paid_cents: int | None = None
+    charge_balance_cents: int | None = None
+    charge_status: str = "not_charged"
     created_at: datetime
 
     model_config = {"from_attributes": True}

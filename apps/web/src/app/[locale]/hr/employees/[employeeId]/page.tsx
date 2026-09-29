@@ -73,7 +73,7 @@ export default function EmployeeDetailPage() {
   const isHRAdmin = useMemo(
     () =>
       (user?.roles ?? []).some((r) =>
-        ["hr_admin", "admin", "super_admin"].includes(r),
+        ["hr_admin", "facility_admin", "admin", "super_admin"].includes(r),
       ),
     [user],
   );

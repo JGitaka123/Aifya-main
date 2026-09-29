@@ -10,6 +10,12 @@ from app.schemas.emergency import EmergencyVisitResponse
 from app.schemas.ipd import (
     AdmissionCreate,
     AdmissionListResponse,
+    AdmissionOrderAccept,
+    AdmissionOrderAdmit,
+    AdmissionOrderCreate,
+    AdmissionOrderDecision,
+    AdmissionOrderListResponse,
+    AdmissionOrderResponse,
     AdmissionResponse,
     BedCreate,
     BedResponse,
@@ -284,6 +290,245 @@ async def get_admission_detail(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Admission not found",
         )
+    return AdmissionResponse.model_validate(admission)
+
+
+# ── Admission Orders ──────────────────────────────────────────────────────────
+#
+# The bridge between consultation and IPD. A clinician raises an order; the
+# admission desk accepts or declines it; only a ward + bed assignment creates
+# the actual inpatient admission. Keeping these apart is what stops a click on
+# "Request admission" from inventing an IPD patient.
+
+
+@router.get("/admission-orders", response_model=AdmissionOrderListResponse)
+async def list_admission_orders(
+    status_filter: str | None = Query(None, alias="status"),
+    patient_id: uuid.UUID | None = Query(None),
+    encounter_id: uuid.UUID | None = Query(None),
+    db: AsyncSession = Depends(get_db),
+    current_user: CurrentUser = Depends(get_current_user),
+) -> AdmissionOrderListResponse:
+    """
+    List admission orders for the admission queue.
+
+    @param status_filter: Exact status, or "open" for everything still workable
+    @param patient_id: Optional patient filter
+    @param encounter_id: Optional encounter filter
+    @param db: Database session
+    @param current_user: Authenticated user from JWT
+    @returns Admission order queue
+    """
+    service = IPDService(db)
+    items, total = await service.get_admission_orders(
+        facility_id=current_user.facility_id,
+        status_filter=status_filter,
+        patient_id=patient_id,
+        encounter_id=encounter_id,
+    )
+    return AdmissionOrderListResponse(items=items, total=total)
+
+
+@router.post(
+    "/admission-orders",
+    response_model=AdmissionOrderResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_admission_order(
+    data: AdmissionOrderCreate,
+    db: AsyncSession = Depends(get_db),
+    current_user: CurrentUser = Depends(
+        require_roles("doctor", "admin", "facility_admin")
+    ),
+) -> AdmissionOrderResponse:
+    """
+    Request admission for an outpatient — does NOT admit the patient.
+
+    @param data: Admission order details
+    @param db: Database session
+    @param current_user: Authenticated clinician
+    @returns Created admission order
+    """
+    service = IPDService(db)
+    try:
+        order = await service.create_admission_order(
+            data=data,
+            facility_id=current_user.facility_id,
+            ordered_by=current_user.user_id,
+        )
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail=str(e)
+        ) from e
+    return AdmissionOrderResponse.model_validate(order)
+
+
+@router.get("/admission-orders/{order_id}", response_model=AdmissionOrderResponse)
+async def get_admission_order(
+    order_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: CurrentUser = Depends(get_current_user),
+) -> AdmissionOrderResponse:
+    """
+    Get a single admission order.
+
+    @param order_id: Admission order UUID
+    @param db: Database session
+    @param current_user: Authenticated user from JWT
+    @returns Admission order
+    """
+    service = IPDService(db)
+    order = await service.get_admission_order(order_id, current_user.facility_id)
+    if not order:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Admission request not found",
+        )
+    return AdmissionOrderResponse.model_validate(order)
+
+
+@router.post(
+    "/admission-orders/{order_id}/accept",
+    response_model=AdmissionOrderResponse,
+)
+async def accept_admission_order(
+    order_id: uuid.UUID,
+    data: AdmissionOrderAccept,
+    db: AsyncSession = Depends(get_db),
+    current_user: CurrentUser = Depends(
+        require_roles("nurse", "doctor", "admin", "facility_admin")
+    ),
+) -> AdmissionOrderResponse:
+    """
+    Accept an admission order at the admission desk.
+
+    @param order_id: Admission order UUID
+    @param data: Decision notes; bed_pending marks "accepted, no bed yet"
+    @param db: Database session
+    @param current_user: Authenticated admission-desk staff
+    @returns Updated admission order
+    """
+    service = IPDService(db)
+    try:
+        order = await service.accept_admission_order(
+            order_id=order_id,
+            decision=data,
+            facility_id=current_user.facility_id,
+            decided_by=current_user.user_id,
+        )
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail=str(e)
+        ) from e
+    return AdmissionOrderResponse.model_validate(order)
+
+
+@router.post(
+    "/admission-orders/{order_id}/decline",
+    response_model=AdmissionOrderResponse,
+)
+async def decline_admission_order(
+    order_id: uuid.UUID,
+    data: AdmissionOrderDecision,
+    db: AsyncSession = Depends(get_db),
+    current_user: CurrentUser = Depends(
+        require_roles("nurse", "doctor", "admin", "facility_admin")
+    ),
+) -> AdmissionOrderResponse:
+    """
+    Decline an admission order, with a reason for the requesting clinician.
+
+    @param order_id: Admission order UUID
+    @param data: Reason for the refusal
+    @param db: Database session
+    @param current_user: Authenticated admission-desk staff
+    @returns Updated admission order
+    """
+    service = IPDService(db)
+    try:
+        order = await service.decline_admission_order(
+            order_id=order_id,
+            decision=data,
+            facility_id=current_user.facility_id,
+            decided_by=current_user.user_id,
+        )
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail=str(e)
+        ) from e
+    return AdmissionOrderResponse.model_validate(order)
+
+
+@router.post(
+    "/admission-orders/{order_id}/cancel",
+    response_model=AdmissionOrderResponse,
+)
+async def cancel_admission_order(
+    order_id: uuid.UUID,
+    data: AdmissionOrderDecision,
+    db: AsyncSession = Depends(get_db),
+    current_user: CurrentUser = Depends(
+        require_roles("doctor", "admin", "facility_admin")
+    ),
+) -> AdmissionOrderResponse:
+    """
+    Cancel an admission order before it is fulfilled.
+
+    @param order_id: Admission order UUID
+    @param data: Optional note explaining the cancellation
+    @param db: Database session
+    @param current_user: Authenticated clinician
+    @returns Updated admission order
+    """
+    service = IPDService(db)
+    try:
+        order = await service.cancel_admission_order(
+            order_id=order_id,
+            decision=data,
+            facility_id=current_user.facility_id,
+            cancelled_by=current_user.user_id,
+        )
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail=str(e)
+        ) from e
+    return AdmissionOrderResponse.model_validate(order)
+
+
+@router.post(
+    "/admission-orders/{order_id}/admit",
+    response_model=AdmissionResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def admit_from_admission_order(
+    order_id: uuid.UUID,
+    data: AdmissionOrderAdmit,
+    db: AsyncSession = Depends(get_db),
+    current_user: CurrentUser = Depends(
+        require_roles("nurse", "doctor", "admin", "facility_admin")
+    ),
+) -> AdmissionResponse:
+    """
+    Assign a ward and bed to an accepted order, creating the IPD admission.
+
+    @param order_id: Admission order UUID
+    @param data: Ward, bed and optional attending doctor
+    @param db: Database session
+    @param current_user: Authenticated admission-desk staff
+    @returns Created admission
+    """
+    service = IPDService(db)
+    try:
+        admission = await service.admit_from_order(
+            order_id=order_id,
+            data=data,
+            facility_id=current_user.facility_id,
+            admitted_by=current_user.user_id,
+        )
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail=str(e)
+        ) from e
     return AdmissionResponse.model_validate(admission)
 
 

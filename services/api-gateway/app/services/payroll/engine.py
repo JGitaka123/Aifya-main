@@ -44,6 +44,8 @@ _logger = logging.getLogger(__name__)
 _ZERO = Decimal("0")
 _PERSONAL_RELIEF_DEFAULT = Decimal("2400")
 _DISABILITY_EXEMPTION = Decimal("150000")
+_DEFAULT_INSURANCE_RELIEF_RATE = Decimal("0.15")
+_DEFAULT_INSURANCE_RELIEF_CAP = Decimal("5000")
 
 
 def _period_bounds(month: int, year: int) -> tuple[date, date]:
@@ -172,6 +174,57 @@ async def _load_rate_value(
     return Decimal(val) if val is not None else None
 
 
+async def _insurance_product_names(
+    db: AsyncSession,
+    facility_id: uuid.UUID,
+    target: date,
+) -> set[str]:
+    """Lower-cased names of the insurance products effective on `target`.
+
+    Insurance products live in `statutory_rates` under the `insurance`
+    category. An `employee_deductions` row whose name matches one of these is
+    treated as an insurance premium, which is what earns insurance relief.
+    """
+    rows = (
+        await db.execute(
+            select(StatutoryRate)
+            .where(
+                StatutoryRate.is_deleted.is_(False),
+                StatutoryRate.category == "insurance",
+                StatutoryRate.effective_from <= target,
+                or_(
+                    StatutoryRate.effective_to.is_(None),
+                    StatutoryRate.effective_to >= target,
+                ),
+                or_(
+                    StatutoryRate.facility_id == facility_id,
+                    StatutoryRate.facility_id.is_(None),
+                ),
+            )
+            .order_by(
+                StatutoryRate.facility_id.is_(None).asc(),
+                StatutoryRate.effective_from.desc(),
+            )
+        )
+    ).scalars().all()
+    return {(row.name or "").strip().lower() for row in rows if row.name}
+
+
+def _insurance_premium(
+    breakdown: dict[str, str], product_names: set[str]
+) -> Decimal:
+    """Sum the deduction lines that are insurance premiums."""
+    total = _ZERO
+    for name, value in breakdown.items():
+        if (name or "").strip().lower() not in product_names:
+            continue
+        try:
+            total += Decimal(str(value))
+        except (ArithmeticError, ValueError):
+            continue
+    return total
+
+
 async def _load_active_salary(
     db: AsyncSession,
     facility_id: uuid.UUID,
@@ -256,6 +309,21 @@ async def _sum_unpaid_leave(
     return total
 
 
+def _skip_entry(employee: Employee, reason: str) -> dict[str, str]:
+    """Describe an employee the engine could not pay.
+
+    @param employee: Employee row the engine skipped
+    @param reason: Machine-readable reason (no_salary | zero_gross)
+    @returns JSON-safe entry stored on PayrollRun.skipped_employees
+    """
+    return {
+        "employee_id": str(employee.id),
+        "employee_name": employee.full_name,
+        "staff_id": employee.staff_id,
+        "reason": reason,
+    }
+
+
 async def run_monthly_payroll(
     db: AsyncSession,
     facility_id: uuid.UUID,
@@ -299,6 +367,37 @@ async def run_monthly_payroll(
             f"An active payroll run already exists for {year}-{month:02d}"
         )
 
+    # A draft is replaceable: retire any earlier draft for the same period so
+    # a re-run cannot leave two live drafts behind and the UI never has to
+    # guess which one is authoritative.
+    stale_drafts = (
+        await db.execute(
+            select(PayrollRun).where(
+                PayrollRun.is_deleted.is_(False),
+                PayrollRun.facility_id == facility_id,
+                PayrollRun.month == month,
+                PayrollRun.year == year,
+                PayrollRun.status == "draft",
+            )
+        )
+    ).scalars().all()
+    for draft in stale_drafts:
+        stale_items = (
+            await db.execute(
+                select(PayrollLineItem).where(
+                    PayrollLineItem.payroll_run_id == draft.id,
+                    PayrollLineItem.is_deleted.is_(False),
+                )
+            )
+        ).scalars().all()
+        for item in stale_items:
+            item.is_deleted = True
+            item.updated_by = user_id
+        draft.is_deleted = True
+        draft.updated_by = user_id
+    if stale_drafts:
+        await db.flush()
+
     # Load rate tables once
     paye_bands = await _load_paye_bands(db, facility_id, period_end)
     nssf_tiers = await _load_nssf_tiers(db, facility_id, period_end)
@@ -311,6 +410,15 @@ async def run_monthly_payroll(
     personal_relief = await _load_rate_value(
         db, facility_id, "relief", "Personal Relief", period_end, "fixed_amount"
     ) or _PERSONAL_RELIEF_DEFAULT
+    insurance_products = await _insurance_product_names(
+        db, facility_id, period_end
+    )
+    insurance_relief_rate = await _load_rate_value(
+        db, facility_id, "relief", "Insurance Relief", period_end, "rate"
+    ) or _DEFAULT_INSURANCE_RELIEF_RATE
+    insurance_relief_cap = await _load_rate_value(
+        db, facility_id, "relief", "Insurance Relief", period_end, "fixed_cap"
+    ) or _DEFAULT_INSURANCE_RELIEF_CAP
 
     run = PayrollRun(
         facility_id=facility_id,
@@ -340,6 +448,10 @@ async def run_monthly_payroll(
         )
     ).scalars().all()
 
+    # Employees the engine leaves out are recorded on the run so a short
+    # total is visible in the UI instead of only in the log.
+    skipped_employees: list[dict] = []
+
     totals = {
         "gross": _ZERO,
         "paye": _ZERO,
@@ -354,6 +466,7 @@ async def run_monthly_payroll(
     for emp in employees:
         salary = await _load_active_salary(db, facility_id, emp.id, period_end)
         if salary is None:
+            skipped_employees.append(_skip_entry(emp, "no_salary"))
             _logger.warning(
                 "payroll.skip_no_salary",
                 extra={
@@ -380,6 +493,7 @@ async def run_monthly_payroll(
         gross = basic + house + transport + other_alw_sum
 
         if gross <= _ZERO:
+            skipped_employees.append(_skip_entry(emp, "zero_gross"))
             _logger.warning(
                 "payroll.skip_zero_gross",
                 extra={"employee_id": str(emp.id), "period": f"{year}-{month:02d}"},
@@ -402,17 +516,24 @@ async def run_monthly_payroll(
         gross_paye = calc_paye(taxable_pay, paye_bands)
         # Step 8
         relief = personal_relief
-        # Step 9
-        ins_relief = calc_insurance_relief(_ZERO)  # premium lookup TBD
+        # Step 9: insurance relief on the premiums the employee actually pays.
+        # Premiums are the deduction lines whose name matches a configured
+        # insurance product, so they must be read before the tax step.
+        other_total, other_breakdown = await _sum_other_deductions(
+            db, facility_id, emp.id, period_start, period_end
+        )
+        insurance_premium = _insurance_premium(
+            other_breakdown, insurance_products
+        )
+        ins_relief = calc_insurance_relief(
+            insurance_premium, insurance_relief_rate, insurance_relief_cap
+        )
         # Step 10
         paye = gross_paye - relief - ins_relief
         if paye < _ZERO:
             paye = _ZERO
 
         # Step 11: other deductions = recurring + unpaid leave
-        other_total, other_breakdown = await _sum_other_deductions(
-            db, facility_id, emp.id, period_start, period_end
-        )
         unpaid_leave = await _sum_unpaid_leave(
             db, facility_id, emp.id, period_start, period_end
         )
@@ -464,6 +585,7 @@ async def run_monthly_payroll(
         totals["emp_nssf"] += emp_nssf
         totals["emp_hl"] += emp_hl
 
+    run.skipped_employees = skipped_employees
     run.total_gross = totals["gross"]
     run.total_paye = totals["paye"]
     run.total_nssf = totals["nssf"]

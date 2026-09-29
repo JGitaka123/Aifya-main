@@ -19,7 +19,15 @@ import {
 import { PageHeader } from "@/components/ui/PageHeader";
 import { Skeleton } from "@/components/ui/Skeleton";
 import { StatusBadge } from "@/components/ui/StatusBadge";
-import { useFHIRCapability, useFHIRPatients, useFHIREncounters, useFHIRObservations } from "@/hooks/useFHIR";
+import {
+  useFHIRCapability,
+  useFHIRPatients,
+  useFHIREncounters,
+  useFHIRObservations,
+  useFHIRMedicationRequests,
+  useFHIRConditions,
+  useFHIRDiagnosticReport,
+} from "@/hooks/useFHIR";
 import type { FHIRResourceType } from "@aifya/shared";
 
 /** Resource type display config. */
@@ -61,6 +69,17 @@ export default function FHIRExplorerPage() {
   const observationSearch = useFHIRObservations(
     searchParams?.type === "Observation" ? { patient: searchParams.query } : undefined,
   );
+  const medicationSearch = useFHIRMedicationRequests(
+    searchParams?.type === "MedicationRequest" ? { patient: searchParams.query } : undefined,
+  );
+  const conditionSearch = useFHIRConditions(
+    searchParams?.type === "Condition" ? { patient: searchParams.query } : undefined,
+  );
+  // DiagnosticReport is a read-by-id resource (the CapabilityStatement advertises
+  // no search-type interaction), so it is queried separately with the id.
+  const diagnosticReport = useFHIRDiagnosticReport(
+    searchParams?.type === "DiagnosticReport" ? searchParams.query : undefined,
+  );
 
   const activeSearch =
     searchParams?.type === "Patient"
@@ -69,7 +88,37 @@ export default function FHIRExplorerPage() {
         ? encounterSearch
         : searchParams?.type === "Observation"
           ? observationSearch
-          : null;
+          : searchParams?.type === "MedicationRequest"
+            ? medicationSearch
+            : searchParams?.type === "Condition"
+              ? conditionSearch
+              : null;
+
+  // Normalise bundle searches and the single-resource read into one shape so the
+  // results panel renders every resource type the explorer offers.
+  const searchResults = (() => {
+    if (!searchParams) return null;
+    if (searchParams.type === "DiagnosticReport") {
+      return {
+        type: searchParams.type,
+        isLoading: diagnosticReport.isLoading,
+        total: diagnosticReport.data ? 1 : 0,
+        entries: diagnosticReport.data
+          ? [{ fullUrl: null, resource: diagnosticReport.data }]
+          : [],
+      };
+    }
+    const bundle = activeSearch?.data;
+    return {
+      type: searchParams.type,
+      isLoading: activeSearch?.isLoading ?? false,
+      total: bundle?.total ?? bundle?.entry?.length ?? 0,
+      entries: (bundle?.entry ?? []).map((entry) => ({
+        fullUrl: entry.fullUrl ?? null,
+        resource: entry.resource,
+      })),
+    };
+  })();
 
   const handleSearch = () => {
     if (selectedResource && searchInput.trim()) {
@@ -257,35 +306,35 @@ export default function FHIRExplorerPage() {
         </div>
 
         {/* Search Results */}
-        {activeSearch && (
+        {searchResults && (
           <div className="rounded-xl border border-border bg-card shadow-sm">
             <div className="border-b border-border px-4 py-3">
               <div className="flex items-center justify-between">
                 <span className="text-sm font-medium">
-                  {searchParams?.type} {t("searchResults")}
+                  {searchResults.type} {t("searchResults")}
                 </span>
-                {activeSearch.data && (
+                {!searchResults.isLoading && (
                   <span className="text-xs text-muted-foreground">
-                    {activeSearch.data.total ?? activeSearch.data.entry?.length ?? 0} {t("found")}
+                    {searchResults.total} {t("found")}
                   </span>
                 )}
               </div>
             </div>
 
             <div className="max-h-[500px] overflow-y-auto p-4">
-              {activeSearch.isLoading ? (
+              {searchResults.isLoading ? (
                 <div className="space-y-3">
                   {Array.from({ length: 3 }).map((_, i) => (
                     <Skeleton key={i} className="h-24 rounded-lg" />
                   ))}
                 </div>
-              ) : activeSearch.data?.entry?.length === 0 ? (
+              ) : searchResults.entries.length === 0 ? (
                 <p className="py-8 text-center text-sm text-muted-foreground">
                   {tc("noResults")}
                 </p>
               ) : (
                 <div className="space-y-3">
-                  {activeSearch.data?.entry?.map((entry, idx) => (
+                  {searchResults.entries.map((entry, idx) => (
                     <div
                       key={entry.fullUrl ?? idx}
                       className="rounded-lg border border-border bg-muted/10 p-3"

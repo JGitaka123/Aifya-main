@@ -18,6 +18,18 @@ export type EmploymentType =
   | "intern";
 export type PayrollRunStatus = "draft" | "approved" | "posted" | "locked";
 
+/**
+ * An employee the payroll engine left out of a run, and why.
+ *
+ * @property reason - `no_salary` (no salary record for the period) or `zero_gross`
+ */
+export interface SkippedEmployee {
+  employee_id: string;
+  employee_name: string;
+  staff_id: string;
+  reason: string;
+}
+
 export type LeaveRequestStatus =
   | "pending"
   | "approved"
@@ -43,6 +55,8 @@ export interface Employee {
   bank_branch: string;
   bank_account: string;
   disability_exemption: boolean;
+  /** Whether the matching staff record has a sign-in. Their access is the staff role. */
+  has_login?: boolean;
 }
 
 export interface EmployeeListResponse {
@@ -78,6 +92,13 @@ export interface EmployeeCreate {
   house_allowance?: number;
   transport_allowance?: number;
   other_allowances?: number;
+  /**
+   * Role HR assigns in the staff directory. It replaces the role the job title
+   * would otherwise imply, so access is chosen rather than guessed.
+   */
+  role?: string;
+  /** Initial sign-in password. Setting it creates the employee's login. */
+  login_password?: string;
 }
 
 export interface EmployeeUpdate {
@@ -125,6 +146,9 @@ export interface PayrollRun {
   approved_by?: string | null;
   approved_at?: string | null;
   gl_transaction_id?: string | null;
+  gl_posting_error?: string | null;
+  gl_attempted_at?: string | null;
+  skipped_employees?: SkippedEmployee[];
   total_gross: number;
   total_paye: number;
   total_nssf: number;
@@ -217,6 +241,8 @@ export interface PAYEScheduleRow {
 export interface PAYESchedule {
   month: number;
   year: number;
+  run_id?: string | null;
+  run_status?: string | null;
   rows: PAYEScheduleRow[];
   total_taxable: number;
   total_paye: number;
@@ -235,6 +261,8 @@ export interface NSSFScheduleRow {
 export interface NSSFSchedule {
   month: number;
   year: number;
+  run_id?: string | null;
+  run_status?: string | null;
   rows: NSSFScheduleRow[];
   total_employee: number;
   total_employer: number;
@@ -252,7 +280,30 @@ export interface SHIFScheduleRow {
 export interface SHIFSchedule {
   month: number;
   year: number;
+  run_id?: string | null;
+  run_status?: string | null;
   rows: SHIFScheduleRow[];
+  total: number;
+}
+
+export interface HousingLevyScheduleRow {
+  employee_id: string;
+  employee_name: string;
+  kra_pin: string;
+  gross_salary: number;
+  employee_contribution: number;
+  employer_contribution: number;
+  total: number;
+}
+
+export interface HousingLevySchedule {
+  month: number;
+  year: number;
+  run_id?: string | null;
+  run_status?: string | null;
+  rows: HousingLevyScheduleRow[];
+  total_employee: number;
+  total_employer: number;
   total: number;
 }
 
@@ -403,6 +454,19 @@ export interface LeaveApproval {
   rejection_reason?: string | null;
 }
 
+export interface LeaveBalanceBucket {
+  key: string;
+  entitled_days: number;
+  taken_days: number;
+  remaining_days: number;
+}
+
+export interface LeaveBalance {
+  employee_id: string;
+  employee_name: string;
+  buckets: LeaveBalanceBucket[];
+}
+
 export type DepartmentType = "clinical" | "support" | "admin";
 
 export interface Department {
@@ -457,6 +521,10 @@ export function useCreateDepartment() {
         apiClient.post<Department>("/payroll/departments", data, generateId()),
       onSuccess: () => {
         qc.invalidateQueries({ queryKey: ["payroll", "departments"] });
+        // The routing picker reads /encounters/departments, so a department
+        // added on this screen has to refresh that list too; otherwise the
+        // operator creates a unit and then cannot select it.
+        qc.invalidateQueries({ queryKey: ["departments", "options"] });
       },
     },
     { url: `${API_URL}/payroll/departments`, method: "POST" },
@@ -705,6 +773,34 @@ export function useApprovePayrollRun(runId: string) {
 }
 
 /**
+ * Retry the Finance general-ledger post for an approved payroll run.
+ *
+ * Safe to repeat: both journals post with a stable idempotency key, so a retry
+ * returns the original ledger transaction instead of posting the payroll twice.
+ *
+ * @param runId - Payroll run UUID
+ * @returns Mutation for retrying the GL post
+ */
+export function useRetryPayrollGLPost(runId: string) {
+  const qc = useQueryClient();
+  return useOfflineMutation<PayrollRunDetail, void>(
+    {
+      mutationFn: () =>
+        apiClient.post<PayrollRunDetail>(
+          `/payroll/runs/${runId}/post-to-gl`,
+          {},
+          generateId(),
+        ),
+      onSuccess: () => {
+        qc.invalidateQueries({ queryKey: ["payroll", "runs"] });
+        qc.invalidateQueries({ queryKey: ["payroll", "run", runId] });
+      },
+    },
+    { url: `${API_URL}/payroll/runs/${runId}/post-to-gl`, method: "POST" },
+  );
+}
+
+/**
  * Recalculate a draft payroll run (re-runs the engine on draft).
  *
  * @param runId - Payroll run UUID
@@ -858,6 +954,24 @@ export function useSHIFSchedule(month?: number, year?: number) {
     queryFn: () =>
       apiClient.get<SHIFSchedule>(
         `/payroll/reports/shif-schedule?month=${month}&year=${year}`,
+      ),
+    enabled: !!month && !!year,
+  });
+}
+
+/**
+ * Fetch the monthly Affordable Housing Levy schedule.
+ *
+ * @param month - Month (1-12)
+ * @param year - Year (4-digit)
+ * @returns Query result with the levy schedule
+ */
+export function useHousingLevySchedule(month?: number, year?: number) {
+  return useOfflineQuery<HousingLevySchedule>({
+    queryKey: ["payroll", "housing-levy-schedule", month, year],
+    queryFn: () =>
+      apiClient.get<HousingLevySchedule>(
+        `/payroll/reports/housing-levy-schedule?month=${month}&year=${year}`,
       ),
     enabled: !!month && !!year,
   });
@@ -1020,10 +1134,12 @@ export function useCreateLeaveType() {
  * Fetch payroll module leave requests.
  *
  * @param filters - Optional filters (employee, status)
+ * @param enabled - Hold the request until identifiers resolve
  * @returns Query result with leave requests
  */
 export function useLeaveRequests(
   filters: { employee_id?: string; status?: LeaveRequestStatus } = {},
+  enabled = true,
 ) {
   const params: Record<string, string> = {};
   if (filters.employee_id) params.employee_id = filters.employee_id;
@@ -1036,7 +1152,23 @@ export function useLeaveRequests(
       apiClient.get<LeaveRequestListResponse>(
         `/payroll/leave-requests${qs ? `?${qs}` : ""}`,
       ),
+    enabled,
     refetchInterval: 30_000,
+  });
+}
+
+/**
+ * Fetch the signed-in user's own leave balance.
+ *
+ * Self-service: the Clinical My Leave panel shows it to a clinician who holds
+ * no HR role, so the API resolves the caller's own payroll employee row.
+ *
+ * @returns Query result with the caller's leave balance
+ */
+export function useMyLeaveBalance() {
+  return useOfflineQuery<LeaveBalance>({
+    queryKey: ["payroll", "leave-balance"],
+    queryFn: () => apiClient.get<LeaveBalance>("/payroll/leave-balance"),
   });
 }
 
@@ -1086,6 +1218,161 @@ export function useApproveLeaveRequest(leaveId: string) {
     {
       url: `${API_URL}/payroll/leave-requests/${leaveId}/approve`,
       method: "POST",
+    },
+  );
+}
+
+// ── Insurance products & usage ────────────────────────────────────────────
+
+export interface EmployeeDeduction {
+  id: string;
+  employee_id: string;
+  name: string;
+  amount: number;
+  frequency: string;
+  start_date: string;
+  end_date?: string | null;
+  is_active: boolean;
+  notes?: string | null;
+  created_at: string;
+}
+
+export interface EmployeeDeductionCreate {
+  employee_id: string;
+  name: string;
+  amount: number;
+  frequency: "monthly" | "one_time";
+  start_date: string;
+  end_date?: string | null;
+  is_active?: boolean;
+  notes?: string | null;
+}
+
+export interface InsuranceProduct {
+  id: string;
+  name: string;
+  rate?: number | null;
+  fixed_amount?: number | null;
+  effective_from: string;
+  effective_to?: string | null;
+}
+
+export interface InsuranceCoverageItem {
+  employee_id: string;
+  employee_name: string;
+  products: string[];
+  monthly_premium: number;
+}
+
+export interface InsuranceUsagePoint {
+  month: number;
+  year: number;
+  label: string;
+  run_status?: string | null;
+  covered_employees: number;
+  premium: number;
+  relief: number;
+}
+
+export interface InsuranceUtilisationReport {
+  year: number;
+  relief_rate: number;
+  relief_cap: number;
+  products: InsuranceProduct[];
+  coverage: InsuranceCoverageItem[];
+  covered_employees: number;
+  monthly_premium: number;
+  periods: InsuranceUsagePoint[];
+  total_premium: number;
+  total_relief: number;
+}
+
+/**
+ * Fetch the configured insurance products, who they cover, and the premium
+ * and relief each payroll period actually produced.
+ *
+ * @param year - Calendar year to report on
+ * @returns Query result with insurance configuration and usage
+ */
+export function useInsuranceUtilisation(year: number) {
+  return useOfflineQuery<InsuranceUtilisationReport>({
+    queryKey: ["payroll", "report", "insurance-utilisation", year],
+    queryFn: () =>
+      apiClient.get<InsuranceUtilisationReport>(
+        `/payroll/reports/insurance-utilisation?year=${year}`,
+      ),
+  });
+}
+
+/**
+ * List employee deductions (insurance premiums, loans, ...).
+ *
+ * @param employeeId - Optional employee to scope the list to
+ * @param enabled - Skip the request until a prerequisite is ready
+ * @returns Query result with employee deductions
+ */
+export function useEmployeeDeductions(employeeId?: string, enabled = true) {
+  const suffix = employeeId ? `?employee_id=${employeeId}` : "";
+  return useOfflineQuery<EmployeeDeduction[]>({
+    queryKey: ["payroll", "employee-deductions", employeeId ?? "all"],
+    queryFn: () =>
+      apiClient.get<EmployeeDeduction[]>(
+        `/payroll/employee-deductions${suffix}`,
+      ),
+    enabled,
+  });
+}
+
+/**
+ * Record a deduction for an employee. Naming it after a configured insurance
+ * product is what makes the payroll engine treat it as an insurance premium.
+ *
+ * @returns Mutation for creating an employee deduction
+ */
+export function useCreateEmployeeDeduction() {
+  const qc = useQueryClient();
+  return useOfflineMutation<EmployeeDeduction, EmployeeDeductionCreate>(
+    {
+      mutationFn: (data) =>
+        apiClient.post<EmployeeDeduction>(
+          "/payroll/employee-deductions",
+          data,
+          generateId(),
+        ),
+      onSuccess: () => {
+        qc.invalidateQueries({ queryKey: ["payroll", "employee-deductions"] });
+        qc.invalidateQueries({
+          queryKey: ["payroll", "report", "insurance-utilisation"],
+        });
+      },
+    },
+    { url: `${API_URL}/payroll/employee-deductions`, method: "POST" },
+  );
+}
+
+/**
+ * Stop a deduction so it is no longer applied on the next payroll run.
+ *
+ * @returns Mutation for deleting an employee deduction
+ */
+export function useDeleteEmployeeDeduction() {
+  const qc = useQueryClient();
+  return useOfflineMutation<void, { deductionId: string }>(
+    {
+      mutationFn: ({ deductionId }) =>
+        apiClient.delete<void>(`/payroll/employee-deductions/${deductionId}`),
+      onSuccess: () => {
+        qc.invalidateQueries({ queryKey: ["payroll", "employee-deductions"] });
+        qc.invalidateQueries({
+          queryKey: ["payroll", "report", "insurance-utilisation"],
+        });
+      },
+    },
+    {
+      url: ({ deductionId }) =>
+        `${API_URL}/payroll/employee-deductions/${deductionId}`,
+      method: "DELETE",
+      body: () => ({}),
     },
   );
 }

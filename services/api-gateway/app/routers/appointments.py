@@ -94,7 +94,13 @@ async def create_schedule(
     data: DoctorScheduleCreate,
     db: AsyncSession = Depends(get_db),
     current_user: CurrentUser = Depends(
-        require_roles("admin", "facility_admin")
+        require_roles(
+            "admin",
+            "facility_admin",
+            "hr",
+            "hr_admin",
+            "hr_officer",
+        )
     ),
 ) -> DoctorScheduleWithName:
     """
@@ -120,7 +126,13 @@ async def update_schedule(
     data: DoctorScheduleUpdate,
     db: AsyncSession = Depends(get_db),
     current_user: CurrentUser = Depends(
-        require_roles("admin", "facility_admin")
+        require_roles(
+            "admin",
+            "facility_admin",
+            "hr",
+            "hr_admin",
+            "hr_officer",
+        )
     ),
 ) -> DoctorScheduleWithName:
     """

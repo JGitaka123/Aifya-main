@@ -63,6 +63,12 @@ def test_my_scope_narrows_unclaimed_work_to_my_department() -> None:
     assert "department_id" in sql
 
 
+def test_my_scope_without_a_unit_excludes_routed_patients() -> None:
+    """A clinician with no unit only reaches patients nobody routed."""
+    sql = str(scope_filter(SCOPE_MINE, staff_id=USER_ID, department_id=None))
+    assert "department_id IS NULL" in sql
+
+
 def test_department_scope_ignores_who_is_assigned() -> None:
     """The departmental view is the unit's work, whoever holds it."""
     sql = str(
@@ -185,7 +191,8 @@ async def test_status_filter_narrows_the_list_not_the_counts(client: AsyncClient
     """Filtering to `waiting` still shows the work already completed today."""
     encounter = await _encounter(client, await _patient(client))
     completed = await client.patch(
-        f"/api/v1/encounters/{encounter['id']}", json={"status": "completed"}
+        f"/api/v1/encounters/{encounter['id']}",
+        json={"status": "completed", "outcome": "Treated and discharged"},
     )
     assert completed.status_code == 200
     await _encounter(client, await _patient(client))
@@ -227,6 +234,55 @@ async def test_my_scope_is_the_clinicians_own_work(client: AsyncClient) -> None:
     ids = {i["id"] for i in body["items"]}
     assert mine["id"] in ids
     assert len(ids) == 2
+
+
+@pytest.mark.asyncio
+async def test_unrouted_patients_reach_a_clinician_who_has_a_unit(
+    client: AsyncClient,
+) -> None:
+    """The front door stays open to every unit until a doctor takes the patient.
+
+    Reception registers the visit and takes the fee without choosing a unit, so
+    a patient nobody has routed is the consultation room's work rather than
+    invisible to a doctor who already belongs to a department.
+    """
+    department_id = uuid.uuid4()
+    await _register_clinician(department_id)
+    unrouted = await _encounter(client, await _patient(client))
+    routed_elsewhere = await _encounter(
+        client, await _patient(client), department_id=str(uuid.uuid4())
+    )
+
+    response = await client.get("/api/v1/encounters/worklist?scope=mine")
+
+    assert response.status_code == 200
+    ids = {i["id"] for i in response.json()["items"]}
+    assert unrouted["id"] in ids
+    assert routed_elsewhere["id"] not in ids
+
+
+@pytest.mark.asyncio
+async def test_patients_routed_to_another_unit_do_not_reach_my_list(
+    client: AsyncClient,
+) -> None:
+    """A doctor with no unit of their own is not handed another unit's queue.
+
+    Reception routing a patient to a department (for example Dental) keeps that
+    patient for that department's clinicians; an unassigned doctor only picks up
+    the patients nobody routed anywhere.
+    """
+    await _register_clinician(None)
+    routed_elsewhere = await _encounter(
+        client, await _patient(client), department_id=str(uuid.uuid4())
+    )
+    unrouted = await _encounter(client, await _patient(client))
+
+    response = await client.get("/api/v1/encounters/worklist?scope=mine")
+
+    assert response.status_code == 200
+    ids = {i["id"] for i in response.json()["items"]}
+    assert unrouted["id"] in ids
+    assert routed_elsewhere["id"] not in ids
 
 
 @pytest.mark.asyncio

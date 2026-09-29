@@ -38,7 +38,7 @@ const LicenseContext = createContext<LicenseContextValue>({
 });
 
 const TIER_MODULES: Record<SubscriptionTier, string[]> = {
-  community: ["patients", "encounters", "opd", "vitals", "billing"],
+  community: ["patients", "encounters", "opd", "vitals", "billing", "knowledge"],
   professional: [
     "patients",
     "encounters",
@@ -60,6 +60,7 @@ const TIER_MODULES: Record<SubscriptionTier, string[]> = {
     "finance",
     "hr",
     "reports",
+    "knowledge",
   ],
   enterprise: [
     "patients",
@@ -92,6 +93,7 @@ const TIER_MODULES: Record<SubscriptionTier, string[]> = {
     "fhir_api",
     "mpesa_billing",
     "api_access",
+    "knowledge",
   ],
   government: [
     "patients",
@@ -128,6 +130,7 @@ const TIER_MODULES: Record<SubscriptionTier, string[]> = {
     "county_dashboard",
     "aggregate_reporting",
     "facility_comparison",
+    "knowledge",
   ],
 };
 

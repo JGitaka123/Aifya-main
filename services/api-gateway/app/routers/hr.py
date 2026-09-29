@@ -6,8 +6,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth import CurrentUser, get_current_user, require_roles
 from app.auth.license_check import require_module
+from app.auth.permissions import assignable_roles, is_assignable_role
 from app.database import get_db
+from app.models.hr import StaffProfile
 from app.schemas.hr import (
+    AssignableRoleListResponse,
     AttendanceClockIn,
     AttendanceClockOut,
     AttendanceListResponse,
@@ -22,13 +25,50 @@ from app.schemas.hr import (
     ShiftAssignmentResponse,
     ShiftCreate,
     ShiftResponse,
+    StaffAccessResponse,
+    StaffActiveUpdate,
+    StaffDirectoryItem,
     StaffDirectoryResponse,
+    StaffPasswordUpdate,
     StaffProfileCreate,
     StaffProfileResponse,
+    StaffRoleUpdate,
 )
 from app.services.hr_service import HRService
+from app.services.staff_access import StaffAccessError
 
 router = APIRouter(dependencies=[Depends(require_module("hr"))])
+
+
+async def _profile_with_live_balances(
+    service: HRService,
+    profile: StaffProfile,
+    staff_id: uuid.UUID,
+    facility_id: uuid.UUID,
+) -> StaffProfileResponse:
+    """Staff profile with Leave-tab leave reflected in the balance cards.
+
+    @param service: HR service bound to the request session
+    @param profile: Persisted staff profile
+    @param staff_id: Staff UUID
+    @param facility_id: Facility UUID
+    @returns Profile response with payroll-approved days deducted
+    """
+    response = StaffProfileResponse.model_validate(profile)
+    taken = await service.payroll_leave_days_by_type(staff_id, facility_id)
+    response.annual_leave_balance = max(
+        0, profile.annual_leave_balance - taken.get("annual", 0)
+    )
+    response.sick_leave_balance = max(
+        0, profile.sick_leave_balance - taken.get("sick", 0)
+    )
+    response.maternity_leave_balance = max(
+        0, profile.maternity_leave_balance - taken.get("maternity", 0)
+    )
+    response.paternity_leave_balance = max(
+        0, profile.paternity_leave_balance - taken.get("paternity", 0)
+    )
+    return response
 
 
 # ── Summary ──────────────────────────────────────────────────────────────────
@@ -58,6 +98,9 @@ async def get_staff_directory(
     role: str | None = Query(None, description="Filter by role"),
     department_id: uuid.UUID | None = Query(None, description="Filter by department"),
     search: str | None = Query(None, description="Search by name or employee number"),
+    include_inactive: bool = Query(
+        False, description="Include deactivated staff (admin screens)"
+    ),
     db: AsyncSession = Depends(get_db),
     current_user: CurrentUser = Depends(get_current_user),
 ) -> StaffDirectoryResponse:
@@ -77,8 +120,157 @@ async def get_staff_directory(
         role=role,
         department_id=department_id,
         search=search,
+        active_only=not include_inactive,
     )
     return StaffDirectoryResponse(items=items, total=len(items))
+
+
+@router.patch("/staff/{staff_id}/active", response_model=StaffDirectoryItem)
+async def set_staff_active(
+    staff_id: uuid.UUID,
+    data: StaffActiveUpdate,
+    db: AsyncSession = Depends(get_db),
+    current_user: CurrentUser = Depends(
+        require_roles("admin", "facility_admin", "hr_admin")
+    ),
+) -> StaffDirectoryItem:
+    """
+    Activate or deactivate a staff member.
+
+    The role says what someone may open; this says whether they may sign in at
+    all. Deactivating takes the login away with it, so an employee who leaves
+    cannot keep using a session they already had.
+
+    @param staff_id: Staff UUID
+    @param data: Desired active state
+    @param db: Database session
+    @param current_user: Authenticated administrator
+    @returns The updated directory entry
+    """
+    service = HRService(db)
+    item = await service.set_staff_active(
+        facility_id=current_user.facility_id,
+        staff_id=staff_id,
+        is_active=data.is_active,
+    )
+    if item is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Staff member not found"
+        )
+    return item
+
+
+@router.get("/roles", response_model=AssignableRoleListResponse)
+async def list_assignable_roles(
+    current_user: CurrentUser = Depends(
+        require_roles("admin", "facility_admin", "hr_admin")
+    ),
+) -> AssignableRoleListResponse:
+    """
+    List the roles HR may assign when adding or editing a staff member.
+
+    This is the picker's source of truth. Because it is served from the same
+    catalogue the write endpoints validate against, the interface cannot offer
+    a role the API would then refuse, and no screen can invent one.
+
+    @param current_user: Authenticated administrator
+    @returns Assignable roles with the access each one carries
+    """
+    items = assignable_roles()
+    return AssignableRoleListResponse(items=items, total=len(items))
+
+
+@router.patch("/staff/{staff_id}/role", response_model=StaffDirectoryItem)
+async def set_staff_role(
+    staff_id: uuid.UUID,
+    data: StaffRoleUpdate,
+    db: AsyncSession = Depends(get_db),
+    current_user: CurrentUser = Depends(
+        require_roles("admin", "facility_admin", "hr_admin")
+    ),
+) -> StaffDirectoryItem:
+    """
+    Change which role a staff member holds.
+
+    The new role takes effect on the employee's next request: /auth/me resolves
+    permissions from the staff record rather than from the token, so their tabs
+    change at the next page load instead of when the token expires.
+
+    @param staff_id: Staff UUID
+    @param data: The role to assign
+    @param db: Database session
+    @param current_user: Authenticated administrator
+    @returns The updated directory entry
+    @raises HTTPException 422: When the role is not one HR may assign
+    """
+    if not is_assignable_role(data.role):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=(
+                "That is not a role HR can assign. Choose one from "
+                "GET /hr/roles."
+            ),
+        )
+    service = HRService(db)
+    item = await service.set_staff_role(
+        facility_id=current_user.facility_id,
+        staff_id=staff_id,
+        role=data.role,
+    )
+    if item is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Staff member not found"
+        )
+    return item
+
+
+@router.post("/staff/{staff_id}/password", response_model=StaffAccessResponse)
+async def set_staff_password(
+    staff_id: uuid.UUID,
+    data: StaffPasswordUpdate,
+    db: AsyncSession = Depends(get_db),
+    current_user: CurrentUser = Depends(
+        require_roles("admin", "facility_admin", "hr_admin")
+    ),
+) -> StaffAccessResponse:
+    """
+    Set or reset a staff member's sign-in password.
+
+    With no email delivery in internal-auth mode, HR hands the password over
+    in person; this is how a new employee gets their first one and how a
+    forgotten one is replaced.
+
+    @param staff_id: Staff UUID
+    @param data: The new password
+    @param db: Database session
+    @param current_user: Authenticated administrator
+    @returns Confirmation naming the staff member
+    @raises HTTPException 404: When the staff member is not at this facility
+    @raises HTTPException 422: When the password is rejected
+    """
+    service = HRService(db)
+    try:
+        staff = await service.set_staff_password(
+            facility_id=current_user.facility_id,
+            staff_id=staff_id,
+            password=data.password,
+        )
+    except StaffAccessError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)
+        ) from exc
+    if staff is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Staff member not found"
+        )
+    return StaffAccessResponse(
+        staff_id=staff.id,
+        role=staff.role,
+        has_login=True,
+        message=(
+            f"Password updated for {staff.first_name} {staff.last_name}."
+        ),
+    )
 
 
 # ── Staff Profiles ───────────────────────────────────────────────────────────
@@ -110,7 +302,9 @@ async def get_staff_profile(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Staff profile not found",
         )
-    return StaffProfileResponse.model_validate(profile)
+    return await _profile_with_live_balances(
+        service, profile, staff_id, current_user.facility_id
+    )
 
 
 @router.put("/staff/{staff_id}/profile", response_model=StaffProfileResponse)
@@ -138,7 +332,9 @@ async def upsert_staff_profile(
         facility_id=current_user.facility_id,
         updated_by=current_user.user_id,
     )
-    return StaffProfileResponse.model_validate(profile)
+    return await _profile_with_live_balances(
+        service, profile, staff_id, current_user.facility_id
+    )
 
 
 # ── Shifts ───────────────────────────────────────────────────────────────────

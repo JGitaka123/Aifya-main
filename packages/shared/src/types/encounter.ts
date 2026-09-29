@@ -11,15 +11,26 @@ export interface Encounter {
   queue_number: number | null;
   triage_category: TriageCategory | null;
   priority: number;
+  /** Set the moment the nurse records the visit's first vitals. */
+  triaged_at: string | null;
   status: EncounterStatus;
   chief_complaint: string | null;
   disposition: string | null;
+  /** The department's closing note, set when the visit is completed. */
+  outcome: string | null;
+  /** When that closing note was written. */
+  completed_at: string | null;
   billing_status: string;
   trial_participant_id: string | null;
   created_at: string;
   updated_at: string;
   patient_name: string | null;
   patient_mrn: string | null;
+  /** Resolved department / clinician labels, when the endpoint supplies them. */
+  department_name?: string | null;
+  attending_doctor_name?: string | null;
+  /** The nurse who did the OPD testing, when the endpoint supplies it. */
+  nurse_name?: string | null;
 }
 
 /** Who the signed-in clinician is, for the workspace header. */
@@ -47,6 +58,15 @@ export interface ClinicalWorklistCounts {
 export interface ClinicalWorklistItem extends Encounter {
   department_name: string | null;
   attending_doctor_name: string | null;
+  /** Set when this encounter is an emergency visit. */
+  emergency_visit_id: string | null;
+  emergency_visit_number: string | null;
+  emergency_status: string | null;
+  emergency_triage_color: string | null;
+  /** Unit that handed this patient over, when another department routed them. */
+  source_department_name: string | null;
+  /** When that hand-over was recorded. */
+  referred_at: string | null;
 }
 
 /** A clinician's workspace: who they are, and whose care they owe today. */
@@ -104,6 +124,8 @@ export interface EncounterUpdate {
   priority?: number;
   disposition?: string | null;
   discharge_summary?: string | null;
+  /** Required by the API when status is set to "completed". */
+  outcome?: string | null;
 }
 
 /** OPD queue response. */
@@ -142,6 +164,12 @@ export interface VitalSign {
   is_critical: boolean;
   critical_alerts: string | null;
   created_at: string;
+  /** Numbered report the nurse issues after triage. */
+  report_number: string | null;
+  /** One-line digest shown on the report and in the patient history. */
+  summary: string | null;
+  /** Print/download link for the report PDF. */
+  report_url: string | null;
 }
 
 /** Payload for recording vital signs. */
@@ -360,6 +388,17 @@ export interface ConsultationPaymentResult {
   receipt_url: string;
 }
 
+/** Today's patient load for one department. */
+export interface DepartmentWorkload {
+  department_id: string;
+  code: string;
+  name: string;
+  waiting: number;
+  in_consultation: number;
+  completed: number;
+  total: number;
+}
+
 /** Department option for front-desk routing. */
 export interface DepartmentOption {
   id: string;
@@ -367,4 +406,95 @@ export interface DepartmentOption {
   name: string;
   department_type: string;
   is_active: boolean;
+  /** Active staff assigned to the unit; 0 means nobody is on duty there. */
+  staff_count: number;
+}
+
+/** How urgent a hand-off from the consultation room is. */
+export type RouteUrgency = "emergency" | "urgent" | "routine";
+
+/** A clinician directing a patient to another unit. */
+export interface EncounterRouteRequest {
+  receiving_department_id: string;
+  /** Optional named clinician in the destination unit. */
+  receiving_doctor_id?: string | null;
+  urgency: RouteUrgency;
+  reason: string;
+  notes?: string | null;
+}
+
+/** The re-queued encounter plus the referral that records the hand-off. */
+export interface EncounterRouteResult {
+  encounter: Encounter;
+  referral_id: string;
+  referral_number: string;
+  receiving_department_id: string;
+  receiving_department_name: string | null;
+}
+
+/** One internal routing on an encounter's trail. */
+export interface EncounterRoute {
+  id: string;
+  referral_number: string;
+  urgency: RouteUrgency;
+  reason: string;
+  notes: string | null;
+  status: string;
+  referral_date: string;
+  referring_department_id: string | null;
+  referring_department_name: string | null;
+  receiving_department_id: string | null;
+  receiving_department_name: string | null;
+  referring_doctor_id: string | null;
+  receiving_doctor_id: string | null;
+}
+
+/** Result interpretation for a test done in the room. */
+export type PointOfCareInterpretation =
+  | "normal"
+  | "abnormal"
+  | "positive"
+  | "negative"
+  | "reactive"
+  | "non_reactive"
+  | "inconclusive";
+
+/** Grouping for a test done in the room. */
+export type PointOfCareCategory =
+  | "screening"
+  | "rapid_diagnostic"
+  | "urinalysis"
+  | "other";
+
+/** A general test performed and resulted in the consultation room. */
+export interface PointOfCareTest {
+  id: string;
+  encounter_id: string;
+  patient_id: string;
+  performed_by: string;
+  performed_at: string;
+  test_code: string;
+  test_name: string;
+  category: PointOfCareCategory;
+  specimen_type: string | null;
+  result_value: string | null;
+  result_numeric: number | null;
+  result_unit: string | null;
+  interpretation: PointOfCareInterpretation | null;
+  is_abnormal: boolean;
+  notes: string | null;
+  created_at: string;
+}
+
+/** Payload for recording a test done in the room. */
+export interface PointOfCareTestCreate {
+  test_code: string;
+  test_name: string;
+  category?: PointOfCareCategory;
+  specimen_type?: string | null;
+  result_value?: string | null;
+  result_numeric?: number | null;
+  result_unit?: string | null;
+  interpretation?: PointOfCareInterpretation | null;
+  notes?: string | null;
 }

@@ -12,6 +12,7 @@ import {
 } from "lucide-react";
 import { Link } from "@/i18n/routing";
 import { ScheduledAppointments } from "@/components/appointments/ScheduledAppointments";
+import { ServiceChargeBadge } from "@/components/billing/ServiceChargeBadge";
 import { useRadiologySummary, useImagingWorklist } from "@/hooks/useRadiology";
 import { formatDateTime } from "@/lib/utils";
 import { cn } from "@/lib/utils";
@@ -53,6 +54,7 @@ const STATUS_STYLES: Record<string, string> = {
 export default function RadiologyWorklistPage() {
   const t = useTranslations("radiology");
   const tc = useTranslations("common");
+  const tsc = useTranslations("serviceCharge");
   const [statusFilter, setStatusFilter] = useState<string>("");
   const [modalityFilter, setModalityFilter] = useState<string>("");
 
@@ -218,6 +220,20 @@ export default function RadiologyWorklistPage() {
                   </div>
                 </div>
 
+                {/* Who ordered it, and the clinician's instruction */}
+                {(item.ordered_by_name || item.clinical_indication) && (
+                  <p className="mt-1 truncate text-xs text-muted-foreground">
+                    {item.ordered_by_name
+                      ? tsc("orderedBy") + ": " + item.ordered_by_name
+                      : ""}
+                    {item.ordered_by_name && item.clinical_indication
+                      ? " \u2014 "
+                      : ""}
+                    {item.clinical_indication
+                      ? tsc("clinicalInfo") + ": " + item.clinical_indication
+                      : ""}
+                  </p>
+                )}
                 {/* Result status */}
                 {item.has_result && item.result_status && (
                   <div className="hidden flex-shrink-0 text-center sm:block">
@@ -227,6 +243,14 @@ export default function RadiologyWorklistPage() {
                     </div>
                   </div>
                 )}
+
+                {/* Whether this specific request has been paid for */}
+                <ServiceChargeBadge
+                  status={item.charge_status}
+                  totalCents={item.charge_total_cents}
+                  balanceCents={item.charge_balance_cents}
+                  className="flex-shrink-0"
+                />
 
                 {/* Priority badge */}
                 <span

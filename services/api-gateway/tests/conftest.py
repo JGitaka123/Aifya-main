@@ -116,6 +116,9 @@ _schema_ready = False
 FACILITY_ID = uuid.UUID("00000000-0000-0000-0000-000000000001")
 USER_ID = uuid.UUID("00000000-0000-0000-0000-000000000002")
 DB_SESSION_TEST_MODULES = {
+    # Needs the schema for the role_permissions overrides and the endpoint
+    # gates, not only for HTTP tests.
+    "test_permissions.py",
     "test_finance_engine.py",
     "test_finance_reports.py",
     "test_finance_backfill.py",
@@ -125,6 +128,9 @@ DB_SESSION_TEST_MODULES = {
     "test_theatre_seed.py",
     "test_inventory_guard.py",
     "test_service_billing.py",
+    # Seeds encounters and admissions directly and reads them back through the
+    # usage services, so it needs the schema and a clean slate per test.
+    "test_usage_billing.py",
 }
 
 

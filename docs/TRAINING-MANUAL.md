@@ -104,7 +104,7 @@ Aifya is an AI-native Hospital Management Information System (HMIS) purpose-buil
     +---------v---------+     +-------------v-----------+
     |   API Gateway     |     |    AI Service           |
     |   (FastAPI)       |     |    (LLM Orchestration)  |
-    |   Port 8000       |     |    Port 8025            |
+    |   Port 8000       |     |    Port 8010            |
     +---------+---------+     +-------------+-----------+
               |                             |
     +---------v---------+     +-------------v-----------+
@@ -192,7 +192,7 @@ make dev
 
 The sidebar provides access to all modules:
 
-- **Top section:** Dashboard, Patients, Registration, Clinical
+- **Top section:** Dashboard, Patients, Registration, Consultation Room, Clinical
 - **Clinical:** OPD, IPD, Emergency
 - **Support Services:** Pharmacy, Laboratory, Radiology, Theatre, Dental, MCH
 - **Finance:** Billing, Insurance, Inventory
@@ -201,6 +201,8 @@ The sidebar provides access to all modules:
 - **System:** Settings
 
 Modules you don't have access to (based on your license tier) appear with a lock icon and link to the upgrade page.
+
+**Consultation Room** is the doctor's own desk: how many patients are assessed and waiting, a **Call Next** button that pulls the next one in, and the list of patients currently in the room. It sits above **Clinical** because it answers the narrower question a clinician asks between patients, while Clinical shows the whole day.
 
 **Clinical** is not another department module. It shows each clinician only the patients routed to them or their department today, so a dentist works from the dental queue without being handed the whole hospital. Reception picks the department when a patient is registered or triaged, and the patient then appears on the right clinician's list.
 
@@ -367,18 +369,43 @@ The OPD module manages the outpatient visit workflow from arrival to discharge.
 #### Clinical Workflow
 
 ```
-Patient Arrival → Triage → Queue → Consultation → Prescription/Lab → Billing → Departure
+Arrival → Registration → OPD Assessment (vitals) → Consultation Queue → Doctor
+      → Prescription / Lab / Referral / Admission → Billing → Departure
 ```
+
+OPD and the consultation room are two desks of one journey, and the system keeps
+them apart on purpose. **OPD answers “what is this patient's initial clinical
+status?”** — the nurse takes the observations. **The consultation room answers
+“what is the problem, what is the assessment, and what happens next?”** — the
+doctor diagnoses and routes. A doctor cannot call in a patient whose
+observations are still outstanding, so the notes they are about to read always
+exist by the time the patient walks in.
 
 1. **Triage (Nurse)**
    - Record vitals: BP, Heart Rate, Temperature, Respiratory Rate, SpO2, Weight, Height
    - Assign triage category: Emergency (Red), Priority (Orange), Urgent (Yellow), Standard (Green), Non-urgent (Blue)
    - CDS system automatically evaluates vitals and flags critical values
+   - Every recording issues a numbered **vitals report** (`VR-YYYYMMDD-0001`).
+     The report is kept in the patient’s history and can be printed for the
+     patient from the OPD Testing tab; critical findings are printed on it as well
+     as shown on screen
+   - The first recording also stamps the visit itself (`triaged_at` plus the
+     nurse who took it), so the OPD board can tell a triaged patient from one
+     still waiting for triage without opening the OPD Testing tab
+   - That stamp is the hand-off: recording vitals moves the patient off the
+     **Awaiting OPD** list and onto the consultation queue. A visit that needs
+     no measurements can be handed over with **Complete assessment** instead,
+     so a patient is never stuck in a stage nobody can clear
 
 2. **Queue Management**
    - Patients ordered by triage severity, then arrival time
    - Real-time queue display shows wait times
-   - Doctor selects next patient from queue
+   - The OPD board switches between **All patients**, **Awaiting OPD** (still to
+     be assessed) and **Ready for doctor** (assessed and waiting), so the nurse
+     and the doctor each see their own list
+   - **Call Next Patient** takes the next assessed patient; if everyone waiting
+     is still with OPD the system says so and how many, instead of silently
+     doing nothing
 
 3. **Consultation (Doctor)**
    - Review patient history and vitals
@@ -386,7 +413,10 @@ Patient Arrival → Triage → Queue → Consultation → Prescription/Lab → B
    - Enter diagnoses with ICD-10 codes
    - Create prescriptions (CDS checks drug interactions in real-time)
    - Order lab tests or imaging
-   - Refer to specialist or admit to IPD if needed
+   - Route the patient to the right practitioner: the general testing already
+     happened in OPD, so the doctor records the assessment and sends the patient
+     on to Dental, Physiotherapy, Laboratory, Pharmacy or another configured unit
+   - Request admission — this raises an **admission order**, it does not admit the patient
 
 4. **Follow-up Actions**
    - Pharmacy receives prescription for dispensing
@@ -408,6 +438,42 @@ Alert severity levels:
 - **Moderate (Amber):** Clinical judgement required
 - **Low/Info (Blue):** Informational, can be acknowledged
 
+#### Consultation Room (Encounter Tabs)
+
+The Consultation Room page at `/consultation` is the doctor's live view of the
+room: patients currently in it, how many are assessed and waiting, and the
+**Call Next** button. Opening a patient from there, from the OPD queue or from
+the Clinical workspace lands on the consultation room for that visit at
+`/opd/[encounterId]`, which carries the whole visit as
+tabs: **OPD Testing, Consultation Room, Diagnoses, Prescriptions, Lab Orders,
+Imaging** and **Billing**.
+
+- **OPD Testing** — the nurse’s desk, and the first clinical stop after
+  registration. This is where the visit is prepared for the doctor: blood
+  pressure, pulse, temperature, SpO2, height, weight, respiratory rate, pain
+  score and blood glucose are saved as the visit’s vitals, and bedside
+  screening tests — HIV, malaria RDT, urinalysis, pregnancy and HBsAg — are
+  recorded on the encounter itself. Nothing here diagnoses the patient. Every
+  set of observations is issued as a numbered vitals report, kept in the
+  patient’s history and printable for the patient from the tab (see 6.2,
+  Triage). Recording the observations is what releases the patient to the
+  doctor.
+- **Consultation Room** — the doctor’s desk, and the place the patient is
+  directed to the right practitioner. The doctor reads the OPD testing, records
+  the history and examination, and then routes the patient to the unit that
+  should see them next (Dental, Physiotherapy, Laboratory, Pharmacy, and any
+  other configured department), optionally naming a clinician and an urgency.
+  This records an internal referral *and* re-queues the encounter in the
+  destination unit, so the patient appears in that unit’s queue and clinical
+  worklist. The tab keeps the routing history: who sent the patient where, why,
+  and when.
+- **Book the next appointment** — under the routing history, the doctor arranges
+  the patient's next visit: pick the doctor and a date, choose one of that
+  doctor's free slots, set the type and priority, and book. The slot list comes
+  from the receiving doctor's weekly availability, so a doctor with no session
+  set up offers no slots and the panel says so. The booking then appears on
+  `/appointments`.
+
 ---
 
 ### 6.3 IPD (Inpatient Department)
@@ -423,15 +489,57 @@ Manages inpatient admissions, ward assignments, nursing care, and discharges.
 - **Nursing Notes:** Structured documentation by type (assessment, progress, medication, procedure, observation)
 - **Discharge Planning:** AI-assisted discharge summary generation (Enterprise tier)
 
+#### Admission Orders (the OPD → IPD bridge)
+
+An admission **order** is not an admission. The doctor asks; the admission desk
+decides; only a ward and bed assignment creates an inpatient. This keeps the
+clinical decision auditable and reversible, and means a request can be refused
+or cancelled without ever putting a patient on the ward board.
+
+```text
+CONSULTATION
+     │ Doctor decides the patient needs inpatient care
+     ▼
+ADMISSION ORDER  (reason, diagnosis, type, priority, ward, doctor, notes)
+     │ status = pending
+     ▼
+ADMISSION QUEUE  →  IPD / admission desk
+     │
+     ├── accepted  (or bed_pending when no bed is free yet)
+     └── declined / cancelled
+     ▼
+WARD + BED ASSIGNMENT
+     ▼
+IPD ENCOUNTER / ADMISSION  →  ward board
+```
+
 #### Admission Workflow
-1. Doctor orders admission from OPD/Emergency encounter
-2. Nurse selects available bed from ward board
-3. System creates admission record linked to encounter
-4. Patient appears on ward census
+1. Doctor records the consultation, then clicks **Request Admission**
+   (not "admit to IPD" — nobody is an inpatient yet)
+2. The request appears in the **Admission queue** on the IPD page
+3. The admission desk **accepts** it, or marks **bed pending** if the ward is
+   full, or **declines** it with a reason the doctor can read
+4. Once accepted, the desk assigns a **ward and bed**, which creates the
+   admission record and puts the patient on the ward census
 5. Nursing care documented throughout stay
 6. Doctor orders discharge when ready
 7. Discharge summary generated (AI-assisted if Enterprise)
 8. Final billing calculated
+
+Order statuses: `pending` → `accepted` | `bed_pending` → `admitted`, or
+`declined` / `cancelled` instead of being fulfilled. Only `admitted` orders
+have an admission number.
+
+#### API
+| Method | Path | Purpose |
+|--------|------|---------|
+| GET | `/ipd/admission-orders` | Admission queue (`?status=open`) |
+| POST | `/ipd/admission-orders` | Raise an admission order |
+| GET | `/ipd/admission-orders/{id}` | Single order |
+| POST | `/ipd/admission-orders/{id}/accept` | Accept (or `bed_pending`) |
+| POST | `/ipd/admission-orders/{id}/decline` | Decline with a reason |
+| POST | `/ipd/admission-orders/{id}/cancel` | Withdraw the request |
+| POST | `/ipd/admission-orders/{id}/admit` | Assign ward + bed → creates the admission |
 
 ---
 
@@ -650,12 +758,24 @@ General inventory management for non-pharmaceutical supplies.
 Appointment scheduling with doctor availability management.
 
 #### Features
-- Doctor schedule configuration (days, hours, consultation duration)
-- Available slot generation
-- Appointment booking with priority levels
-- Check-in workflow
+- **Doctor availability** on this page, for administrators: add a doctor's
+  weekly clinic session — day, start and end time, slot length and room. Every
+  bookable slot in the system is generated from these sessions, so a doctor with
+  no session is unbookable. A session is switched off rather than deleted.
+- Available slot generation, with doctors on approved leave skipped
+- Appointment booking with priority levels, from this page or from the
+  consultation room
+- Check-in workflow; every booking carries a number (`APT-YYYYMMDD-0001`)
 - No-show tracking with AI prediction (Enterprise)
 - Appointment reminders via SMS/WhatsApp
+
+#### Booking from the consultation room
+
+A clinician who wants the patient back does not have to leave the visit: the
+**Consultation Room** tab of the encounter carries a **Book the next
+appointment** panel. Pick the doctor and a date, choose a free slot from that
+doctor's availability, set the type and priority, and book. The patient is
+already known from the visit, so no lookup is needed.
 
 ---
 
@@ -687,6 +807,36 @@ Human resources management for hospital staff.
 - Leave management (Annual, Sick, Maternity, Paternity, Study, Compassionate, Unpaid)
 - Attendance tracking (clock-in/clock-out)
 - Department-level staffing overview
+
+#### Registering a specialist also captures their clinic schedule
+
+HR -> Employees -> **Add Employee** mirrors the person into the clinical staff
+directory, and the job title decides the role: a title such as Cardiologist,
+Consultant or Medical Officer becomes a `doctor`, while nurse and midwife
+titles stay nursing roles.
+
+**Not every doctor needs a schedule written down.** A general doctor (Medical
+Officer, General Practitioner) works the facility's general clinic, so the form
+leaves them alone. A **specialist** - a named specialty such as Cardiologist,
+Paediatrician, Obstetrician or Consultant Surgeon - runs a clinic of their own,
+so their job title reveals a **Clinic schedule** section. Add the weekly
+sessions they work - day, start, end, slot length and room - and they are saved
+against the doctor as soon as the employee is created. This matters because
+**appointments can only be booked into a doctor's scheduled sessions**.
+
+The job title is what decides this: word the title with the specialty, for
+example "Consultant Cardiologist" rather than "Consultant", so the form knows a
+schedule is needed.
+
+A newly registered doctor is given a generic Monday-Friday 08:00-17:00
+fallback so nobody is unreachable on their first day. Writing the real clinic
+hours switches that fallback off, so the schedule appointments are offered in
+is the one the facility actually agreed with the doctor.
+
+If the schedule could not be attached, the page says so after saving. Sessions
+can also be added or switched off later from Appointments ->
+**Doctor availability**, and a clinician can book the patient's next visit from
+the Consultation Room tab.
 
 ---
 
@@ -1156,7 +1306,7 @@ VLLM_DEEPSEEK_R1_URL=http://ai-gpu:8001/v1
 VLLM_QWEN_72B_URL=http://ai-gpu:8002/v1
 VLLM_DISTILL_32B_URL=http://ai-gpu:8003/v1
 VLLM_MEDGEMMA_27B_URL=http://ai-gpu:8004/v1
-AI_SERVICE_URL=http://ai-service:8025
+AI_SERVICE_URL=http://ai-service:8010
 ```
 
 #### External Services

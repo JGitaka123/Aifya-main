@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import { useTranslations } from "next-intl";
-import { PencilLine, Printer, Wallet } from "lucide-react";
+import { Loader2, PencilLine, Printer, Wallet } from "lucide-react";
 import { useAuth } from "@/components/providers/AuthProvider";
 import { MpesaPaymentPanel } from "@/components/billing/MpesaPaymentPanel";
 import {
@@ -53,7 +53,12 @@ export function ConsultationFeePanel({
   const t = useTranslations("billing");
   const tc = useTranslations("common");
   const { user } = useAuth();
-  const { data: quote, refetch } = useConsultationFee(encounterId);
+  const {
+    data: quote,
+    isLoading,
+    isError,
+    refetch,
+  } = useConsultationFee(encounterId);
   const collect = useCollectConsultationFee(encounterId);
   const updateFee = useUpdateConsultationFee(encounterId);
 
@@ -65,8 +70,26 @@ export function ConsultationFeePanel({
   const [feeInput, setFeeInput] = useState("");
   const [editingFee, setEditingFee] = useState(false);
 
+  // A fee that cannot be read must say so. Returning nothing made the whole
+  // reception fee step look as if it had been removed whenever the request was
+  // still in flight, or whenever the API could not be reached.
   if (!quote) {
-    return null;
+    return (
+      <div className="rounded-lg border border-border bg-card px-3 py-3 text-sm text-muted-foreground shadow-[var(--shadow-card)]">
+        {isLoading ? (
+          <span className="flex items-center gap-2">
+            <Loader2 className="h-4 w-4 animate-spin" />
+            {t("consultationFee.loading")}
+          </span>
+        ) : (
+          <span className="text-amber-700 dark:text-amber-300">
+            {isError
+              ? t("consultationFee.loadFailed")
+              : t("consultationFee.notConfigured")}
+          </span>
+        )}
+      </div>
+    );
   }
 
   // A quote with no invoice has nothing billed yet, so it is not settled, even

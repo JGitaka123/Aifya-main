@@ -3,7 +3,7 @@
 import { useTranslations } from "next-intl";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
-import { useRouter } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import {
   patientCreateSchema,
   type PatientCreateFormData,
@@ -11,12 +11,16 @@ import {
 import {
   useRegisterPatient,
   useCheckDuplicates,
+  usePatient,
   type DuplicateMatch,
 } from "@/hooks/usePatients";
 import { HelpTooltip } from "@/components/help/HelpTooltip";
+import { PatientLookup } from "@/components/patients/PatientLookup";
+import { ReceptionVisitPanel } from "@/components/billing/ReceptionVisitPanel";
 import { Link } from "@/i18n/routing";
 import React from "react";
 import { cn } from "@/lib/utils";
+import type { Patient } from "@aifya/shared";
 
 /**
  * Provider names stored when the plan is picked from the registration list.
@@ -40,6 +44,21 @@ export default function PatientRegistrationPage() {
   const registerMutation = useRegisterPatient();
   const checkDuplicates = useCheckDuplicates();
   const [newPatient, setNewPatient] = React.useState<{id: string, name: string} | null>(null);
+  // A returning patient is found, not re-registered - the same open-visit +
+  // consultation-fee step runs for them without creating a second record.
+  const [existingPatient, setExistingPatient] = React.useState<Patient | null>(null);
+  // A link that already knows the patient (a record page, a duplicate warning)
+  // hands the id over, so the desk lands on the fee step instead of a blank
+  // search.
+  const searchParams = useSearchParams();
+  const prefilledPatientId = searchParams.get("patient_id") ?? "";
+  const { data: prefilledPatient } = usePatient(prefilledPatientId);
+  const prefilledApplied = React.useRef(false);
+  React.useEffect(() => {
+    if (prefilledApplied.current || !prefilledPatient) return;
+    prefilledApplied.current = true;
+    setExistingPatient((current) => current ?? prefilledPatient);
+  }, [prefilledPatient]);
   // D7: possible duplicates surfaced before a second record is created.
   const [duplicates, setDuplicates] = React.useState<DuplicateMatch[] | null>(null);
   const [pendingData, setPendingData] = React.useState<PatientCreateFormData | null>(null);
@@ -134,16 +153,34 @@ export default function PatientRegistrationPage() {
         </Link>
       </div>
 
+      {/* Returning patient: the desk finds the record instead of registering
+          again, then opens today's visit and takes the consultation fee. */}
+      <section className="mb-6 rounded-xl border border-border bg-card p-6 shadow-[var(--shadow-card)]">
+        <h2 className="text-sm font-semibold uppercase tracking-wide text-muted-foreground">
+          {t("returningPatientTitle")}
+        </h2>
+        <p className="mt-1 mb-4 text-sm text-muted-foreground">
+          {t("returningPatientHint")}
+        </p>
+        <PatientLookup value={existingPatient} onSelect={setExistingPatient} />
+      </section>
+
+      {existingPatient && (
+        <ReceptionVisitPanel
+          key={existingPatient.id}
+          patient={{
+            id: existingPatient.id,
+            name: `${existingPatient.first_name} ${existingPatient.last_name}`,
+          }}
+        />
+      )}
+
       {newPatient && (
         <div className="mb-6 rounded-xl border border-green-300 bg-green-50 p-5 dark:border-green-700 dark:bg-green-950">
           <p className="mb-3 font-semibold text-green-700 dark:text-green-300">
             ✅ {t("registrationSuccessNamed", { name: newPatient.name })}
           </p>
           <div className="flex flex-wrap gap-3">
-            <Link href={`/opd/new?patient_id=${newPatient.id}&patient_name=${encodeURIComponent(newPatient.name)}`}
-              className="inline-flex items-center gap-2 rounded-full bg-primary px-5 py-2 text-sm font-semibold text-primary-foreground shadow animate-pulse hover:animate-none hover:bg-primary/90 transition-all">
-              → {t("startOpdVisit")}
-            </Link>
             <Link href={`/patients/${newPatient.id}`}
               className="inline-flex items-center gap-2 rounded-lg border border-border px-4 py-2 text-sm font-medium text-foreground hover:bg-muted transition-colors">
               {t("viewPatientRecord")}
@@ -154,6 +191,10 @@ export default function PatientRegistrationPage() {
             </button>
           </div>
         </div>
+      )}
+
+      {newPatient && (
+        <ReceptionVisitPanel key={newPatient.id} patient={newPatient} />
       )}
 
       {/* D7: possible-duplicate prompt shown before a second record is created. */}
@@ -184,12 +225,28 @@ export default function PatientRegistrationPage() {
                       .join(", ")}
                   </span>
                 </div>
-                <a
-                  href={`/en/patients/${match.patient.id}`}
-                  className="rounded-lg border border-border px-3 py-1.5 text-xs font-medium text-foreground hover:bg-muted"
-                >
-                  {t("useExisting")}
-                </a>
+                <div className="flex flex-wrap gap-2">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      // The record already exists, so open the visit on it
+                      // instead of registering a second, duplicate patient.
+                      setExistingPatient(match.patient);
+                      setDuplicates(null);
+                      setPendingData(null);
+                      window.scrollTo({ top: 0, behavior: "smooth" });
+                    }}
+                    className="rounded-lg bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground hover:bg-primary/90"
+                  >
+                    {t("startOpdVisit")}
+                  </button>
+                  <Link
+                    href={`/patients/${match.patient.id}`}
+                    className="rounded-lg border border-border px-3 py-1.5 text-xs font-medium text-foreground hover:bg-muted"
+                  >
+                    {t("viewPatientRecord")}
+                  </Link>
+                </div>
               </li>
             ))}
           </ul>

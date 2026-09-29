@@ -39,6 +39,8 @@ class EncounterUpdate(BaseModel):
         pattern=r"^(discharged|admitted|referred|follow_up|deceased)$",
     )
     discharge_summary: str | None = None
+    # What the department actually did, required when the visit is completed.
+    outcome: str | None = Field(None, max_length=2000)
 
 
 class EncounterResponse(BaseModel):
@@ -55,9 +57,14 @@ class EncounterResponse(BaseModel):
     queue_number: int | None
     triage_category: str | None
     priority: int
+    triaged_at: datetime | None = None
     status: str
     chief_complaint: str | None
     disposition: str | None
+    # The closing note, and when it was written. Both stay null until the
+    # visit is completed.
+    outcome: str | None = None
+    completed_at: datetime | None = None
     billing_status: str
     trial_participant_id: uuid.UUID | None
     created_at: datetime
@@ -66,6 +73,9 @@ class EncounterResponse(BaseModel):
     # Joined fields for display
     patient_name: str | None = None
     patient_mrn: str | None = None
+    department_name: str | None = None
+    attending_doctor_name: str | None = None
+    nurse_name: str | None = None
 
     model_config = {"from_attributes": True}
 
@@ -137,6 +147,7 @@ class DepartmentOption(BaseModel):
     name: str
     department_type: str
     is_active: bool
+    staff_count: int = 0
 
     model_config = {"from_attributes": True}
 
@@ -166,6 +177,28 @@ class ClinicalWorklistItem(EncounterResponse):
 
     department_name: str | None = None
     attending_doctor_name: str | None = None
+    # Filled when this encounter is an emergency visit, so the clinician can
+    # see where the patient came from and find the emergency record.
+    emergency_visit_id: uuid.UUID | None = None
+    emergency_visit_number: str | None = None
+    emergency_status: str | None = None
+    emergency_triage_color: str | None = None
+    # Filled when another unit handed this patient over, so a receiving
+    # department can tell a referral from a walk-in without opening the record.
+    source_department_name: str | None = None
+    referred_at: datetime | None = None
+
+
+class DepartmentWorkload(BaseModel):
+    """Today's patient load for one department."""
+
+    department_id: uuid.UUID
+    code: str
+    name: str
+    waiting: int = 0
+    in_consultation: int = 0
+    completed: int = 0
+    total: int = 0
 
 
 class ClinicalWorklistResponse(BaseModel):
@@ -176,3 +209,41 @@ class ClinicalWorklistResponse(BaseModel):
     clinician: ClinicianProfile
     counts: ClinicalWorklistCounts
     items: list[ClinicalWorklistItem]
+
+
+class EncounterRouteRequest(BaseModel):
+    """A clinician directing a patient to another unit from the room."""
+
+    receiving_department_id: uuid.UUID
+    receiving_doctor_id: uuid.UUID | None = None
+    urgency: str = Field("routine", pattern=r"^(emergency|urgent|routine)$")
+    reason: str = Field(..., min_length=1, max_length=2000)
+    notes: str | None = Field(None, max_length=2000)
+
+
+class EncounterRouteResponse(BaseModel):
+    """The re-queued encounter plus the internal referral that records it."""
+
+    encounter: EncounterResponse
+    referral_id: uuid.UUID
+    referral_number: str
+    receiving_department_id: uuid.UUID
+    receiving_department_name: str | None = None
+
+
+class EncounterRouteItem(BaseModel):
+    """One internal routing on an encounter's trail."""
+
+    id: uuid.UUID
+    referral_number: str
+    urgency: str
+    reason: str
+    notes: str | None
+    status: str
+    referral_date: datetime
+    referring_department_id: uuid.UUID | None = None
+    referring_department_name: str | None = None
+    receiving_department_id: uuid.UUID | None = None
+    receiving_department_name: str | None = None
+    referring_doctor_id: uuid.UUID | None = None
+    receiving_doctor_id: uuid.UUID | None = None

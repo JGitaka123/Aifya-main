@@ -7,6 +7,8 @@ import { usePharmacyInventory } from "@/hooks/usePharmacy";
 
 interface DrugAutocompleteProps {
   onSelect: (drugName: string, genericName: string | null, isKeml: boolean, stock?: number, unit?: string, strength?: string) => void;
+  /** Notifies the parent when a chosen drug is cleared so the form resets with it. */
+  onClear?: () => void;
 }
 
 interface DrugOption {
@@ -27,7 +29,7 @@ interface DrugOption {
  * @param props - onSelect callback with drug info
  * @returns Drug autocomplete input
  */
-export function DrugAutocomplete({ onSelect }: DrugAutocompleteProps) {
+export function DrugAutocomplete({ onSelect, onClear }: DrugAutocompleteProps) {
   const t = useTranslations("prescription");
   const [query, setQuery] = useState("");
   const [isOpen, setIsOpen] = useState(false);
@@ -69,6 +71,23 @@ export function DrugAutocomplete({ onSelect }: DrugAutocompleteProps) {
     onSelect(drug.name, drug.generic, drug.isKeml, drug.stock, drug.unit, drug.strength ?? "");
   };
 
+  /**
+   * Accept a drug the pharmacy has not stocked yet.
+   *
+   * Prescribers must never be blocked by an empty inventory, so the typed
+   * name is used verbatim; the backend records any drug_name and bills it.
+   *
+   * @param name - Free-text drug name typed by the prescriber
+   */
+  const handleFreeText = (name: string) => {
+    const trimmed = name.trim();
+    if (trimmed.length < 2) return;
+    setSelectedDisplay(trimmed);
+    setQuery("");
+    setIsOpen(false);
+    onSelect(trimmed, null, false, undefined, undefined, "");
+  };
+
   return (
     <div ref={containerRef} className="relative">
       <label className="mb-1 block text-xs font-medium text-muted-foreground">
@@ -76,7 +95,7 @@ export function DrugAutocomplete({ onSelect }: DrugAutocompleteProps) {
       </label>
       {selectedDisplay ? (
         <div
-          onClick={() => { setSelectedDisplay(""); setIsOpen(true); }}
+          onClick={() => { setSelectedDisplay(""); setIsOpen(true); onClear?.(); }}
           className="flex cursor-pointer items-center gap-2 rounded-md border border-input bg-background px-2.5 py-1.5 text-sm text-foreground dark:border-border dark:bg-background"
         >
           <span>{selectedDisplay}</span>
@@ -88,6 +107,13 @@ export function DrugAutocomplete({ onSelect }: DrugAutocompleteProps) {
             type="text"
             value={query}
             onChange={(e) => { setQuery(e.target.value); setIsOpen(true); }}
+            onKeyDown={(e) => {
+              if (e.key !== "Enter") return;
+              e.preventDefault();
+              const first = filtered[0];
+              if (first) handleSelect(first);
+              else handleFreeText(query);
+            }}
             onFocus={() => query.length >= 2 && setIsOpen(true)}
             placeholder={t("drugSearch")}
             className="w-full rounded-md border border-input bg-background py-1.5 pl-8 pr-2.5 text-sm text-foreground dark:border-border dark:bg-background"
@@ -126,7 +152,14 @@ export function DrugAutocomplete({ onSelect }: DrugAutocompleteProps) {
 
       {isOpen && query.length >= 2 && filtered.length === 0 && !isFetching && (
         <div className="absolute z-50 mt-1 w-full rounded-md border border-border bg-card px-3 py-2 text-xs text-muted-foreground shadow-lg">
-          {t("notInInventory", { query })}
+          <p>{t("notInInventory", { query })}</p>
+          <button
+            type="button"
+            onClick={() => handleFreeText(query)}
+            className="mt-2 w-full rounded-md border border-primary px-2 py-1 text-xs font-medium text-primary hover:bg-primary/10"
+          >
+            {t("useTypedDrug", { query })}
+          </button>
         </div>
       )}
     </div>

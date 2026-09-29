@@ -18,6 +18,7 @@ class ReadmissionRisk(BaseModel):
     Readmission risk prediction for a single patient.
 
     @param patient_id: UUID of the patient
+    @param patient_name: Patient display name (None when the patient is unknown)
     @param risk_score: Probability of readmission within 30 days (0.0-1.0)
     @param risk_level: Categorical risk level derived from score
     @param contributing_factors: Human-readable factors driving the score
@@ -25,6 +26,9 @@ class ReadmissionRisk(BaseModel):
     """
 
     patient_id: uuid.UUID
+    patient_name: str | None = Field(
+        default=None, description="Patient display name"
+    )
     risk_score: float = Field(ge=0.0, le=1.0, description="Probability of readmission (0-1)")
     risk_level: str = Field(
         pattern=r"^(low|moderate|high)$",
@@ -47,7 +51,8 @@ class BedDemandForecast(BaseModel):
     @param date: Forecast date
     @param department: Department name or ID
     @param predicted_occupancy: Predicted occupancy percentage (0-100)
-    @param confidence_interval: Lower and upper bounds of the prediction
+    @param confidence_lower: Lower bound of the prediction (percentage)
+    @param confidence_upper: Upper bound of the prediction (percentage)
     @param current_occupancy: Current occupancy percentage
     @param recommended_actions: Suggested operational actions
     """
@@ -57,8 +62,11 @@ class BedDemandForecast(BaseModel):
     predicted_occupancy: float = Field(
         ge=0.0, le=100.0, description="Predicted bed occupancy percentage"
     )
-    confidence_interval: tuple[float, float] = Field(
-        description="Lower and upper bounds of prediction (percentage)"
+    confidence_lower: float = Field(
+        ge=0.0, le=100.0, description="Lower bound of prediction (percentage)"
+    )
+    confidence_upper: float = Field(
+        ge=0.0, le=100.0, description="Upper bound of prediction (percentage)"
     )
     current_occupancy: float = Field(
         ge=0.0, le=100.0, description="Current bed occupancy percentage"

@@ -186,3 +186,48 @@ export interface ReportsSummary {
   generated_today: number;
   generated_month: number;
 }
+
+/** One metered event type on the facility's monthly usage charge. */
+export interface UsageBillingLine {
+  /** Line key: reception_registrations | emergency_registrations | ipd_bed_days */
+  key: string;
+  label: string;
+  quantity: number;
+  rate_cents: number;
+  amount_cents: number;
+}
+
+/** What the facility owes Aifya for one billing month. */
+export interface UsageBillingReport {
+  facility_id: string;
+  /** Billing month as YYYY-MM */
+  month: string;
+  date_from: string;
+  date_to: string;
+  currency: string;
+  /** Charge per metered event, in the currency minor units (cents) */
+  rate_cents: number;
+  lines: UsageBillingLine[];
+  total_quantity: number;
+  total_cents: number;
+  due_date: string;
+  generated_at: string;
+}
+
+/** One month in the rolling usage-billing trend. */
+export interface UsageBillingMonth {
+  month: string;
+  reception_registrations: number;
+  emergency_registrations: number;
+  ipd_bed_days: number;
+  total_quantity: number;
+  total_cents: number;
+}
+
+/** Rolling monthly usage charges, oldest month first. */
+export interface UsageBillingTrend {
+  currency: string;
+  rate_cents: number;
+  months: UsageBillingMonth[];
+  total_cents: number;
+}

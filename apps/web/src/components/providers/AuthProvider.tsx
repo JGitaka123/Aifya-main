@@ -8,18 +8,11 @@ import {
   useCallback,
   type ReactNode,
 } from "react";
+import type { AuthUser } from "@aifya/shared";
 import {
   BETA_PUBLIC_ACCESS_ENABLED,
   getBetaUser,
 } from "@/lib/auth/beta";
-
-interface AuthUser {
-  id: string;
-  email: string;
-  name: string;
-  roles: string[];
-  facilityId: string;
-}
 
 interface AuthContextValue {
   user: AuthUser | null;
@@ -41,6 +34,9 @@ const AuthContext = createContext<AuthContextValue>({
  * Authentication provider backed by Aifya's own sign-in.
  * Tokens live in httpOnly cookies set by the BFF route handlers.
  * The client never sees a token, which prevents XSS token theft.
+ *
+ * The user object also carries the effective permission list, which is what
+ * lets the sidebar and the clinical workspace hide what the API would refuse.
  *
  * @param props.children - Child components
  * @returns Auth context provider

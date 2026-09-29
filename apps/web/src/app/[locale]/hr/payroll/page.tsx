@@ -81,9 +81,11 @@ export default function PayrollDashboardPage() {
 
   const trendData = useMemo(() => {
     if (!trend?.points) return [];
+    // Run totals come back in KES. Keep the series in KES for the axis and
+    // let the tooltip scale to cents for formatKES().
     return trend.points.map((p) => ({
       label: p.label,
-      gross: p.gross / 100,
+      gross: Number(p.gross),
     }));
   }, [trend]);
 
@@ -218,7 +220,12 @@ export default function PayrollDashboardPage() {
             <BarChart data={trendData}>
               <CartesianGrid strokeDasharray="3 3" stroke="currentColor" opacity={0.1} />
               <XAxis dataKey="label" stroke="currentColor" opacity={0.6} fontSize={12} />
-              <YAxis stroke="currentColor" opacity={0.6} fontSize={12} />
+              <YAxis
+                stroke="currentColor"
+                opacity={0.6}
+                fontSize={12}
+                tickFormatter={(v: number) => `${Math.round(v / 1000)}k`}
+              />
               <Tooltip
                 formatter={(v: number) => formatKES(v * 100)}
                 contentStyle={{

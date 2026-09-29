@@ -77,16 +77,22 @@ class ImagingWorklistItem(BaseModel):
     patient_name: str | None = None
     patient_mrn: str | None = None
     ordered_by: uuid.UUID
+    ordered_by_name: str | None = None
     modality: str
     body_part: str
     laterality: str | None
     study_description: str
     priority: str
     status: str
+    clinical_indication: str | None = None
     contrast_required: bool
     has_result: bool = False
     result_status: str | None = None
     is_critical: bool = False
+    charge_total_cents: int | None = None
+    charge_paid_cents: int | None = None
+    charge_balance_cents: int | None = None
+    charge_status: str = "not_charged"
     scheduled_at: datetime | None
     room: str | None
     created_at: datetime

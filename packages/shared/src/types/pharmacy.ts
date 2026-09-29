@@ -86,7 +86,14 @@ export interface PharmacyQueueItem {
   quantity: number | null;
   instructions: string | null;
   prescriber_id: string;
+  /** Display name of the clinician who wrote the prescription. */
+  prescriber_name: string | null;
   status: string;
+  charge_total_cents: number | null;
+  charge_paid_cents: number | null;
+  charge_balance_cents: number | null;
+  /** not_charged when the drug never reached the bill (free/uncatalogued). */
+  charge_status: "not_charged" | "paid" | "partial" | "unpaid";
   created_at: string;
 }
 

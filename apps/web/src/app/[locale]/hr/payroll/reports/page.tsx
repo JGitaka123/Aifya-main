@@ -28,15 +28,20 @@ import {
   usePAYESchedule,
   useNSSFSchedule,
   useSHIFSchedule,
+  useHousingLevySchedule,
   useHeadcountReport,
   useLeaveUtilisation,
   useCostTrend,
   useTurnover,
 } from "@/hooks/usePayroll";
+import { Link } from "@/i18n/routing";
 import { PageHeader } from "@/components/ui/PageHeader";
 import { TabGroup } from "@/components/ui/TabGroup";
 import { EmployeeSelect } from "@/components/payroll/EmployeeSelect";
-import { formatKES } from "@/lib/utils";
+import { cn, formatKES } from "@/lib/utils";
+
+/** Run statuses whose figures are final enough to file a statutory return. */
+const REPORTABLE_RUN_STATUSES = ["approved", "posted", "locked"];
 
 const MONTHS_EN = [
   "Jan",
@@ -58,13 +63,15 @@ type ReportTab =
   | "paye"
   | "nssf"
   | "shif"
+  | "housingLevy"
   | "headcount"
   | "leave"
   | "trend"
   | "turnover";
 
 /**
- * Payroll reports hub — P9, PAYE, NSSF, SHIF, headcount, leave, trends, turnover.
+ * Payroll reports hub — P9, PAYE, NSSF, SHIF, Housing Levy, headcount,
+ * leave, trends, turnover.
  *
  * @returns Reports hub page
  */
@@ -78,6 +85,7 @@ export default function PayrollReportsPage() {
     { key: "paye", label: t("payeSchedule") },
     { key: "nssf", label: t("nssfSchedule") },
     { key: "shif", label: t("shifSchedule") },
+    { key: "housingLevy", label: t("housingLevySchedule") },
     { key: "headcount", label: t("headcount") },
     { key: "leave", label: t("leaveUtilisation") },
     { key: "trend", label: t("costTrend") },
@@ -108,6 +116,7 @@ export default function PayrollReportsPage() {
       {tab === "paye" && <PAYEScheduleReport />}
       {tab === "nssf" && <NSSFScheduleReport />}
       {tab === "shif" && <SHIFScheduleReport />}
+      {tab === "housingLevy" && <HousingLevyScheduleReport />}
       {tab === "headcount" && <HeadcountSection />}
       {tab === "leave" && <LeaveUtilisationSection />}
       {tab === "trend" && <CostTrendSection />}
@@ -221,6 +230,10 @@ function P9Report() {
         ) : !data ? (
           <div className="p-8 text-center text-muted-foreground">
             {t("noData")}
+          </div>
+        ) : data.rows.length === 0 ? (
+          <div className="p-8 text-center text-muted-foreground">
+            {t("noApprovedRunsForYear", { year })}
           </div>
         ) : (
           <div className="overflow-x-auto">
@@ -415,11 +428,18 @@ function PAYEScheduleReport() {
       </div>
 
       <div className="rounded-xl border border-border bg-card shadow-[var(--shadow-card)]">
+        <RunStatusNotice
+          month={month}
+          year={year}
+          runId={data?.run_id ?? null}
+          runStatus={data?.run_status ?? null}
+          loading={isLoading}
+        />
         {isLoading ? (
           <div className="p-8 text-center text-muted-foreground">
             {tc("loading")}
           </div>
-        ) : !data ? (
+        ) : !data?.rows?.length ? (
           <div className="p-8 text-center text-muted-foreground">
             {t("noData")}
           </div>
@@ -493,11 +513,18 @@ function NSSFScheduleReport() {
         }}
       />
       <div className="rounded-xl border border-border bg-card shadow-[var(--shadow-card)]">
+        <RunStatusNotice
+          month={month}
+          year={year}
+          runId={data?.run_id ?? null}
+          runStatus={data?.run_status ?? null}
+          loading={isLoading}
+        />
         {isLoading ? (
           <div className="p-8 text-center text-muted-foreground">
             {tc("loading")}
           </div>
-        ) : !data ? (
+        ) : !data?.rows?.length ? (
           <div className="p-8 text-center text-muted-foreground">
             {t("noData")}
           </div>
@@ -588,11 +615,18 @@ function SHIFScheduleReport() {
         }}
       />
       <div className="rounded-xl border border-border bg-card shadow-[var(--shadow-card)]">
+        <RunStatusNotice
+          month={month}
+          year={year}
+          runId={data?.run_id ?? null}
+          runStatus={data?.run_status ?? null}
+          loading={isLoading}
+        />
         {isLoading ? (
           <div className="p-8 text-center text-muted-foreground">
             {tc("loading")}
           </div>
-        ) : !data ? (
+        ) : !data?.rows?.length ? (
           <div className="p-8 text-center text-muted-foreground">
             {t("noData")}
           </div>
@@ -642,6 +676,107 @@ function SHIFScheduleReport() {
     </div>
   );
 }
+
+function HousingLevyScheduleReport() {
+  const t = useTranslations("payroll");
+  const tc = useTranslations("common");
+  const now = new Date();
+  const [month, setMonth] = useState(now.getMonth() + 1);
+  const [year, setYear] = useState(now.getFullYear());
+
+  const { data, isLoading } = useHousingLevySchedule(month, year);
+
+  return (
+    <div className="space-y-4">
+      <MonthYearPicker
+        month={month}
+        year={year}
+        onChange={(m, y) => {
+          setMonth(m);
+          setYear(y);
+        }}
+      />
+      <div className="rounded-xl border border-border bg-card shadow-[var(--shadow-card)]">
+        <RunStatusNotice
+          month={month}
+          year={year}
+          runId={data?.run_id ?? null}
+          runStatus={data?.run_status ?? null}
+          loading={isLoading}
+        />
+        {isLoading ? (
+          <div className="p-8 text-center text-muted-foreground">
+            {tc("loading")}
+          </div>
+        ) : !data?.rows?.length ? (
+          <div className="p-8 text-center text-muted-foreground">
+            {t("noData")}
+          </div>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full text-left text-sm">
+              <thead className="border-b border-border bg-muted/30 text-xs uppercase text-muted-foreground">
+                <tr>
+                  <th className="px-4 py-3">{t("employee")}</th>
+                  <th className="px-4 py-3">{t("kraPin")}</th>
+                  <th className="px-4 py-3 text-right">{t("grossSalary")}</th>
+                  <th className="px-4 py-3 text-right">
+                    {t("employeeContribution")}
+                  </th>
+                  <th className="px-4 py-3 text-right">
+                    {t("employerContribution")}
+                  </th>
+                  <th className="px-4 py-3 text-right">{t("total")}</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-border">
+                {(data.rows ?? []).map((r) => (
+                  <tr key={r.employee_id} className="hover:bg-muted/30">
+                    <td className="px-4 py-3 font-medium">
+                      {r.employee_name}
+                    </td>
+                    <td className="px-4 py-3 text-muted-foreground">
+                      {r.kra_pin}
+                    </td>
+                    <td className="px-4 py-3 text-right tabular-nums">
+                      {formatKES(r.gross_salary * 100)}
+                    </td>
+                    <td className="px-4 py-3 text-right tabular-nums">
+                      {formatKES(r.employee_contribution * 100)}
+                    </td>
+                    <td className="px-4 py-3 text-right tabular-nums">
+                      {formatKES(r.employer_contribution * 100)}
+                    </td>
+                    <td className="px-4 py-3 text-right tabular-nums font-semibold">
+                      {formatKES(r.total * 100)}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+              <tfoot className="border-t border-border bg-muted/20 text-sm font-semibold">
+                <tr>
+                  <td className="px-4 py-3" colSpan={3}>
+                    {t("total")}
+                  </td>
+                  <td className="px-4 py-3 text-right tabular-nums">
+                    {formatKES(data.total_employee * 100)}
+                  </td>
+                  <td className="px-4 py-3 text-right tabular-nums">
+                    {formatKES(data.total_employer * 100)}
+                  </td>
+                  <td className="px-4 py-3 text-right tabular-nums">
+                    {formatKES(data.total * 100)}
+                  </td>
+                </tr>
+              </tfoot>
+            </table>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 
 const EMPLOYMENT_TYPE_KEYS = ["permanent", "contract", "casual", "intern"];
 
@@ -799,11 +934,14 @@ function CostTrendSection() {
     );
   }
 
+  // Run totals come back in KES. formatKES() divides by 100, so the series
+  // stays in KES and the tooltip scales it - the same convention the payroll
+  // dashboard chart uses. Dividing here again showed 1/100th of the real cost.
   const chartData = points.map((p) => ({
     label: p.label,
-    gross: p.gross / 100,
-    net: p.net / 100,
-    paye: p.paye / 100,
+    gross: Number(p.gross),
+    net: Number(p.net),
+    paye: Number(p.paye),
   }));
 
   return (
@@ -812,7 +950,10 @@ function CostTrendSection() {
         <LineChart data={chartData}>
           <CartesianGrid strokeDasharray="3 3" opacity={0.1} />
           <XAxis dataKey="label" fontSize={12} />
-          <YAxis fontSize={12} />
+          <YAxis
+            fontSize={12}
+            tickFormatter={(v: number) => `${Math.round(v / 1000)}k`}
+          />
           <Tooltip formatter={(v: number) => formatKES(v * 100)} />
           <Legend />
           <Line
@@ -912,6 +1053,75 @@ function TurnoverSection() {
           </BarChart>
         </ResponsiveContainer>
       </ChartCard>
+    </div>
+  );
+}
+
+/**
+ * Shows which payroll run a statutory return is built from.
+ *
+ * A draft run produces an empty return, so without this the Reports tab looks
+ * disconnected from the Payroll tab instead of explaining that the period has
+ * not been approved yet.
+ *
+ * @param month - Report month (1-12)
+ * @param year - Report year
+ * @param runId - Payroll run backing the period, if any
+ * @param runStatus - Status of that run (draft, approved, posted, locked)
+ * @param loading - Suppress the notice while the report is still loading
+ * @returns Status strip with a link to the source run
+ */
+function RunStatusNotice({
+  month,
+  year,
+  runId,
+  runStatus,
+  loading,
+}: {
+  month: number;
+  year: number;
+  runId: string | null;
+  runStatus: string | null;
+  loading: boolean;
+}) {
+  const t = useTranslations("payroll");
+
+  if (loading) return null;
+
+  const monthLabel = MONTHS_EN[month - 1];
+  const reportable =
+    runStatus != null && REPORTABLE_RUN_STATUSES.includes(runStatus);
+
+  return (
+    <div
+      className={cn(
+        "flex flex-wrap items-center justify-between gap-3 border-b border-border px-4 py-3 text-xs",
+        reportable
+          ? "bg-muted/20 text-muted-foreground"
+          : "bg-amber-50 text-amber-800 dark:bg-amber-950/30 dark:text-amber-200",
+      )}
+    >
+      <span>
+        {runStatus == null
+          ? t("noRunForMonth", { month: monthLabel, year })
+          : reportable
+            ? `${t("period")}: ${monthLabel} ${year} - ${t(
+                `runStatus_${runStatus}`,
+              )}`
+            : t("runNotApproved", {
+                month: monthLabel,
+                year,
+                status: t(`runStatus_${runStatus}`),
+              })}
+      </span>
+      {runId && (
+        <Link
+          href={`/hr/payroll/runs/${runId}`}
+          className="font-medium text-primary hover:underline"
+        >
+          {t("viewRun")}
+        </Link>
+      )}
     </div>
   );
 }

@@ -25,7 +25,12 @@ from app.schemas.pharmacy import (
     StockReceiptRequest,
 )
 from app.services.finance import post_compound_transaction
-from app.services.service_billing import PRESCRIPTION, ServiceBillingService
+from app.services.service_billing import (
+    PRESCRIPTION,
+    ServiceBillingService,
+    charge_status,
+)
+from app.services.worklist_context import staff_display_names
 
 _logger = logging.getLogger(__name__)
 
@@ -65,8 +70,18 @@ class PharmacyService:
         result = await self.db.execute(stmt)
         rows = result.all()
 
+        # Pharmacy answers the same question as the other departments: who
+        # prescribed this, and has this prescription been paid for?
+        charges = await ServiceBillingService(self.db).charges_for_encounters(
+            [rx.encounter_id for rx, _patient in rows], facility_id
+        )
+        names = await staff_display_names(
+            self.db, [rx.prescriber_id for rx, _patient in rows]
+        )
+
         items: list[PharmacyQueueItem] = []
         for rx, patient in rows:
+            charge = charges.get((PRESCRIPTION, rx.id))
             items.append(
                 PharmacyQueueItem(
                     prescription_id=rx.id,
@@ -84,7 +99,14 @@ class PharmacyService:
                     quantity=rx.quantity,
                     instructions=rx.instructions,
                     prescriber_id=rx.prescriber_id,
+                    prescriber_name=names.get(rx.prescriber_id),
                     status=rx.status,
+                    charge_total_cents=charge.total_cents if charge else None,
+                    charge_paid_cents=charge.paid_cents if charge else None,
+                    charge_balance_cents=(
+                        charge.balance_cents if charge else None
+                    ),
+                    charge_status=charge_status(charge),
                     created_at=rx.created_at,
                 )
             )

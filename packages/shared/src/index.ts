@@ -1,5 +1,6 @@
 export type { Patient, PatientCreate, PatientUpdate, PatientListResponse } from "./types/patient";
 export type { ApiResponse, PaginatedResponse } from "./types/api";
+export type { AuthUser } from "./types/auth";
 export type {
   Encounter,
   EncounterType,
@@ -25,11 +26,20 @@ export type {
   ConsultationPaymentRequest,
   ConsultationPaymentResult,
   DepartmentOption,
+  DepartmentWorkload,
   ClinicalScope,
   ClinicalWorklist,
   ClinicalWorklistCounts,
   ClinicalWorklistItem,
   ClinicianProfile,
+  RouteUrgency,
+  EncounterRoute,
+  EncounterRouteRequest,
+  EncounterRouteResult,
+  PointOfCareTest,
+  PointOfCareTestCreate,
+  PointOfCareInterpretation,
+  PointOfCareCategory,
 } from "./types/encounter";
 export type {
   PharmacyItem,
@@ -76,6 +86,7 @@ export type {
   BillingSummary,
   InvoiceWaiveRequest,
   ServiceReferenceType,
+  ServiceChargeStatus,
   ServiceCharge,
   ServiceChargeListResponse,
   ServicePaymentRequest,
@@ -95,6 +106,16 @@ export type {
   AdmissionListItem,
   AdmissionListResponse,
   AdmissionCreate,
+  AdmissionOrderStatus,
+  AdmissionType,
+  AdmissionPriority,
+  AdmissionOrderResponse,
+  AdmissionOrderListItem,
+  AdmissionOrderListResponse,
+  AdmissionOrderCreate,
+  AdmissionOrderAccept,
+  AdmissionOrderDecision,
+  AdmissionOrderAdmit,
   DischargeRequest,
   TransferToEmergencyRequest,
   NursingNoteResponse,
@@ -186,6 +207,10 @@ export type {
   DashboardTrends,
   TopDiagnosis,
   ReportsSummary,
+  UsageBillingLine,
+  UsageBillingReport,
+  UsageBillingMonth,
+  UsageBillingTrend,
 } from "./types/report";
 export type {
   StaffRole,
@@ -212,6 +237,11 @@ export type {
   AttendanceClockOut,
   AttendanceListResponse,
   HRSummary,
+  AssignableRole,
+  AssignableRoleListResponse,
+  StaffAccessResponse,
+  StaffPasswordUpdate,
+  StaffRoleUpdate,
 } from "./types/hr";
 export type {
   ArrivalMode,
@@ -226,6 +256,7 @@ export type {
   EmergencyListResponse,
   TriageRequest,
   AssignDoctorRequest,
+  StageRequest,
   DispositionRequest,
   DoctorOnDuty,
   EmergencySummary,
@@ -354,13 +385,10 @@ export type {
   RiskLevel,
   RiskLevel as AnalyticsRiskLevel,
   StockoutUrgency,
-  NoShowAction,
-  ContributingFactor,
   ReadmissionRisk,
   BedDemandForecast,
   NoShowPrediction,
   StockoutPrediction,
-  RevenueComponent,
   RevenueForecast,
   AnalyticsDashboard,
 } from "./types/analytics";

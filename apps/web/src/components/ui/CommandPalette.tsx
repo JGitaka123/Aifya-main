@@ -12,6 +12,7 @@ import { apiClient } from "@/lib/api-client";
 import { cn } from "@/lib/utils";
 import { NAV_ITEMS, PRIMARY_COMMAND_HREFS } from "@/lib/navigation";
 import { useLicenseContext } from "@/components/licensing/LicenseProvider";
+import { usePermissions } from "@/hooks/usePermissions";
 import type { PatientListResponse } from "@aifya/shared";
 
 interface CommandItem {
@@ -34,6 +35,7 @@ export function CommandPalette() {
   const tc = useTranslations("common");
   const router = useRouter();
   const { hasModule } = useLicenseContext();
+  const { hasPermission } = usePermissions();
 
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
@@ -127,7 +129,9 @@ export function CommandPalette() {
   }, [query, router]);
 
   const navigationItems: CommandItem[] = NAV_ITEMS.filter(
-    (item) => !item.module || hasModule(item.module),
+    (item) =>
+      (!item.module || hasModule(item.module)) &&
+      hasPermission(item.permission),
   ).map((item) => {
     const Icon = item.icon;
     return {

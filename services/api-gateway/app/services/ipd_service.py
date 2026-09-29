@@ -3,14 +3,21 @@ from datetime import UTC, datetime
 
 from sqlalchemy import case, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import aliased
 
 from app.models.base import EventBase
 from app.models.encounter import Encounter
-from app.models.ipd import Admission, Bed, NursingNote, Ward
+from app.models.ipd import Admission, AdmissionOrder, Bed, NursingNote, Ward
 from app.models.patient import Patient
+from app.models.staff import Department, Staff
 from app.schemas.ipd import (
     AdmissionCreate,
     AdmissionListItem,
+    AdmissionOrderAccept,
+    AdmissionOrderAdmit,
+    AdmissionOrderCreate,
+    AdmissionOrderDecision,
+    AdmissionOrderListItem,
     BedCreate,
     BedResponse,
     DischargeRequest,
@@ -19,6 +26,10 @@ from app.schemas.ipd import (
     WardCreate,
     WardResponse,
 )
+
+
+#: Statuses that still need the admission desk's attention.
+OPEN_ADMISSION_ORDER_STATUSES = ("pending", "bed_pending", "accepted")
 
 
 class IPDService:
@@ -593,6 +604,459 @@ class IPDService:
             active_admissions=active_admissions,
             occupancy_rate=round(occupancy_rate, 1),
         )
+
+    # ── Admission Orders ─────────────────────────────────────────────────
+    #
+    # An order is the bridge between consultation and IPD. The clinician
+    # raises it; the admission desk works it. Nothing here creates an
+    # inpatient — that only happens in admit_from_order, once a ward and bed
+    # have actually been assigned.
+
+    async def create_admission_order(
+        self,
+        data: AdmissionOrderCreate,
+        facility_id: uuid.UUID,
+        ordered_by: uuid.UUID,
+    ) -> AdmissionOrder:
+        """
+        Raise an admission order for an open encounter.
+
+        Deliberately does not admit anyone: the patient stays an outpatient
+        until the admission desk accepts the order and a bed is assigned.
+
+        @param data: Admission order details
+        @param facility_id: Facility UUID
+        @param ordered_by: Staff UUID of the requesting clinician
+        @returns Created admission order
+        @raises ValueError: Unknown/closed encounter or an order already open
+        """
+        enc_result = await self.db.execute(
+            select(Encounter).where(
+                Encounter.id == data.encounter_id,
+                Encounter.facility_id == facility_id,
+                Encounter.is_deleted == False,  # noqa: E712
+            )
+        )
+        encounter = enc_result.scalar_one_or_none()
+        if not encounter:
+            raise ValueError("Encounter not found")
+        if encounter.status in ("completed", "admitted", "cancelled"):
+            raise ValueError(
+                "This visit is already closed — open a new encounter to request admission"
+            )
+
+        # One open request per encounter, otherwise the desk cannot tell which
+        # one it is working and the ward ends up with duplicate admissions.
+        open_result = await self.db.execute(
+            select(AdmissionOrder.id).where(
+                AdmissionOrder.facility_id == facility_id,
+                AdmissionOrder.encounter_id == data.encounter_id,
+                AdmissionOrder.is_deleted == False,  # noqa: E712
+                AdmissionOrder.status.in_(OPEN_ADMISSION_ORDER_STATUSES),
+            )
+        )
+        if open_result.scalar_one_or_none():
+            raise ValueError("This visit already has an open admission request")
+
+        order = AdmissionOrder(
+            facility_id=facility_id,
+            order_number=await self._next_admission_order_number(facility_id),
+            encounter_id=data.encounter_id,
+            patient_id=data.patient_id,
+            ordered_by=ordered_by,
+            attending_doctor_id=data.attending_doctor_id,
+            reason=data.reason,
+            primary_diagnosis=data.primary_diagnosis,
+            admission_type=data.admission_type,
+            priority=data.priority,
+            department_id=data.department_id,
+            requested_ward_id=data.requested_ward_id,
+            clinical_notes=data.clinical_notes,
+            requested_at=data.requested_at,
+            status="pending",
+            created_by=ordered_by,
+            updated_by=ordered_by,
+        )
+        self.db.add(order)
+        await self.db.flush()
+        await self.db.refresh(order)
+
+        self.db.add(
+            EventBase(
+                facility_id=facility_id,
+                stream_type="admission_order",
+                stream_id=data.patient_id,
+                event_type="AdmissionOrderCreated",
+                event_data={
+                    "order_number": order.order_number,
+                    "encounter_id": str(data.encounter_id),
+                    "admission_type": data.admission_type,
+                    "priority": data.priority,
+                    "reason": data.reason,
+                },
+                version=1,
+                created_by=ordered_by,
+            )
+        )
+
+        return order
+
+    async def get_admission_orders(
+        self,
+        facility_id: uuid.UUID,
+        status_filter: str | None = None,
+        patient_id: uuid.UUID | None = None,
+        encounter_id: uuid.UUID | None = None,
+    ) -> tuple[list[AdmissionOrderListItem], int]:
+        """
+        List admission orders for the queue, newest and most urgent first.
+
+        @param facility_id: Facility UUID
+        @param status_filter: Exact status, or "open" for everything still workable
+        @param patient_id: Optional patient filter
+        @param encounter_id: Optional encounter filter
+        @returns Tuple of (order items, total)
+        """
+        attending = aliased(Staff)
+        admitted_ward = aliased(Ward)
+        admitted_bed = aliased(Bed)
+
+        stmt = (
+            select(
+                AdmissionOrder,
+                Patient,
+                Department,
+                Ward,
+                attending,
+                admitted_ward,
+                admitted_bed,
+            )
+            .join(Patient, AdmissionOrder.patient_id == Patient.id)
+            .outerjoin(Department, AdmissionOrder.department_id == Department.id)
+            .outerjoin(Ward, AdmissionOrder.requested_ward_id == Ward.id)
+            .outerjoin(attending, AdmissionOrder.attending_doctor_id == attending.id)
+            .outerjoin(Admission, AdmissionOrder.admission_id == Admission.id)
+            .outerjoin(admitted_ward, Admission.ward_id == admitted_ward.id)
+            .outerjoin(admitted_bed, Admission.bed_id == admitted_bed.id)
+            .where(
+                AdmissionOrder.facility_id == facility_id,
+                AdmissionOrder.is_deleted == False,  # noqa: E712
+            )
+        )
+
+        if status_filter == "open":
+            stmt = stmt.where(AdmissionOrder.status.in_(OPEN_ADMISSION_ORDER_STATUSES))
+        elif status_filter:
+            stmt = stmt.where(AdmissionOrder.status == status_filter)
+
+        if patient_id:
+            stmt = stmt.where(AdmissionOrder.patient_id == patient_id)
+        if encounter_id:
+            stmt = stmt.where(AdmissionOrder.encounter_id == encounter_id)
+
+        # Emergency before urgent before routine, then oldest first so nobody
+        # starves at the back of the queue.
+        priority_rank = case(
+            (AdmissionOrder.priority == "emergency", 0),
+            (AdmissionOrder.priority == "urgent", 1),
+            else_=2,
+        )
+        stmt = stmt.order_by(priority_rank.asc(), AdmissionOrder.created_at.asc())
+
+        result = await self.db.execute(stmt)
+        rows = result.all()
+        items = [self._admission_order_item(row) for row in rows]
+        return items, len(items)
+
+    async def get_admission_order(
+        self, order_id: uuid.UUID, facility_id: uuid.UUID
+    ) -> AdmissionOrder | None:
+        """
+        Get a single admission order.
+
+        @param order_id: Admission order UUID
+        @param facility_id: Facility UUID
+        @returns Admission order or None
+        """
+        result = await self.db.execute(
+            select(AdmissionOrder).where(
+                AdmissionOrder.id == order_id,
+                AdmissionOrder.facility_id == facility_id,
+                AdmissionOrder.is_deleted == False,  # noqa: E712
+            )
+        )
+        return result.scalar_one_or_none()
+
+    async def accept_admission_order(
+        self,
+        order_id: uuid.UUID,
+        decision: AdmissionOrderAccept,
+        facility_id: uuid.UUID,
+        decided_by: uuid.UUID,
+    ) -> AdmissionOrder:
+        """
+        Accept an order at the admission desk.
+
+        @param order_id: Admission order UUID
+        @param decision: Decision notes and whether a bed is still pending
+        @param facility_id: Facility UUID
+        @param decided_by: Staff UUID making the decision
+        @returns Updated admission order
+        @raises ValueError: Unknown order or an order that is already closed
+        """
+        order = await self._open_order_or_raise(order_id, facility_id)
+        order.status = "bed_pending" if decision.bed_pending else "accepted"
+        self._record_decision(order, decision.decision_notes, decided_by)
+        await self.db.flush()
+        await self.db.refresh(order)
+
+        self.db.add(
+            EventBase(
+                facility_id=facility_id,
+                stream_type="admission_order",
+                stream_id=order.patient_id,
+                event_type="AdmissionOrderAccepted",
+                event_data={
+                    "order_number": order.order_number,
+                    "status": order.status,
+                },
+                version=1,
+                created_by=decided_by,
+            )
+        )
+        return order
+
+    async def decline_admission_order(
+        self,
+        order_id: uuid.UUID,
+        decision: AdmissionOrderDecision,
+        facility_id: uuid.UUID,
+        decided_by: uuid.UUID,
+    ) -> AdmissionOrder:
+        """
+        Decline an order at the admission desk.
+
+        @param order_id: Admission order UUID
+        @param decision: Reason for the refusal, shown to the requesting clinician
+        @param facility_id: Facility UUID
+        @param decided_by: Staff UUID making the decision
+        @returns Updated admission order
+        @raises ValueError: Unknown order or an order that is already closed
+        """
+        order = await self._open_order_or_raise(order_id, facility_id)
+        order.status = "declined"
+        self._record_decision(order, decision.decision_notes, decided_by)
+        await self.db.flush()
+        await self.db.refresh(order)
+
+        self.db.add(
+            EventBase(
+                facility_id=facility_id,
+                stream_type="admission_order",
+                stream_id=order.patient_id,
+                event_type="AdmissionOrderDeclined",
+                event_data={
+                    "order_number": order.order_number,
+                    "reason": decision.decision_notes,
+                },
+                version=1,
+                created_by=decided_by,
+            )
+        )
+        return order
+
+    async def cancel_admission_order(
+        self,
+        order_id: uuid.UUID,
+        decision: AdmissionOrderDecision,
+        facility_id: uuid.UUID,
+        cancelled_by: uuid.UUID,
+    ) -> AdmissionOrder:
+        """
+        Cancel an order — the clinician changed their mind or the patient left.
+
+        @param order_id: Admission order UUID
+        @param decision: Optional note explaining the cancellation
+        @param facility_id: Facility UUID
+        @param cancelled_by: Staff UUID cancelling the order
+        @returns Updated admission order
+        @raises ValueError: Unknown order or an order that is already closed
+        """
+        order = await self._open_order_or_raise(order_id, facility_id)
+        order.status = "cancelled"
+        self._record_decision(order, decision.decision_notes, cancelled_by)
+        await self.db.flush()
+        await self.db.refresh(order)
+
+        self.db.add(
+            EventBase(
+                facility_id=facility_id,
+                stream_type="admission_order",
+                stream_id=order.patient_id,
+                event_type="AdmissionOrderCancelled",
+                event_data={
+                    "order_number": order.order_number,
+                    "reason": decision.decision_notes,
+                },
+                version=1,
+                created_by=cancelled_by,
+            )
+        )
+        return order
+
+    async def admit_from_order(
+        self,
+        order_id: uuid.UUID,
+        data: AdmissionOrderAdmit,
+        facility_id: uuid.UUID,
+        admitted_by: uuid.UUID,
+    ) -> Admission:
+        """
+        Assign a ward and bed, then create the real IPD admission.
+
+        This is the only path that turns an admission *order* into an
+        inpatient: the order must exist and still be open, the bed must be
+        free, and the resulting admission is linked back to the order.
+
+        @param order_id: Admission order UUID
+        @param data: Ward, bed and optional attending doctor
+        @param facility_id: Facility UUID
+        @param admitted_by: Staff UUID performing the admission
+        @returns Created admission
+        @raises ValueError: Unknown/closed order, or the bed is unavailable
+        """
+        order = await self._open_order_or_raise(order_id, facility_id)
+
+        admission = await self.admit_patient(
+            data=AdmissionCreate(
+                encounter_id=order.encounter_id,
+                patient_id=order.patient_id,
+                ward_id=data.ward_id,
+                bed_id=data.bed_id,
+                attending_doctor_id=(
+                    data.attending_doctor_id or order.attending_doctor_id
+                ),
+                admission_reason=order.reason,
+                admission_diagnosis=order.primary_diagnosis,
+                admitted_from="opd",
+            ),
+            facility_id=facility_id,
+            admitted_by=admitted_by,
+        )
+
+        order.status = "admitted"
+        order.admission_id = admission.id
+        if data.attending_doctor_id:
+            order.attending_doctor_id = data.attending_doctor_id
+        self._record_decision(
+            order,
+            data.decision_notes or order.decision_notes,
+            admitted_by,
+        )
+        await self.db.flush()
+
+        self.db.add(
+            EventBase(
+                facility_id=facility_id,
+                stream_type="admission_order",
+                stream_id=order.patient_id,
+                event_type="AdmissionOrderFulfilled",
+                event_data={
+                    "order_number": order.order_number,
+                    "admission_number": admission.admission_number,
+                    "admission_id": str(admission.id),
+                    "ward_id": str(data.ward_id),
+                    "bed_id": str(data.bed_id),
+                },
+                version=1,
+                created_by=admitted_by,
+            )
+        )
+        return admission
+
+    # ── Admission Order helpers ──────────────────────────────────────────
+
+    async def _open_order_or_raise(
+        self, order_id: uuid.UUID, facility_id: uuid.UUID
+    ) -> AdmissionOrder:
+        """
+        Load an order that is still workable.
+
+        @param order_id: Admission order UUID
+        @param facility_id: Facility UUID
+        @returns The open order
+        @raises ValueError: Unknown order, or one already admitted/declined/cancelled
+        """
+        order = await self.get_admission_order(order_id, facility_id)
+        if not order:
+            raise ValueError("Admission request not found")
+        if order.status not in OPEN_ADMISSION_ORDER_STATUSES:
+            raise ValueError(
+                f"This admission request is already {order.status} and cannot be changed"
+            )
+        return order
+
+    def _record_decision(
+        self, order: AdmissionOrder, notes: str | None, actor: uuid.UUID
+    ) -> None:
+        """
+        Stamp the order with who decided and when.
+
+        @param order: Order being updated
+        @param notes: Decision notes (kept if not supplied)
+        @param actor: Staff UUID making the change
+        @returns None
+        """
+        if notes:
+            order.decision_notes = notes
+        order.decided_by = actor
+        order.decided_at = datetime.now(UTC)
+        order.updated_by = actor
+
+    def _admission_order_item(self, row) -> AdmissionOrderListItem:
+        """
+        Flatten a queue row into the list item the UI renders.
+
+        @param row: Row of (order, patient, department, ward, attending, admitted_ward, admitted_bed)
+        @returns Admission order list item
+        """
+        (
+            order,
+            patient,
+            department,
+            requested_ward,
+            attending,
+            admitted_ward,
+            admitted_bed,
+        ) = row
+
+        item = AdmissionOrderListItem.model_validate(order)
+        item.patient_name = f"{patient.first_name} {patient.last_name}"
+        item.patient_mrn = patient.mrn
+        item.department_name = department.name if department else None
+        item.requested_ward_name = requested_ward.name if requested_ward else None
+        item.attending_doctor_name = (
+            f"{attending.first_name} {attending.last_name}" if attending else None
+        )
+        item.admitted_ward_name = admitted_ward.name if admitted_ward else None
+        item.admitted_bed_number = admitted_bed.bed_number if admitted_bed else None
+        return item
+
+    async def _next_admission_order_number(self, facility_id: uuid.UUID) -> str:
+        """Generate the next admission-order number (AO-YYYYMMDD-XXXX)."""
+        today = datetime.now(UTC).strftime("%Y%m%d")
+        prefix = f"AO-{today}-"
+
+        result = await self.db.execute(
+            select(func.count())
+            .select_from(AdmissionOrder)
+            .where(
+                AdmissionOrder.facility_id == facility_id,
+                AdmissionOrder.order_number.like(f"{prefix}%"),
+            )
+        )
+        count = result.scalar_one()
+        return f"{prefix}{count + 1:04d}"
 
     # ── Helpers ──────────────────────────────────────────────────────────
 

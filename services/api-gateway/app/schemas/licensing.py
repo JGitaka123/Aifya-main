@@ -13,13 +13,16 @@ SubscriptionTier = Literal["community", "professional", "enterprise", "governmen
 BillingCycle = Literal["monthly", "annual", "perpetual"]
 UpdateChannel = Literal["stable", "beta", "canary"]
 
-# Core modules available in community tier
+# Core modules available in community tier. Knowledge Base is an institutional
+# utility every signed-in role already holds ``knowledge.view`` for, so it ships
+# with every tier rather than being sold as an add-on.
 COMMUNITY_MODULES = [
     "patients",
     "encounters",
     "opd",
     "vitals",
     "billing",
+    "knowledge",
 ]
 
 # Professional adds clinical depth

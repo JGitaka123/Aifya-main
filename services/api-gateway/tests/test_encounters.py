@@ -3,6 +3,8 @@ import uuid
 import pytest
 from httpx import AsyncClient
 
+from tests.conftest import USER_ID
+
 
 @pytest.fixture
 async def patient_id(client: AsyncClient) -> str:
@@ -205,3 +207,149 @@ async def test_create_lab_order(client: AsyncClient, patient_id: str) -> None:
     data = response.json()
     assert data["status"] == "ordered"
     assert data["order_number"].startswith("LAB-")
+
+
+@pytest.mark.asyncio
+async def test_opd_queue_can_be_read_one_department_at_a_time(
+    client: AsyncClient, patient_id: str
+) -> None:
+    """The board narrows to a unit, so a department sees only its own queue."""
+    dental = str(uuid.uuid4())
+    general = str(uuid.uuid4())
+    in_dental = await client.post("/api/v1/encounters", json={
+        "patient_id": patient_id,
+        "encounter_type": "opd",
+        "chief_complaint": "Severe tooth pain",
+        "department_id": dental,
+    })
+    await client.post("/api/v1/encounters", json={
+        "patient_id": patient_id,
+        "encounter_type": "opd",
+        "chief_complaint": "Persistent headache",
+        "department_id": general,
+    })
+
+    response = await client.get(
+        f"/api/v1/encounters/queue?department_id={dental}"
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert [i["id"] for i in body["items"]] == [in_dental.json()["id"]]
+    assert body["total"] == 1
+
+
+@pytest.mark.asyncio
+async def test_starting_a_consultation_claims_the_patient(
+    client: AsyncClient, patient_id: str
+) -> None:
+    """A doctor who opens a consultation holds the patient on the worklist."""
+    created = await client.post("/api/v1/encounters", json={
+        "patient_id": patient_id,
+        "encounter_type": "opd",
+        "chief_complaint": "Cough",
+    })
+    enc_id = created.json()["id"]
+    assert created.json()["attending_doctor_id"] is None
+
+    started = await client.patch(
+        f"/api/v1/encounters/{enc_id}", json={"status": "in_consultation"}
+    )
+
+    assert started.status_code == 200
+    body = started.json()
+    assert body["status"] == "in_consultation"
+    assert body["attending_doctor_id"] == str(USER_ID)
+
+
+@pytest.mark.asyncio
+async def test_starting_a_consultation_keeps_receptions_choice(
+    client: AsyncClient, patient_id: str
+) -> None:
+    """Reception pointing a patient at a named doctor survives the claim."""
+    doctor = str(uuid.uuid4())
+    created = await client.post("/api/v1/encounters", json={
+        "patient_id": patient_id,
+        "encounter_type": "opd",
+        "chief_complaint": "Cough",
+        "attending_doctor_id": doctor,
+    })
+    enc_id = created.json()["id"]
+
+    started = await client.patch(
+        f"/api/v1/encounters/{enc_id}", json={"status": "in_consultation"}
+    )
+
+    assert started.status_code == 200
+    assert started.json()["attending_doctor_id"] == doctor
+
+
+@pytest.mark.asyncio
+async def test_completing_a_visit_requires_an_outcome(
+    client: AsyncClient, patient_id: str
+) -> None:
+    """A department cannot close a visit without saying what it did."""
+    created = await client.post("/api/v1/encounters", json={
+        "patient_id": patient_id,
+        "encounter_type": "opd",
+        "chief_complaint": "Toothache",
+    })
+    enc_id = created.json()["id"]
+
+    refused = await client.patch(
+        f"/api/v1/encounters/{enc_id}", json={"status": "completed"}
+    )
+
+    assert refused.status_code == 422
+    assert "outcome" in refused.json()["detail"].lower()
+    # The visit is untouched, so the department still owes the work.
+    unchanged = await client.get(f"/api/v1/encounters/{enc_id}")
+    assert unchanged.json()["status"] == "waiting"
+    assert unchanged.json()["outcome"] is None
+
+
+@pytest.mark.asyncio
+async def test_a_blank_outcome_does_not_complete_the_visit(
+    client: AsyncClient, patient_id: str
+) -> None:
+    """Whitespace is not an outcome note."""
+    created = await client.post("/api/v1/encounters", json={
+        "patient_id": patient_id,
+        "encounter_type": "opd",
+    })
+    enc_id = created.json()["id"]
+
+    refused = await client.patch(
+        f"/api/v1/encounters/{enc_id}",
+        json={"status": "completed", "outcome": "   "},
+    )
+
+    assert refused.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_completing_a_visit_records_the_outcome_and_the_time(
+    client: AsyncClient, patient_id: str
+) -> None:
+    """The closing note and when it was written travel with the completed visit."""
+    created = await client.post("/api/v1/encounters", json={
+        "patient_id": patient_id,
+        "encounter_type": "opd",
+        "chief_complaint": "Toothache",
+    })
+    enc_id = created.json()["id"]
+
+    completed = await client.patch(
+        f"/api/v1/encounters/{enc_id}",
+        json={
+            "status": "completed",
+            "outcome": "  Dental filling completed. Review in 2 weeks.  ",
+        },
+    )
+
+    assert completed.status_code == 200
+    body = completed.json()
+    assert body["status"] == "completed"
+    # Trimmed, so the note stored is the one the clinician meant to write.
+    assert body["outcome"] == "Dental filling completed. Review in 2 weeks."
+    assert body["completed_at"] is not None

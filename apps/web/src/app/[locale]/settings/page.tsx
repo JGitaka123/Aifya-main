@@ -16,7 +16,8 @@ import { cn } from "@/lib/utils";
 
 interface SettingsCard {
   key: string;
-  href: string;
+  /** null when the screen has no page behind it yet — rendered as unavailable. */
+  href: string | null;
   icon: React.ComponentType<{ className?: string }>;
   color: string;
 }
@@ -30,14 +31,18 @@ export default function SettingsPage() {
   const t = useTranslations("settings");
   const { tier, daysRemaining, inGracePeriod } = useLicenseContext();
 
+  // Only cards with a real destination are links. The others were dead links that
+  // returned 404; they are shown as unavailable until the screens are built.
   const cards: SettingsCard[] = [
+    { key: "users", href: "/settings/team", icon: Users, color: "text-green-600 dark:text-green-400" },
     { key: "facility", href: "/settings/facility", icon: Building2, color: "text-blue-600 dark:text-blue-400" },
-    { key: "billing", href: "/settings/billing", icon: CreditCard, color: "text-purple-600 dark:text-purple-400" },
-    { key: "users", href: "/settings/users", icon: Users, color: "text-green-600 dark:text-green-400" },
-    { key: "security", href: "/settings/security", icon: Lock, color: "text-red-600 dark:text-red-400" },
+    // Password resets live on the Team & Users screen, so the card sends HR
+    // there instead of dead-ending them on a screen that does not exist yet.
+    { key: "security", href: "/settings/team", icon: Lock, color: "text-red-600 dark:text-red-400" },
     { key: "appearance", href: "/settings/appearance", icon: Palette, color: "text-amber-600 dark:text-amber-400" },
     { key: "language", href: "/settings/language", icon: Globe, color: "text-cyan-600 dark:text-cyan-400" },
     { key: "roles", href: "/settings/roles", icon: Shield, color: "text-indigo-600 dark:text-indigo-400" },
+    { key: "billing", href: "/settings/billing", icon: CreditCard, color: "text-purple-600 dark:text-purple-400" },
   ];
 
   return (
@@ -72,12 +77,8 @@ export default function SettingsPage() {
 
       {/* Settings cards */}
       <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
-        {cards.map((card) => (
-          <Link
-            key={card.key}
-            href={card.href}
-            className="group rounded-xl border border-border bg-card p-5 shadow-[var(--shadow-card)] transition-all hover:border-blue-300 hover:shadow-md dark:hover:border-blue-700"
-          >
+        {cards.map((card) => {
+          const body = (
             <div className="flex items-center gap-3">
               <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-muted/50">
                 <card.icon className={cn("h-5 w-5", card.color)} />
@@ -91,8 +92,32 @@ export default function SettingsPage() {
                 </p>
               </div>
             </div>
-          </Link>
-        ))}
+          );
+
+          if (!card.href) {
+            return (
+              <div
+                key={card.key}
+                className="rounded-xl border border-dashed border-border bg-card/60 p-5"
+              >
+                {body}
+                <span className="mt-3 inline-block rounded-md bg-muted px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
+                  {t("unavailable")}
+                </span>
+              </div>
+            );
+          }
+
+          return (
+            <Link
+              key={card.key}
+              href={card.href}
+              className="group rounded-xl border border-border bg-card p-5 shadow-[var(--shadow-card)] transition-all hover:border-blue-300 hover:shadow-md dark:hover:border-blue-700"
+            >
+              {body}
+            </Link>
+          );
+        })}
       </div>
 
       {/* Current plan summary */}

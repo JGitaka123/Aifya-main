@@ -82,4 +82,10 @@ class VitalSignResponse(BaseModel):
     critical_alerts: str | None
     created_at: datetime
 
+    # The numbered report the nurse issues after triage. `report_url` is the
+    # print/download link and is filled in by the router, not stored.
+    report_number: str | None = None
+    summary: str | None = None
+    report_url: str | None = None
+
     model_config = {"from_attributes": True}

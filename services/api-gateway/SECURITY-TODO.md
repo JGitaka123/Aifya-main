@@ -6,8 +6,11 @@ that produced this list landed in 2026-05; revisit before any GA cut.
 
 ## Encryption at rest (HIGH)
 
-- `app.models.payroll.Employee.bank_account` is currently a plain `Text`
-  column. The spec calls for column-level encryption.
+- DONE (2026-09): `Employee.bank_account` is not plaintext - it is encrypted
+  at the application layer and every row in the live database carries the
+  `enc:v1:` envelope, as do `kra_pin`, `nssf_number` and `shif_number`.
+  What remains is key custody: move `FIELD_ENCRYPTION_KEY` out of
+  settings/.env into a KMS so rotation and access are auditable.
   - Option A: switch to `sqlalchemy_utils.EncryptedType(Text, secret_key=…,
     engine=AesGcmEngine, padding="oneandzeroes")` and source the key from
     Vault (NEVER from settings/env in cleartext).
@@ -63,6 +66,14 @@ approval, fixed-asset disposal, statutory-rate edits, and recurring-
 template create / approve. Consider a central decorator on the service
 layer so we can't forget.
 
+Clinical audit is now covered at the database layer. Migration 026 adds an
+append-only `audit_logs` trail with triggers on patients, encounters,
+appointments, admissions, diagnoses, prescriptions, clinical_notes,
+vital_signs, lab_orders, lab_results, patient_insurance, referrals,
+emergency_visits and encounter_assignments. Each row records the acting
+API user (published as `app.current_user_*`), the originating client
+address, the changed columns and the full before/after row.
+
 ## Multi-tenant guards (CRITICAL — PARTIALLY ADDRESSED)
 
 The 2026-05 audit closed several `facility_id` leaks across:
@@ -73,13 +84,17 @@ The 2026-05 audit closed several `facility_id` leaks across:
 - `app/services/payroll/leave.py` (defence-in-depth on submit)
 - `app/services/referral/note_generator.py` (patient-scoped lookups)
 
-Defence-in-depth still required at the database layer:
-- Enable PostgreSQL Row-Level Security on every facility-scoped table
-  with a `facility_id = current_setting('app.facility_id')::uuid` policy.
-- Set `app.facility_id` once per request from the JWT claim, before any
-  query runs.
-- This protects against any future query that accidentally drops the
-  WHERE clause.
+DONE (2026-09): the database enforces this itself now.
+- Every facility-scoped table has Row-Level Security ENABLED and FORCED
+  (104 tables) with a `facility_id =
+  current_setting('app.current_facility_id')` policy carrying both USING
+  and WITH CHECK. See migrations 008_enable_tenant_rls and
+  018_tenant_rls_backfill.
+- The API sets `app.current_facility_id` once per request from the JWT
+  claim before any query runs, via `app/middleware/facility_context.py`.
+- Verified on the live database: with no context set `patients` returns 0
+  rows, and a facility sees only its own rows. This protects any future
+  query that accidentally drops the WHERE clause.
 
 ## Payroll GL account-code drift (FIXED)
 
@@ -94,8 +109,9 @@ failed with `FinanceError("Account codes not found")`. The codes in
 
 - [ ] Vault is the only source of M-Pesa, SHA, Africa's Talking secrets.
 - [ ] `MPESA_CALLBACK_IP_ALLOWLIST` is set in the deployment manifest.
-- [ ] Postgres RLS policies created and tested.
-- [ ] `Employee.bank_account` is encrypted at rest with KMS-backed key.
+- [x] Postgres RLS policies created and tested (migrations 008/018, 104 tables).
+- [x] `Employee.bank_account` encrypted at rest (`enc:v1:`); move the key to
+      KMS custody before GA.
 - [ ] `slowapi` rate-limit middleware enabled (default 60 rpm/user).
 - [ ] OpenAPI / Swagger docs are off (`debug=False`).
 - [ ] Disabled the SHA mock fallback (require real `SHA_API_URL`).

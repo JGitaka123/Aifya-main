@@ -191,3 +191,61 @@ class DuplicateCheckResponse(BaseModel):
 
     has_duplicates: bool
     matches: list[DuplicateMatch]
+
+
+class PatientHistoryDiagnosis(BaseModel):
+    """A diagnosis recorded during a past visit."""
+
+    icd10_code: str
+    icd10_description: str
+    diagnosis_type: str
+    clinical_status: str
+    is_chronic: bool = False
+
+
+class PatientHistoryPrescription(BaseModel):
+    """A drug prescribed during a past visit."""
+
+    drug_name: str
+    dosage: str
+    frequency: str
+    status: str
+
+
+class PatientHistoryVisit(BaseModel):
+    """One past visit in a patient's clinical history."""
+
+    encounter_id: uuid.UUID
+    encounter_date: datetime
+    encounter_type: str
+    status: str
+    department_name: str | None = None
+    attending_doctor_name: str | None = None
+    chief_complaint: str | None = None
+    disposition: str | None = None
+    diagnoses: list[PatientHistoryDiagnosis] = []
+    prescriptions: list[PatientHistoryPrescription] = []
+
+
+class PatientHistoryResponse(BaseModel):
+    """
+    A patient's clinical history, for display at the point of care.
+
+    Carries the safety-critical patient-level fields (allergies, chronic
+    conditions, blood group) alongside the previous visits, so a clinician
+    receiving a redirected patient sees who they are and what has already
+    been done without leaving the consultation.
+    """
+
+    patient_id: uuid.UUID
+    mrn: str
+    full_name: str
+    date_of_birth: date
+    gender: str
+    age_years: int | None = None
+    blood_group: str | None = None
+    allergies: list[str] = []
+    chronic_conditions: list[str] = []
+    visit_count: int = 0
+    last_visit_date: datetime | None = None
+    visits: list[PatientHistoryVisit] = []

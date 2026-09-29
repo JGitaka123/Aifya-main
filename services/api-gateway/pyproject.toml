@@ -24,6 +24,13 @@ dependencies = [
     "structlog>=24.0.0",
     "reportlab>=4.0.0",
     "sentry-sdk[fastapi]>=2.0.0",
+    # Institutional Knowledge (RAG), formerly a separate service. PyMuPDF and
+    # python-docx are imported lazily at parse time; python-dotenv is imported
+    # when app/knowledge/config.py loads the .env.
+    "python-dotenv>=1.0.1",
+    "PyMuPDF>=1.25.1",
+    "python-docx>=1.1.2",
+    "qdrant-client>=1.12.1",
 ]
 
 [project.optional-dependencies]
@@ -35,6 +42,16 @@ dev = [
     "mypy>=1.13.0",
     "ruff>=0.8.0",
     "factory-boy>=3.3.0",
+]
+
+# Real BGE-M3 semantic embeddings for the Knowledge RAG (pulls in torch, a
+# multi-gigabyte wheel). The api-gateway image installs this extra by default
+# to keep the embedding quality the standalone knowledge service had. Without
+# it EMBEDDING_BACKEND=auto degrades to the deterministic hashed (lexical)
+# embedding, which still ingests and searches but is not semantic.
+embeddings = [
+    "sentence-transformers>=3.3.1",
+    "torch>=2.2.0",
 ]
 
 [tool.setuptools.packages.find]

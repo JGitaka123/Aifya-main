@@ -24,8 +24,14 @@ import type {
   ConsultationPaymentRequest,
   ConsultationPaymentResult,
   DepartmentOption,
+  DepartmentWorkload,
   ClinicalScope,
   ClinicalWorklist,
+  EncounterRoute,
+  EncounterRouteRequest,
+  EncounterRouteResult,
+  PointOfCareTest,
+  PointOfCareTestCreate,
 } from "@aifya/shared";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000/api/v1";
@@ -36,16 +42,35 @@ const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000/api/v1
  * Hook for fetching the OPD queue with offline support.
  *
  * @param statusFilter - Optional status filter
+ * @param departmentId - Optional department, so a unit reads its own queue
+ * @param stage - assessment (still with OPD) or consultation (ready for a
+ *   doctor); omit for both
  * @returns Query result with queue data
  */
-export function useOPDQueue(statusFilter?: string) {
+export function useOPDQueue(
+  statusFilter?: string,
+  departmentId?: string,
+  stage?: string
+) {
   const params: Record<string, string> = {};
   if (statusFilter) {
     params["status"] = statusFilter;
   }
+  if (departmentId) {
+    params["department_id"] = departmentId;
+  }
+  if (stage) {
+    params["stage"] = stage;
+  }
 
   return useOfflineQuery<QueueResponse>({
-    queryKey: ["encounters", "queue", statusFilter ?? ""],
+    queryKey: [
+      "encounters",
+      "queue",
+      statusFilter ?? "",
+      departmentId ?? "",
+      stage ?? "",
+    ],
     queryFn: () => apiClient.get<QueueResponse>("/encounters/queue", params),
     refetchInterval: 15_000,
   });
@@ -134,6 +159,38 @@ export function useCallNext() {
   );
 }
 
+/**
+ * Hook for bringing one chosen patient into the consultation room.
+ *
+ * "Call next" takes the queue in order; this is the doctor picking the patient
+ * they mean off their own workspace. The server applies the same gates, so a
+ * row that is not assessed or not paid is refused with a reason. The encounter
+ * is the mutation variable, so one hook serves the whole list.
+ *
+ * @returns Mutation taking an encounter UUID and claiming that patient
+ */
+export function useCallInPatient() {
+  const queryClient = useQueryClient();
+
+  return useOfflineMutation<Encounter, string>(
+    {
+      mutationFn: (encounterId: string) =>
+        apiClient.post<Encounter>(
+          `/encounters/${encounterId}/call-in`,
+          {},
+          generateId(),
+        ),
+      onSuccess: () => {
+        queryClient.invalidateQueries({ queryKey: ["encounters"] });
+      },
+    },
+    {
+      url: (encounterId: string) => `${API_URL}/encounters/${encounterId}/call-in`,
+      method: "POST",
+    }
+  );
+}
+
 // -- Department directory ---------------------------------------------------
 
 /**
@@ -149,6 +206,26 @@ export function useDepartments() {
     queryKey: ["departments", "options"],
     queryFn: () => apiClient.get<DepartmentOption[]>("/encounters/departments"),
     staleTime: 5 * 60_000,
+  });
+}
+
+/**
+ * Hook for today's patient load per department.
+ *
+ * The clinical workspace is organised by department, so this is the number a
+ * clinician works against: how many patients their unit has today. A clinician
+ * sees their own unit; an administrator sees every unit at once.
+ *
+ * @param enabled - Skip the request until the caller may read clinical work
+ * @returns Query result with one row per visible department
+ */
+export function useDepartmentLoad(enabled = true) {
+  return useOfflineQuery<DepartmentWorkload[]>({
+    queryKey: ["encounters", "department-load"],
+    queryFn: () =>
+      apiClient.get<DepartmentWorkload[]>("/encounters/department-load"),
+    refetchInterval: 30_000,
+    enabled,
   });
 }
 
@@ -253,9 +330,23 @@ export function useUpdateConsultationFee(encounterId: string) {
  *
  * @param scope - mine, department or facility; server default when omitted
  * @param status - Optional single status to narrow the list
+ * @param options.enabled - Skip the request when the user lacks clinical.view
+ * @param options.triaged - true: only patients the nurse has assessed; false:
+ *   only those still with OPD; omit for both
+ * @param options.search - Patient name, MRN or queue number to narrow by
+ * @param options.departmentId - Narrow the facility view to one unit
  * @returns Query result with the clinician, counts and today's encounters
  */
-export function useClinicalWorklist(scope?: ClinicalScope, status?: string) {
+export function useClinicalWorklist(
+  scope?: ClinicalScope,
+  status?: string,
+  options?: {
+    enabled?: boolean;
+    triaged?: boolean;
+    search?: string;
+    departmentId?: string;
+  },
+) {
   const params: Record<string, string> = {};
   if (scope) {
     params["scope"] = scope;
@@ -263,12 +354,31 @@ export function useClinicalWorklist(scope?: ClinicalScope, status?: string) {
   if (status) {
     params["status"] = status;
   }
+  if (options?.triaged !== undefined) {
+    params["triaged"] = String(options.triaged);
+  }
+  const search = options?.search?.trim();
+  if (search) {
+    params["q"] = search;
+  }
+  if (options?.departmentId) {
+    params["department_id"] = options.departmentId;
+  }
 
   return useOfflineQuery<ClinicalWorklist>({
-    queryKey: ["encounters", "worklist", scope ?? "", status ?? ""],
+    queryKey: [
+      "encounters",
+      "worklist",
+      scope ?? "",
+      status ?? "",
+      options?.triaged ?? "",
+      search ?? "",
+      options?.departmentId ?? "",
+    ],
     queryFn: () =>
       apiClient.get<ClinicalWorklist>("/encounters/worklist", params),
     refetchInterval: 15_000,
+    enabled: options?.enabled ?? true,
   });
 }
 
@@ -310,6 +420,9 @@ export function useRecordVitals(encounterId: string) {
         queryClient.invalidateQueries({
           queryKey: ["encounters", encounterId, "vitals"],
         });
+        // Recording vitals completes the OPD assessment server-side, so the
+        // queues and the encounter banner must re-read the new stage.
+        queryClient.invalidateQueries({ queryKey: ["encounters"] });
       },
     },
     { url: `${API_URL}/encounters/${encounterId}/vitals`, method: "POST" }
@@ -317,6 +430,34 @@ export function useRecordVitals(encounterId: string) {
 }
 
 // ── Diagnosis hooks ──────────────────────────────────────────────────────
+
+/**
+ * Hook for finishing the OPD assessment and releasing the patient to a doctor.
+ *
+ * Recording vitals already completes the assessment on the server; this is the
+ * explicit hand-off for a visit that needed no measurements taken.
+ *
+ * @param encounterId - Encounter UUID
+ * @returns Mutation for completing the assessment
+ */
+export function useCompleteAssessment(encounterId: string) {
+  const queryClient = useQueryClient();
+
+  return useOfflineMutation<Encounter, void>(
+    {
+      mutationFn: () =>
+        apiClient.post<Encounter>(
+          `/encounters/${encounterId}/assessment`,
+          {},
+          generateId()
+        ),
+      onSuccess: () => {
+        queryClient.invalidateQueries({ queryKey: ["encounters"] });
+      },
+    },
+    { url: `${API_URL}/encounters/${encounterId}/assessment`, method: "POST" }
+  );
+}
 
 /**
  * Hook for fetching diagnoses for an encounter.
@@ -481,5 +622,94 @@ export function useCreateLabOrder(encounterId: string) {
       url: `${API_URL}/encounters/${encounterId}/lab-orders`,
       method: "POST",
     }
+  );
+}
+
+
+// -- Consultation room: routing a patient to another unit ------------------
+
+/**
+ * Hook for fetching the internal routing trail of an encounter.
+ *
+ * @param encounterId - Encounter UUID
+ * @returns Query result with the routings, newest first
+ */
+export function useEncounterRoutes(encounterId: string) {
+  return useOfflineQuery<EncounterRoute[]>({
+    queryKey: ["encounters", encounterId, "routes"],
+    queryFn: () =>
+      apiClient.get<EncounterRoute[]>(`/encounters/${encounterId}/routes`),
+    enabled: !!encounterId,
+  });
+}
+
+/**
+ * Hook for sending a patient from the consultation room to another unit.
+ *
+ * @param encounterId - Encounter UUID
+ * @returns Mutation for routing the patient
+ */
+export function useRouteEncounter(encounterId: string) {
+  const queryClient = useQueryClient();
+
+  return useOfflineMutation<EncounterRouteResult, EncounterRouteRequest>(
+    {
+      mutationFn: (data: EncounterRouteRequest) =>
+        apiClient.post<EncounterRouteResult>(
+          `/encounters/${encounterId}/route`,
+          data,
+          generateId()
+        ),
+      onSuccess: () => {
+        // The encounter moved unit and was re-queued, so the list pages and
+        // the routing trail both need to be re-read.
+        queryClient.invalidateQueries({ queryKey: ["encounters"] });
+      },
+    },
+    { url: `${API_URL}/encounters/${encounterId}/route`, method: "POST" }
+  );
+}
+
+// -- Consultation room: general (point-of-care) testing ---------------------
+
+/**
+ * Hook for fetching the general tests recorded in the room.
+ *
+ * @param encounterId - Encounter UUID
+ * @returns Query result with the tests, newest first
+ */
+export function useEncounterTests(encounterId: string) {
+  return useOfflineQuery<PointOfCareTest[]>({
+    queryKey: ["encounters", encounterId, "tests"],
+    queryFn: () =>
+      apiClient.get<PointOfCareTest[]>(`/encounters/${encounterId}/tests`),
+    enabled: !!encounterId,
+  });
+}
+
+/**
+ * Hook for recording a general test performed in the room.
+ *
+ * @param encounterId - Encounter UUID
+ * @returns Mutation for recording the test
+ */
+export function useRecordPointOfCareTest(encounterId: string) {
+  const queryClient = useQueryClient();
+
+  return useOfflineMutation<PointOfCareTest, PointOfCareTestCreate>(
+    {
+      mutationFn: (data: PointOfCareTestCreate) =>
+        apiClient.post<PointOfCareTest>(
+          `/encounters/${encounterId}/tests`,
+          data,
+          generateId()
+        ),
+      onSuccess: () => {
+        queryClient.invalidateQueries({
+          queryKey: ["encounters", encounterId, "tests"],
+        });
+      },
+    },
+    { url: `${API_URL}/encounters/${encounterId}/tests`, method: "POST" }
   );
 }

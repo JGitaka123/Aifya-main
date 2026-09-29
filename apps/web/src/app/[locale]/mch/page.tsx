@@ -56,6 +56,11 @@ const STATUS_STYLES: Record<string, string> = {
 export default function MCHDashboardPage() {
   const t = useTranslations("mch");
   const tc = useTranslations("common");
+
+  // Values rendered below come from the database. Fall back to a readable
+  // label when a value has no translation instead of raising MISSING_MESSAGE.
+  const mchLabel = (key: string) =>
+    t.has(key) ? t(key as Parameters<typeof t>[0]) : key.replace(/_/g, " ");
   const [tab, setTab] = useState<"anc" | "children">("anc");
   const [statusFilter, setStatusFilter] = useState<string>("");
   const [showANCForm, setShowANCForm] = useState(false);
@@ -370,7 +375,7 @@ export default function MCHDashboardPage() {
                       RISK_STYLES[profile.risk_level] ?? RISK_STYLES.low
                     )}
                   >
-                    {t(`risk_${profile.risk_level}` as "risk_low" | "risk_moderate" | "risk_high")}
+                    {mchLabel(`risk_${profile.risk_level}`)}
                   </span>
 
                   {/* Status badge */}
@@ -380,7 +385,7 @@ export default function MCHDashboardPage() {
                       STATUS_STYLES[profile.status] ?? STATUS_STYLES.active
                     )}
                   >
-                    {t(`status_${profile.status}` as "status_active" | "status_delivered" | "status_postnatal" | "status_closed")}
+                    {mchLabel(`status_${profile.status}`)}
                   </span>
                 </Link>
               ))}
@@ -492,7 +497,7 @@ export default function MCHDashboardPage() {
                         </span>
                       </div>
                       <div className="mt-0.5 flex items-center gap-3 text-sm text-muted-foreground">
-                        <span>{t(child.sex as "male" | "female")}</span>
+                        <span>{mchLabel(child.sex)}</span>
                         {child.age_months != null && (
                           <span>
                             {child.age_months} {t("months")}

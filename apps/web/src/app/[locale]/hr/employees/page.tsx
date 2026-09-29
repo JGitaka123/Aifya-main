@@ -5,10 +5,20 @@ import { useTranslations } from "next-intl";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
-import { Users, Plus, Search, X, Eye, Edit, FileText } from "lucide-react";
+import {
+  Users,
+  Plus,
+  Search,
+  X,
+  Eye,
+  Edit,
+  FileText,
+  AlertTriangle,
+  CheckCircle2,
+} from "lucide-react";
 import { Link } from "@/i18n/routing";
 import { apiClient } from "@/lib/api-client";
-import { generateId } from "@/lib/utils";
+import { cn, generateId } from "@/lib/utils";
 import {
   useEmployees,
   useCreateEmployee,
@@ -17,9 +27,19 @@ import {
   type DepartmentType,
   type EmploymentType,
 } from "@/hooks/usePayroll";
+import { useAssignableRoles } from "@/hooks/useHR";
 import { PageHeader } from "@/components/ui/PageHeader";
 import { StatusBadge } from "@/components/ui/StatusBadge";
 import { HelpTooltip } from "@/components/help/HelpTooltip";
+import {
+  ClinicScheduleFields,
+  findStaffIdByEmployeeNumber,
+  isClinicSessionComplete,
+  looksLikeDoctor,
+  looksLikeSpecialist,
+  saveClinicSchedules,
+  type ClinicSessionDraft,
+} from "@/components/hr/ClinicScheduleFields";
 
 const EMPLOYMENT_TYPES: EmploymentType[] = [
   "permanent",
@@ -56,6 +76,14 @@ const employeeSchema = z.object({
   house_allowance: z.coerce.number().min(0),
   transport_allowance: z.coerce.number().min(0),
   other_allowances: z.coerce.number().min(0),
+  // The role is HR's decision and is required: leaving it blank would fall back
+  // to guessing from the job title, which is exactly what this field replaces.
+  role: z.string().min(1),
+  // Optional. When HR sets one, the employee gets a login at the same time.
+  login_password: z
+    .string()
+    .optional()
+    .refine((value) => !value || value.length >= 8),
 });
 
 type EmployeeForm = z.infer<typeof employeeSchema>;
@@ -92,16 +120,24 @@ export default function EmployeesListPage() {
   const create = useCreateEmployee();
   const { data: departments } = useDepartments();
   const createDepartment = useCreateDepartment();
+  const { data: assignableRoles } = useAssignableRoles();
   const [createError, setCreateError] = useState<string | null>(null);
   const [showNewDept, setShowNewDept] = useState(false);
   const [newDeptName, setNewDeptName] = useState("");
   const [newDeptType, setNewDeptType] = useState<DepartmentType>("clinical");
   const [deptError, setDeptError] = useState<string | null>(null);
+  const [clinicSessions, setClinicSessions] = useState<ClinicSessionDraft[]>(
+    [],
+  );
+  const [notice, setNotice] = useState<
+    { tone: "success" | "warning"; text: string } | null
+  >(null);
   const {
     register,
     handleSubmit,
     reset,
     setValue,
+    watch,
     formState: { errors },
   } = useForm<EmployeeForm>({
     resolver: zodResolver(employeeSchema),
@@ -112,8 +148,16 @@ export default function EmployeesListPage() {
       house_allowance: 0,
       transport_allowance: 0,
       other_allowances: 0,
+      role: "",
+      login_password: "",
     },
   });
+
+  const jobTitle = watch("job_title");
+  const selectedRole = watch("role");
+  const roleDescription = (assignableRoles?.items ?? []).find(
+    (option) => option.role === selectedRole,
+  )?.description;
 
   const handleCreateDepartment = async () => {
     setDeptError(null);
@@ -165,6 +209,11 @@ export default function EmployeesListPage() {
       house_allowance: values.house_allowance ?? 0,
       transport_allowance: values.transport_allowance ?? 0,
       other_allowances: values.other_allowances ?? 0,
+      // The role is what decides which tabs this person will see, and the
+      // password is what lets them sign in at all. Both travel with the
+      // employee so HR grants access in the same step as adding them.
+      role: values.role,
+      login_password: values.login_password || undefined,
     };
     try {
       const employee = await create.mutateAsync(payload);
@@ -186,9 +235,41 @@ export default function EmployeesListPage() {
           generateId()
         );
       }
+      let scheduleNotice: { tone: "success" | "warning"; text: string } | null =
+        null;
+      const sessions = clinicSessions.filter(isClinicSessionComplete);
+      if (sessions.length > 0) {
+        const staffId = await findStaffIdByEmployeeNumber(employee.staff_id);
+        if (!staffId) {
+          scheduleNotice = {
+            tone: "warning",
+            text: t("clinicScheduleMissingStaff"),
+          };
+        } else {
+          try {
+            await saveClinicSchedules(staffId, sessions);
+            scheduleNotice = {
+              tone: "success",
+              text: t("clinicScheduleSaved"),
+            };
+          } catch {
+            scheduleNotice = {
+              tone: "warning",
+              text: t("clinicScheduleFailed"),
+            };
+          }
+        }
+      }
       reset();
+      setClinicSessions([]);
       setShowCreate(false);
       setCreateError(null);
+      setNotice(
+        scheduleNotice ??
+          (employee?.has_login
+            ? { tone: "success" as const, text: t("loginCreated") }
+            : null),
+      );
     } catch (err) {
       setCreateError(
         err instanceof Error ? err.message : "Failed to add the employee."
@@ -209,7 +290,11 @@ export default function EmployeesListPage() {
         actions={
           <button
             type="button"
-            onClick={() => setShowCreate(true)}
+            onClick={() => {
+              setClinicSessions([]);
+              setNotice(null);
+              setShowCreate(true);
+            }}
             className="inline-flex items-center gap-1.5 rounded-lg bg-primary px-3 py-2 text-sm font-medium text-primary-foreground hover:opacity-90"
           >
             <Plus className="h-4 w-4" />
@@ -217,6 +302,24 @@ export default function EmployeesListPage() {
           </button>
         }
       />
+
+      {notice && (
+        <div
+          className={cn(
+            "flex items-center gap-2 rounded-lg border px-4 py-3",
+            notice.tone === "success"
+              ? "border-green-300 bg-green-50 text-green-800 dark:border-green-800 dark:bg-green-950 dark:text-green-200"
+              : "border-amber-300 bg-amber-50 text-amber-800 dark:border-amber-800 dark:bg-amber-950 dark:text-amber-200",
+          )}
+        >
+          {notice.tone === "success" ? (
+            <CheckCircle2 className="h-4 w-4 shrink-0" />
+          ) : (
+            <AlertTriangle className="h-4 w-4 shrink-0" />
+          )}
+          <p className="text-sm">{notice.text}</p>
+        </div>
+      )}
 
       {/* Filters */}
       <div className="flex flex-wrap gap-3">
@@ -568,6 +671,79 @@ export default function EmployeesListPage() {
                   </div>
                 )}
               </section>
+
+              {/* System access: the role HR assigns and the login it comes with */}
+              <section>
+                <h3 className="mb-3 text-sm font-semibold uppercase tracking-wide text-muted-foreground">
+                  {t("systemAccess")}
+                </h3>
+                <p className="mb-4 rounded-lg border border-dashed border-border bg-muted/20 p-3 text-xs text-muted-foreground">
+                  {t("systemAccessHint")}
+                </p>
+                <div className="grid gap-4 sm:grid-cols-2">
+                  <div>
+                    <label className="block text-sm">
+                      <span className="mb-1 block text-muted-foreground">
+                        {t("role")}
+                      </span>
+                      <select
+                        {...register("role")}
+                        className="w-full rounded-lg border border-border bg-card px-3 py-2 text-sm"
+                      >
+                        <option value="">{t("selectRole")}</option>
+                        {(assignableRoles?.items ?? []).map((option) => (
+                          <option key={option.role} value={option.role}>
+                            {option.label}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                    {roleDescription && (
+                      <p className="mt-1 text-xs text-muted-foreground">
+                        {roleDescription}
+                      </p>
+                    )}
+                    {errors.role && (
+                      <span className="mt-1 block text-xs text-red-600 dark:text-red-400">
+                        {t("roleRequired")}
+                      </span>
+                    )}
+                  </div>
+                  <div>
+                    <Field
+                      label={t("initialPassword")}
+                      type="password"
+                      autoComplete="new-password"
+                      error={
+                        errors.login_password
+                          ? t("passwordTooShort")
+                          : undefined
+                      }
+                      {...register("login_password")}
+                    />
+                    <p className="mt-1 text-xs text-muted-foreground">
+                      {t("initialPasswordHint")}
+                    </p>
+                  </div>
+                </div>
+              </section>
+
+              {looksLikeSpecialist(jobTitle) && (
+                <section>
+                  <ClinicScheduleFields
+                    drafts={clinicSessions}
+                    onChange={setClinicSessions}
+                  />
+                </section>
+              )}
+
+              {looksLikeDoctor(jobTitle) && !looksLikeSpecialist(jobTitle) && (
+                <section>
+                  <p className="rounded-lg border border-dashed border-border bg-muted/20 p-3 text-xs text-muted-foreground">
+                    {t("clinicScheduleGeneralNotice")}
+                  </p>
+                </section>
+              )}
 
               {/* Bank */}
               <section>

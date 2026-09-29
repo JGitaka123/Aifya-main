@@ -77,6 +77,7 @@ class LabWorklistItem(BaseModel):
     patient_name: str | None = None
     patient_mrn: str | None = None
     ordered_by: uuid.UUID
+    ordered_by_name: str | None = None
     priority: str
     status: str
     specimen_type: str | None
@@ -85,6 +86,10 @@ class LabWorklistItem(BaseModel):
     test_count: int = 0
     pending_count: int = 0
     critical_count: int = 0
+    charge_total_cents: int | None = None
+    charge_paid_cents: int | None = None
+    charge_balance_cents: int | None = None
+    charge_status: str = "not_charged"
     created_at: datetime
 
     model_config = {"from_attributes": True}

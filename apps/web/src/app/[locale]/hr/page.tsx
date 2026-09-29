@@ -11,19 +11,29 @@ import {
   AlertTriangle,
   FileText,
   Search,
+  Ban,
+  Check,
+  ShieldCheck,
 } from "lucide-react";
 import { Link } from "@/i18n/routing";
 import {
   useHRSummary,
   useStaffDirectory,
-  useLeaveRequests,
   useShiftAssignments,
 } from "@/hooks/useHR";
-import { cn } from "@/lib/utils";
+import {
+  useApproveLeaveRequest,
+  useLeaveRequests as useEmployeeLeaveRequests,
+  type LeaveRequest,
+  type LeaveRequestStatus,
+} from "@/hooks/usePayroll";
+import { cn, todayISO } from "@/lib/utils";
 import { PageHeader } from "@/components/ui/PageHeader";
 import { StatCard } from "@/components/ui/StatCard";
 import { TabGroup } from "@/components/ui/TabGroup";
 import { DutyRosterManager } from "@/components/emergency/DutyRosterManager";
+import { StaffAccessDialog } from "@/components/hr/StaffAccessDialog";
+import type { StaffDirectoryItem } from "@aifya/shared";
 
 /** Role badge styling. */
 const ROLE_STYLES: Record<string, string> = {
@@ -55,21 +65,35 @@ const LEAVE_STATUS_STYLES: Record<string, string> = {
 export default function HRDashboardPage() {
   const t = useTranslations("hr");
   const tc = useTranslations("common");
-  const today = new Date().toISOString().split("T")[0];
+  const today = todayISO();
 
   const [activeTab, setActiveTab] = useState<"directory" | "leave" | "shifts">("directory");
   const [roleFilter, setRoleFilter] = useState("");
   const [searchQuery, setSearchQuery] = useState("");
   const [leaveStatusFilter, setLeaveStatusFilter] = useState("");
+  const [rosterDate, setRosterDate] = useState("");
+  const [accessStaff, setAccessStaff] = useState<StaffDirectoryItem | null>(
+    null
+  );
 
   const { data: summary } = useHRSummary();
   const { data: directory, isLoading: dirLoading } = useStaffDirectory(
     roleFilter || undefined,
     undefined,
-    searchQuery || undefined
+    searchQuery || undefined,
+    // Deactivated staff stay listed so HR can switch an account back on or
+    // move the person to a different role after they return.
+    true
   );
-  const { data: leaveList } = useLeaveRequests(undefined, leaveStatusFilter || undefined);
-  const { data: shifts } = useShiftAssignments(today);
+  // Leave is raised and approved in the payroll leave register, so the
+  // dashboard reads that same list instead of the unused HR register - which
+  // would otherwise leave this tab empty while requests sit waiting.
+  const { data: leaveList } = useEmployeeLeaveRequests(
+    leaveStatusFilter ? { status: leaveStatusFilter as LeaveRequestStatus } : {}
+  );
+  // No date filter by default: the roster shows every assignment, and the
+  // person can narrow it to a single day. Filtering to today hid past rosters.
+  const { data: shifts } = useShiftAssignments(rosterDate || undefined);
 
   const summaryCards = [
     { label: t("totalStaff"), value: summary?.total_staff ?? 0, icon: Users, color: "blue" as const },
@@ -166,6 +190,7 @@ export default function HRDashboardPage() {
                       <th className="px-4 py-3">{t("specialization")}</th>
                       <th className="px-4 py-3">{t("phone")}</th>
                       <th className="px-4 py-3">{t("license")}</th>
+                      <th className="px-4 py-3 text-right">{tc("actions")}</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-border">
@@ -209,6 +234,16 @@ export default function HRDashboardPage() {
                         </td>
                         <td className="px-4 py-3 text-muted-foreground">
                           {staff.license_number ?? "-"}
+                        </td>
+                        <td className="px-4 py-3 text-right">
+                          <button
+                            type="button"
+                            onClick={() => setAccessStaff(staff)}
+                            className="inline-flex items-center gap-1.5 rounded-lg border border-border bg-card px-2.5 py-1.5 text-xs font-medium text-foreground hover:bg-muted/50"
+                          >
+                            <ShieldCheck className="h-3.5 w-3.5" />
+                            {t("manageAccess")}
+                          </button>
                         </td>
                       </tr>
                     ))}
@@ -257,16 +292,17 @@ export default function HRDashboardPage() {
                       <th className="px-4 py-3">{t("days")}</th>
                       <th className="px-4 py-3">{t("status")}</th>
                       <th className="px-4 py-3">{t("reason")}</th>
+                      <th className="px-4 py-3 text-right">{tc("actions")}</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-border">
                     {leaveList.items.map((leave) => (
                       <tr key={leave.id} className="hover:bg-muted/50">
                         <td className="px-4 py-3 font-medium text-foreground">
-                          {leave.staff_name ?? "-"}
+                          {leave.employee_name ?? "-"}
                         </td>
                         <td className="px-4 py-3 text-foreground">
-                          {t(`leaveType_${leave.leave_type}`)}
+                          {leave.leave_type_name ?? "-"}
                         </td>
                         <td className="px-4 py-3 text-foreground">
                           {leave.start_date} — {leave.end_date}
@@ -287,6 +323,9 @@ export default function HRDashboardPage() {
                         <td className="px-4 py-3 text-muted-foreground max-w-xs truncate">
                           {leave.reason ?? "-"}
                         </td>
+                        <td className="px-4 py-3">
+                          <LeaveDecisionActions request={leave} />
+                        </td>
                       </tr>
                     ))}
                   </tbody>
@@ -301,10 +340,48 @@ export default function HRDashboardPage() {
       {activeTab === "shifts" && (
         <>
           <DutyRosterManager />
+
+          <div className="mb-4 flex flex-wrap items-center gap-3">
+            <label className="text-sm text-muted-foreground" htmlFor="roster-date">
+              {t("rosterDate")}
+            </label>
+            <input
+              id="roster-date"
+              type="date"
+              value={rosterDate}
+              onChange={(e) => setRosterDate(e.target.value)}
+              className="rounded-lg border border-border bg-card px-3 py-2 text-sm"
+            />
+            <button
+              type="button"
+              onClick={() => setRosterDate(today)}
+              className={cn(
+                "rounded-lg border px-3 py-2 text-sm font-medium transition-colors",
+                rosterDate === today
+                  ? "border-blue-600 bg-blue-600 text-white"
+                  : "border-border bg-card text-foreground hover:bg-muted/50"
+              )}
+            >
+              {t("today")}
+            </button>
+            <button
+              type="button"
+              onClick={() => setRosterDate("")}
+              className={cn(
+                "rounded-lg border px-3 py-2 text-sm font-medium transition-colors",
+                rosterDate === ""
+                  ? "border-blue-600 bg-blue-600 text-white"
+                  : "border-border bg-card text-foreground hover:bg-muted/50"
+              )}
+            >
+              {t("allDates")}
+            </button>
+          </div>
+
         <div className="rounded-xl border border-border bg-card shadow-[var(--shadow-card)]">
           {!Array.isArray(shifts?.items) || !shifts.items.length ? (
             <div className="p-8 text-center text-muted-foreground">
-              {t("noShiftsToday")}
+              {rosterDate ? t("noShiftsToday") : t("noShifts")}
             </div>
           ) : (
             <div className="overflow-x-auto">
@@ -343,6 +420,49 @@ export default function HRDashboardPage() {
         </div>
         </>
       )}
+
+      <StaffAccessDialog
+        staff={accessStaff}
+        onClose={() => setAccessStaff(null)}
+      />
+    </div>
+  );
+}
+
+/**
+ * Approve or reject controls for a pending leave request.
+ *
+ * @param request - Leave request awaiting a decision
+ * @returns Approve/reject buttons, or a dash for decided requests
+ */
+function LeaveDecisionActions({ request }: { request: LeaveRequest }) {
+  const tc = useTranslations("common");
+  const decide = useApproveLeaveRequest(request.id);
+
+  if (request.status !== "pending") {
+    return <span className="text-muted-foreground">-</span>;
+  }
+
+  return (
+    <div className="flex justify-end gap-2">
+      <button
+        type="button"
+        onClick={() => decide.mutate({ action: "reject" })}
+        disabled={decide.isPending}
+        className="inline-flex items-center gap-1.5 rounded-lg border border-border bg-card px-2.5 py-1 text-xs font-medium text-foreground hover:bg-muted/50 disabled:opacity-50"
+      >
+        <Ban className="h-3.5 w-3.5" />
+        {tc("reject")}
+      </button>
+      <button
+        type="button"
+        onClick={() => decide.mutate({ action: "approve" })}
+        disabled={decide.isPending}
+        className="inline-flex items-center gap-1.5 rounded-lg bg-primary px-2.5 py-1 text-xs font-medium text-primary-foreground hover:opacity-90 disabled:opacity-50"
+      >
+        <Check className="h-3.5 w-3.5" />
+        {tc("approve")}
+      </button>
     </div>
   );
 }

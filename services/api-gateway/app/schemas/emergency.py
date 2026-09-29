@@ -52,6 +52,13 @@ class AssignDoctorRequest(BaseModel):
     doctor_id: uuid.UUID
 
 
+class StageRequest(BaseModel):
+    """Schema for moving an emergency visit to the next stage of care."""
+
+    status: str = Field(..., pattern=r"^(in_treatment|observation)$")
+    notes: str | None = Field(None, max_length=1000)
+
+
 class DispositionRequest(BaseModel):
     """Schema for recording disposition."""
 

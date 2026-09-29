@@ -2,7 +2,7 @@
 
 import { useMemo, useState } from "react";
 import { useTranslations } from "next-intl";
-import { ListChecks, Plus, X } from "lucide-react";
+import { AlertTriangle, ListChecks, Plus, X } from "lucide-react";
 import { Link } from "@/i18n/routing";
 import {
   usePayrollRuns,
@@ -170,6 +170,12 @@ export default function PayrollRunsListPage() {
                     </td>
                     <td className="px-4 py-3">
                       <PayrollStatusBadge status={run.status} />
+                      {run.gl_posting_error && (
+                        <span className="ml-2 inline-flex items-center gap-1 rounded-full bg-red-100 px-2 py-0.5 text-xs font-medium text-red-700 dark:bg-red-950/40 dark:text-red-300">
+                          <AlertTriangle className="h-3 w-3" />
+                          {t("glPostFailedBadge")}
+                        </span>
+                      )}
                     </td>
                     <td className="px-4 py-3 text-right tabular-nums text-foreground">
                       {formatKES(run.total_gross * 100)}
