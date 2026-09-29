@@ -124,6 +124,17 @@ LEAVE_MANAGER_ROLES: frozenset[str] = frozenset(
 #: setting a salary is HR's.
 _PAYROLL_ROLES = ("hr", "hr_admin", "hr_officer", "finance_admin")
 
+#: The HR desk, as one authority. ``hr``, ``hr_admin`` and ``hr_officer`` are
+#: the same desk under three names, so every HR-owned action inside payroll
+#: admits all three. Pairing them with the facility administrators lets an
+#: administrator do the same work from the same screen.
+_HR_DESK_ADMINS = ("admin", "facility_admin", "hr", "hr_admin", "hr_officer")
+
+#: Who may read a payslip that is not their own: the HR desk and finance.
+_PAYSLIP_PRIVILEGED_ROLES: frozenset[str] = frozenset(
+    {"admin", "facility_admin", "finance_admin", "hr", "hr_admin", "hr_officer"}
+)
+
 router = APIRouter(
     dependencies=[
         Depends(require_module("hr")),
@@ -181,7 +192,7 @@ async def create_department(
     data: DepartmentCreate,
     db: AsyncSession = Depends(get_db),
     current_user: CurrentUser = Depends(
-        require_roles("admin", "facility_admin", "hr_admin")
+        require_roles(*_HR_DESK_ADMINS)
     ),
 ) -> DepartmentResponse:
     """Create a department.
@@ -377,7 +388,7 @@ async def create_employee(
     data: EmployeeCreate,
     db: AsyncSession = Depends(get_db),
     current_user: CurrentUser = Depends(
-        require_roles("admin", "facility_admin", "hr_admin")
+        require_roles(*_HR_DESK_ADMINS)
     ),
 ) -> EmployeeResponse:
     """Create a payroll-grade employee record.
@@ -508,7 +519,7 @@ async def update_employee(
     data: EmployeeUpdate,
     db: AsyncSession = Depends(get_db),
     current_user: CurrentUser = Depends(
-        require_roles("admin", "facility_admin", "hr_admin")
+        require_roles(*_HR_DESK_ADMINS)
     ),
 ) -> EmployeeResponse:
     """Patch an employee record."""
@@ -557,7 +568,7 @@ async def add_salary(
     data: SalaryStructureCreate,
     db: AsyncSession = Depends(get_db),
     current_user: CurrentUser = Depends(
-        require_roles("admin", "facility_admin", "hr_admin")
+        require_roles(*_HR_DESK_ADMINS)
     ),
 ) -> SalaryStructureResponse:
     """Add a salary effective record (HR admin only). Closes the previous
@@ -646,7 +657,7 @@ async def create_payroll_run(
     data: PayrollRunCreate,
     db: AsyncSession = Depends(get_db),
     current_user: CurrentUser = Depends(
-        require_roles("admin", "facility_admin", "hr_officer", "hr_admin")
+        require_roles(*_HR_DESK_ADMINS)
     ),
     x_idempotency_key: str | None = Header(None),
 ) -> PayrollRunResponse:
@@ -807,7 +818,7 @@ async def recalculate_payroll_run(
     run_id: uuid.UUID,
     db: AsyncSession = Depends(get_db),
     current_user: CurrentUser = Depends(
-        require_roles("admin", "facility_admin", "hr_officer", "hr_admin")
+        require_roles(*_HR_DESK_ADMINS)
     ),
 ) -> PayrollRunResponse:
     """Re-run the payroll engine for a draft run's period.
@@ -885,7 +896,7 @@ async def get_run_payslip(
     requester may only download their own payslip (matched via the employee
     record's email == JWT email). Other users get 403.
     """
-    privileged_roles = {"admin", "facility_admin", "hr_admin", "finance_admin"}
+    privileged_roles = _PAYSLIP_PRIVILEGED_ROLES
     is_privileged = bool(privileged_roles.intersection(current_user.roles))
 
     if not is_privileged:
@@ -944,7 +955,7 @@ async def list_employee_payslips(
     Access control: HR/finance admins can list any employee's payslips;
     otherwise the requester may only list their own.
     """
-    privileged_roles = {"admin", "facility_admin", "hr_admin", "finance_admin"}
+    privileged_roles = _PAYSLIP_PRIVILEGED_ROLES
     is_privileged = bool(privileged_roles.intersection(current_user.roles))
     if not is_privileged:
         emp_row = (
@@ -1151,9 +1162,7 @@ async def create_employee_deduction(
     data: EmployeeDeductionCreate,
     db: AsyncSession = Depends(get_db),
     current_user: CurrentUser = Depends(
-        require_roles(
-            "admin", "facility_admin", "finance_admin", "hr_admin", "hr_officer"
-        )
+        require_roles(*_HR_DESK_ADMINS, "finance_admin")
     ),
 ) -> EmployeeDeductionResponse:
     """Record a deduction for an employee.
@@ -1202,9 +1211,7 @@ async def delete_employee_deduction(
     deduction_id: uuid.UUID,
     db: AsyncSession = Depends(get_db),
     current_user: CurrentUser = Depends(
-        require_roles(
-            "admin", "facility_admin", "finance_admin", "hr_admin", "hr_officer"
-        )
+        require_roles(*_HR_DESK_ADMINS, "finance_admin")
     ),
 ) -> None:
     """Stop a deduction from being applied on the next payroll run."""
@@ -1417,7 +1424,7 @@ async def create_leave_type(
     data: LeaveTypeCreate,
     db: AsyncSession = Depends(get_db),
     current_user: CurrentUser = Depends(
-        require_roles("admin", "facility_admin", "hr_admin")
+        require_roles(*_HR_DESK_ADMINS)
     ),
 ) -> LeaveTypeResponse:
     """Create a facility leave type, reusing an existing one with the same name."""
@@ -1652,7 +1659,7 @@ async def process_leave_request(
     data: LeaveApprovalRequest,
     db: AsyncSession = Depends(get_db),
     current_user: CurrentUser = Depends(
-        require_roles("admin", "facility_admin", "hr_admin", "hr_officer")
+        require_roles(*_HR_DESK_ADMINS)
     ),
 ) -> LeaveRequestResponse:
     """Approve or reject a leave request."""
