@@ -28,6 +28,11 @@ from app.services.patient_service import PatientService
 _PATIENT_WRITE_ROLES = (
     "receptionist",
     "records",
+    # The front desk is one desk under three names - the sidebar and the
+    # permission table both treat medical_records as front-desk staff, so
+    # leaving it out here refused the registration tab to the one role the
+    # sidebar draws it for.
+    "medical_records",
     "nurse",
     "midwife",
     "doctor",

@@ -46,9 +46,17 @@ export function WorkspaceHeader({
         <Menu className="h-5 w-5" />
       </button>
 
-      <div className="min-w-0 lg:w-52">
-        <p className="truncate text-sm font-semibold text-foreground lg:text-base">
-          {t("clinicalWorkspace")}
+      <div className="min-w-0 lg:w-64">
+        {/*
+          The facility, not the person: every employee signed in at a hospital
+          should see which hospital they are working in. Falls back to the
+          generic title for a session that predates facilityName.
+        */}
+        <p
+          className="truncate text-sm font-semibold text-foreground lg:text-base"
+          title={user?.facilityName ?? undefined}
+        >
+          {user?.facilityName || t("clinicalWorkspace")}
         </p>
         <p className="hidden truncate text-xs text-muted-foreground lg:block">
           {t("workspaceSubtitle")}

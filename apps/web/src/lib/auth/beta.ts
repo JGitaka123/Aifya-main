@@ -11,6 +11,7 @@ export interface BetaUser {
   name: string;
   roles: string[];
   facilityId: string;
+  facilityName: string | null;
   departmentId: string | null;
   departmentName: string | null;
   permissions: string[];
@@ -32,6 +33,7 @@ const BETA_USER: BetaUser = {
     "hr",
   ],
   facilityId: "aifya-beta",
+  facilityName: "Aifya Beta Facility",
   departmentId: null,
   departmentName: null,
   permissions: [...ALL_PERMISSIONS],

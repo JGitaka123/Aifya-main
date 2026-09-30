@@ -41,6 +41,7 @@ from app.schemas.finance import (
     TrialBalanceResponse,
     TrialBalanceRow,
 )
+from app.services.finance.posting_engine import FinanceRecordNotFoundError
 
 _ZERO = Decimal("0")
 _QUANT = Decimal("0.01")
@@ -78,7 +79,11 @@ async def get_general_ledger(
             Account.id == account_id, Account.facility_id == facility_id
         )
     )
-    account = account_result.scalar_one()
+    account = account_result.scalar_one_or_none()
+    if account is None:
+        raise FinanceRecordNotFoundError(
+            "That account was not found at this facility."
+        )
 
     # Opening balance: sum of entries before ``start``
     opening_result = await db.execute(
@@ -168,7 +173,11 @@ async def get_trial_balance(
                 AccountingPeriod.facility_id == facility_id,
             )
         )
-        period = period_result.scalar_one()
+        period = period_result.scalar_one_or_none()
+        if period is None:
+            raise FinanceRecordNotFoundError(
+                "That accounting period was not found at this facility."
+            )
         end_date = period.end_date
 
     if end_date is None:
@@ -694,7 +703,11 @@ async def get_budget_vs_actual(
             AccountingPeriod.facility_id == facility_id,
         )
     )
-    period = period_result.scalar_one()
+    period = period_result.scalar_one_or_none()
+    if period is None:
+        raise FinanceRecordNotFoundError(
+            "That accounting period was not found at this facility."
+        )
 
     budgets_result = await db.execute(
         select(Budget, Account)

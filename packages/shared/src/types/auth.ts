@@ -16,6 +16,14 @@ export interface AuthUser {
   /** Roles carried by the access token. */
   roles: string[];
   facilityId: string;
+  /**
+   * The hospital or clinic this session belongs to.
+   *
+   * Shown in the workspace header so anyone signed in at a facility can see
+   * which one they are working in. Absent on sessions issued before the API
+   * reported it, so treat it as "unknown" and fall back rather than blank.
+   */
+  facilityName?: string | null;
   /** Unit the staff member is rostered to, when they have one. */
   departmentId?: string | null;
   departmentName?: string | null;

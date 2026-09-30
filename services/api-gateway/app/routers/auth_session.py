@@ -133,6 +133,9 @@ async def _public_user(
         "name": name or staff.email,
         "roles": [staff.role],
         "facilityId": str(facility.id),
+        # Every screen shows the hospital the session belongs to, so it travels
+        # with the user object rather than needing a second lookup per page.
+        "facilityName": facility.name,
         "departmentId": str(department_id) if department_id else None,
         "departmentName": department_name,
         "permissions": sorted(permissions),
@@ -433,7 +436,7 @@ async def me(
 
     @param current_user: Authenticated user from JWT
     @param db: Database session
-    @returns The user object including department and effective permissions
+    @returns The user object including facility, department and effective permissions
     """
     permissions = await resolve_permissions(db, current_user)
 
@@ -443,6 +446,11 @@ async def me(
     if staff is not None and not staff.is_deleted:
         department_id, department_name = await _staff_unit(db, staff)
 
+    # Read the name rather than trusting a claim: a facility rename reaches
+    # every open session at its next page load.
+    facility = await db.get(Facility, current_user.facility_id)
+    facility_name = facility.name if facility is not None else None
+
     return {
         "authenticated": True,
         "user": {
@@ -451,6 +459,7 @@ async def me(
             "name": current_user.name,
             "roles": current_user.roles,
             "facilityId": str(current_user.facility_id),
+            "facilityName": facility_name,
             "departmentId": str(department_id) if department_id else None,
             "departmentName": department_name,
             "permissions": sorted(permissions),

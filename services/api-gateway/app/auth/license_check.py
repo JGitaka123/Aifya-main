@@ -8,6 +8,7 @@ Use as a dependency on routers that need tier gating:
 Caches license validation in Redis for 5 minutes to avoid DB roundtrip per request.
 """
 
+import asyncio
 import contextlib
 import json
 import time
@@ -26,30 +27,21 @@ from app.services.licensing_service import LicensingService
 _CACHE_TTL = 300  # 5 minutes
 _CACHE_PREFIX = "license:entitlements:"
 
-# Lazy-loaded Redis connection. The negative result is cached too: when
-# Redis is unreachable, retrying the (slow) connection attempt on every
-# request adds ~2s of latency per API call, so re-check only periodically.
+# Lazy-loaded Redis connection. The connect attempt deliberately happens off
+# the request path: when Redis is down the socket timeout is the slow part, and
+# paying it inline made whichever request landed next wait out the full
+# timeout. The cache only ever saves a database round trip, so a request that
+# arrives before the probe finishes is answered from the database instead.
 _redis_client = None
 _redis_last_attempt_ts: float = 0.0
 _REDIS_RETRY_INTERVAL_SECONDS = 30.0
+#: Held so the in-flight probe cannot be garbage-collected mid-connect.
+_redis_probe: "asyncio.Task[None] | None" = None
 
 
-async def _get_redis():
-    """
-    Get or create async Redis client (lazy singleton).
-
-    @returns Redis client or None if unavailable
-    """
-    global _redis_client, _redis_last_attempt_ts
-    if _redis_client is not None:
-        return _redis_client
-
-    # Cooldown so an unavailable Redis is only retried periodically.
-    now = time.monotonic()
-    if now - _redis_last_attempt_ts < _REDIS_RETRY_INTERVAL_SECONDS:
-        return None
-    _redis_last_attempt_ts = now
-
+async def _probe_redis() -> None:
+    """Connect to Redis once, off the request path."""
+    global _redis_client
     try:
         from redis.asyncio import Redis
 
@@ -58,12 +50,47 @@ async def _get_redis():
             decode_responses=True,
             socket_connect_timeout=2,
         )
-        # Test connection
         await client.ping()
-        _redis_client = client
     except Exception:
         _redis_client = None
-    return _redis_client
+        return
+    _redis_client = client
+
+
+async def _get_redis():
+    """
+    Hand back the connected Redis client, re-probing in the background when
+    there is not one yet.
+
+    @returns Redis client, or None when the cache cannot be read from
+    """
+    global _redis_last_attempt_ts, _redis_probe
+    if _redis_client is not None:
+        return _redis_client
+
+    # One probe at a time, and no more often than the cooldown allows.
+    if _redis_probe is not None and not _redis_probe.done():
+        return None
+    now = time.monotonic()
+    if now - _redis_last_attempt_ts < _REDIS_RETRY_INTERVAL_SECONDS:
+        return None
+    _redis_last_attempt_ts = now
+    _redis_probe = asyncio.create_task(_probe_redis())
+    return None
+
+
+async def close_redis() -> None:
+    """Stop any probe and release the connection when the app shuts down."""
+    global _redis_client, _redis_probe
+    if _redis_probe is not None:
+        _redis_probe.cancel()
+        with contextlib.suppress(BaseException):
+            await _redis_probe
+        _redis_probe = None
+    if _redis_client is not None:
+        with contextlib.suppress(Exception):
+            await _redis_client.aclose()
+        _redis_client = None
 
 
 async def _get_entitlements(

@@ -61,6 +61,17 @@ class NoOpenPeriodError(FinanceError):
     """Raised when no open accounting period covers a posting date."""
 
 
+class FinanceRecordNotFoundError(FinanceError):
+    """Raised when a report names a record this facility does not hold.
+
+    An account, period or statement that does not exist - or that
+    belongs to another hospital - is a 404, not a crash. Row level
+    security makes those two indistinguishable on purpose, so the
+    message says the record was not found here rather than guessing
+    which of the two it was.
+    """
+
+
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
 

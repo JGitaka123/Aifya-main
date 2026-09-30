@@ -7,6 +7,7 @@ Exports the canonical posting entry point so other modules
 
 from app.services.finance.posting_engine import (
     FinanceError,
+    FinanceRecordNotFoundError,
     NoOpenPeriodError,
     PeriodLockedError,
     PostingRuleNotFoundError,
@@ -18,6 +19,7 @@ from app.services.finance.posting_engine import (
 
 __all__ = [
     "FinanceError",
+    "FinanceRecordNotFoundError",
     "NoOpenPeriodError",
     "PeriodLockedError",
     "PostingRuleNotFoundError",

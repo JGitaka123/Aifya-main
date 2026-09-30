@@ -160,6 +160,10 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     yield
     with suppress(Exception):
         await knowledge_shutdown()
+    with suppress(Exception):
+        from app.auth.license_check import close_redis
+
+        await close_redis()
 
 
 _logger = logging.getLogger(__name__)
@@ -381,6 +385,10 @@ app.include_router(
         *_PHARMACY,
         *_MONEY,
         *_RESEARCH,
+        # HR holds settings.manage, which owns the Setting and Integrations
+        # tabs. The sidebar draws Integrations for HR; without HR here the
+        # router refused the tab the sidebar had just offered.
+        *_HR,
     ),
 )
 app.include_router(

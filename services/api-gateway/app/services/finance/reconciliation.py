@@ -28,6 +28,7 @@ from app.schemas.finance import (
     BankStatementImportRow,
     ReconciliationResponse,
 )
+from app.services.finance.posting_engine import FinanceRecordNotFoundError
 
 _ZERO = Decimal("0")
 _QUANT = Decimal("0.01")
@@ -278,7 +279,11 @@ async def get_reconciliation_report(
                 AccountingPeriod.facility_id == facility_id,
             )
         )
-        period = period_result.scalar_one()
+        period = period_result.scalar_one_or_none()
+        if period is None:
+            raise FinanceRecordNotFoundError(
+                "That accounting period was not found at this facility."
+            )
         period_end = period.end_date
 
     # GL balance

@@ -69,6 +69,7 @@ from app.schemas.finance import (
 )
 from app.services.finance import (
     FinanceError,
+    FinanceRecordNotFoundError,
     PeriodLockedError,
     PostingRuleNotFoundError,
     UnbalancedTransactionError,
@@ -520,9 +521,12 @@ async def report_general_ledger(
     current_user: CurrentUser = Depends(get_current_user),
 ) -> GeneralLedgerResponse:
     """General ledger for one account."""
-    return await get_general_ledger(
-        db, current_user.facility_id, account_id, start, end
-    )
+    try:
+        return await get_general_ledger(
+            db, current_user.facility_id, account_id, start, end
+        )
+    except FinanceRecordNotFoundError as e:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, str(e)) from e
 
 
 @router.get("/reports/trial-balance", response_model=TrialBalanceResponse)
@@ -533,9 +537,12 @@ async def report_trial_balance(
     current_user: CurrentUser = Depends(get_current_user),
 ) -> TrialBalanceResponse:
     """Trial balance — debits should equal credits."""
-    return await get_trial_balance(
-        db, current_user.facility_id, period_id, as_of
-    )
+    try:
+        return await get_trial_balance(
+            db, current_user.facility_id, period_id, as_of
+        )
+    except FinanceRecordNotFoundError as e:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, str(e)) from e
 
 
 @router.get("/reports/profit-loss", response_model=ProfitLossResponse)
@@ -595,7 +602,12 @@ async def report_budget_vs_actual(
     current_user: CurrentUser = Depends(get_current_user),
 ) -> BudgetVsActualResponse:
     """Budget vs actual variance report."""
-    return await get_budget_vs_actual(db, current_user.facility_id, period_id)
+    try:
+        return await get_budget_vs_actual(
+            db, current_user.facility_id, period_id
+        )
+    except FinanceRecordNotFoundError as e:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, str(e)) from e
 
 
 # ── Periods ──────────────────────────────────────────────────────────────────
@@ -828,9 +840,12 @@ async def reconciliation_report(
     current_user: CurrentUser = Depends(get_current_user),
 ) -> ReconciliationResponse:
     """Reconciliation summary for a cash account."""
-    return await get_reconciliation_report(
-        db, current_user.facility_id, account_id, period_id
-    )
+    try:
+        return await get_reconciliation_report(
+            db, current_user.facility_id, account_id, period_id
+        )
+    except FinanceRecordNotFoundError as e:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, str(e)) from e
 
 
 # ── Fixed Assets ─────────────────────────────────────────────────────────────
