@@ -40,6 +40,14 @@ export function DestinationGuard({ children }: { children: ReactNode }) {
 
   const item = getDestinationForPath(pathname);
 
+  // A session that has not reported its roles yet has not answered the gate,
+  // so the page is let through rather than flashing a refusal while the
+  // sign-in resolves. The sidebar is already hiding role-owned tabs until the
+  // roles land, and the API refuses the same call again server-side.
+  if (!roles || roles.length === 0) {
+    return <>{children}</>;
+  }
+
   if (!item || isPathAllowed(pathname, { roles, hasPermission })) {
     return <>{children}</>;
   }

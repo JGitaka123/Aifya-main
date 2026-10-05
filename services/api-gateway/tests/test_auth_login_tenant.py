@@ -213,4 +213,5 @@ def test_a_blank_hospital_name_never_matches() -> None:
 
 def test_a_facility_without_a_code_still_matches_on_its_name() -> None:
     """The code is a convenience, not a requirement."""
-    assert _facility_matches("Aifya Test Hospital", _facility(code="")) is True
+    facility = _facility(code="")
+    assert _facility_matches(facility.name, facility) is True

@@ -194,11 +194,18 @@ async def _live_finance_probes(
     return tuple(probes)
 
 
-async def login(base: str, email: str, password: str, facility: str) -> httpx.Response:
+async def login(
+    base: str, email: str, password: str, facility: str, duty: str
+) -> httpx.Response:
     async with httpx.AsyncClient(timeout=60.0) as c:
         return await c.post(
             f"{base}/api/v1/auth/login",
-            json={"email": email, "password": password, "facility": facility},
+            json={
+                "email": email,
+                "password": password,
+                "facility": facility,
+                "duty": duty,
+            },
         )
 
 
@@ -208,12 +215,15 @@ async def main() -> int:
     ap.add_argument("--email", default="admin@aifya.health")
     ap.add_argument("--password", default="Admin@Aifya2026")
     ap.add_argument("--facility", default="Aifya Platform")
+    ap.add_argument("--duty", default="admin", help="state of duty declared at sign-in")
     ap.add_argument("--report", default="")
     ap.add_argument("--slow-ms", type=float, default=1000.0)
     ap.add_argument("--repeat", type=int, default=1, help="probe passes; later passes measure warm speed")
     args = ap.parse_args()
 
-    login_response = await login(args.base, args.email, args.password, args.facility)
+    login_response = await login(
+        args.base, args.email, args.password, args.facility, args.duty
+    )
     if login_response.status_code != 200:
         print(f"LOGIN FAILED {login_response.status_code}: {login_response.text[:300]}")
         return 2

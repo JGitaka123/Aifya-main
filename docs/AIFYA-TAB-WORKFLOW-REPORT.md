@@ -128,6 +128,8 @@ A facility may grant extra permissions to a role through an override row. Superu
 
 All 44 destinations from the single navigation catalogue (`apps/web/src/lib/navigation.ts`). The catalogue is also the source for the command palette, so there is exactly one definition of "where can I go".
 
+Every destination is answered by two gates: the permission in the last column, and the roles the destination belongs to in `apps/web/src/lib/navigation.ts`. The role is the key. A tab opens only for the role HR recorded on the staff member, and the state of duty declared at sign-in has to match that record before any workspace opens. An administrator is not a blanket exception: administrators own the back-office desks - HR, payroll, staff records, reports and the facility settings - and the clinical, pharmacy and finance desks stay with the roles that work them.
+
 | # | Tab | URL | API base | Module gate | Permission |
 |---|---|---|---|---|---|
 | 1 | Dashboard | `/` | multiple | - | any signed-in user |

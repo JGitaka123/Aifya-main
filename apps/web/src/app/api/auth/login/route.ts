@@ -63,20 +63,26 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     );
   }
 
-  let body: { email?: string; password?: string; facility?: string };
+  let body: {
+    email?: string;
+    password?: string;
+    facility?: string;
+    duty?: string;
+  };
   try {
     body = (await request.json()) as {
       email?: string;
       password?: string;
       facility?: string;
+      duty?: string;
     };
   } catch {
     return NextResponse.json({ error: "Invalid request body." }, { status: 400 });
   }
 
-  if (!body.email || !body.password || !body.facility) {
+  if (!body.email || !body.password || !body.facility || !body.duty) {
     return NextResponse.json(
-      { error: "Email, password and hospital name are required." },
+      { error: "Email, password, hospital name and state of duty are required." },
       { status: 400 },
     );
   }
@@ -89,6 +95,10 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
         email: body.email,
         password: body.password,
         facility: body.facility,
+        // The state of duty travels with the credentials so the API can match
+        // it against the role HR recorded: the duty, not the account, is the
+        // key that opens a workspace.
+        duty: body.duty,
       }),
       cache: "no-store",
     });

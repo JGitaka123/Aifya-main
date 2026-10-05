@@ -11,6 +11,7 @@ import {
   FileText,
   FlaskConical,
   LayoutDashboard,
+  ListOrdered,
   MessageSquare,
   Package,
   PersonStanding,
@@ -59,10 +60,13 @@ export interface NavItem {
 /**
  * Administrator roles.
  *
- * They administer every module, so a narrow role list must never hide one from
- * them - otherwise a facility admin could not reach the payroll they own.
+ * They run the back office - HR, payroll, staff records, reports and the
+ * facility settings - but they do not thereby work in the clinic, the pharmacy
+ * or the finance desk. A destination belongs to an administrator only when a
+ * list that names them is put on it, exactly as it does for every other duty,
+ * so the role HR recorded is the key that opens the room.
  */
-export const ALL_ACCESS_ROLES: readonly string[] = [
+export const ADMINISTRATOR_ROLES: readonly string[] = [
   "super_admin",
   "admin",
   "facility_admin",
@@ -111,6 +115,9 @@ const TRIALS_TEAM: readonly string[] = [...CLINICAL_TEAM, ...RESEARCH_TEAM];
 /** The knowledge base: HR and the clinical team. */
 const KNOWLEDGE_TEAM: readonly string[] = [...HR_TEAM, ...DOCTORS, ...NURSES];
 
+/** The back-office desks: HR's rooms, staffed by HR and the administrators. */
+const BACK_OFFICE: readonly string[] = [...HR_TEAM, ...ADMINISTRATOR_ROLES];
+
 /** WHO is the navigation being rendered for. */
 export interface NavigationAudience {
   /** Role names carried by the access token; undefined before the session loads. */
@@ -123,10 +130,10 @@ export interface NavigationAudience {
  * Whether a destination belongs in this user's navigation.
  *
  * Both gates must pass: the person must hold the tab's permission and one of
- * its roles. An unset role list leaves the decision to the permission alone,
- * and an unknown role list - a session that has not reported its roles yet -
- * errs towards showing the tab, because the API still refuses anything the
- * hospital has not granted.
+ * its roles. An unset role list leaves the decision to the permission alone.
+ * A role-owned tab is hidden until the session reports its roles, because the
+ * role is the key that opens the room - an unknown role is "not yet", never a
+ * grant.
  *
  * @param item - Navigation destination from NAV_ITEMS
  * @param viewer - The signed-in user's roles and permission test
@@ -141,9 +148,11 @@ export function isNavigationVisible(
   const allowed = item.roles;
   if (!allowed || allowed.length === 0) return true;
 
+  // The role is the key. A session that has not reported its roles yet is
+  // treated as "not yet", so nobody is handed a room their duty does not own
+  // while the sign-in is still resolving.
   const roles = viewer.roles;
-  if (!roles || roles.length === 0) return true;
-  if (roles.some((role) => ALL_ACCESS_ROLES.includes(role))) return true;
+  if (!roles || roles.length === 0) return false;
 
   return roles.some((role) => allowed.includes(role));
 }
@@ -218,6 +227,8 @@ export const NAV_ITEMS: readonly NavItem[] = [
   { key: "registration", href: "/patients/register", icon: UserPlus, module: "patients", permission: "patients.register", roles: FRONT_DESK },
   { key: "consultationRoom", href: "/consultation", icon: Stethoscope, module: "encounters", permission: "clinical.view", roles: NURSES, separator: true },
   { key: "clinical", href: "/clinical", icon: ClipboardList, module: "encounters", permission: "clinical.view", roles: CLINICAL_TEAM },
+  // The waiting room: reception issues tickets, nurses call patients in.
+  { key: "queue", href: "/queue", icon: ListOrdered, module: "encounters", permission: "clinical.view", roles: [...FRONT_DESK, ...NURSES] },
   { key: "opd", href: "/opd", icon: Stethoscope, module: "opd", permission: "opd.view", roles: CLINICAL_TEAM },
   { key: "ipd", href: "/ipd", icon: BedDouble, module: "ipd", permission: "ipd.view", roles: CLINICAL_TEAM },
   { key: "emergency", href: "/emergency", icon: Siren, module: "emergency", permission: "emergency.view", roles: CLINICAL_TEAM },
@@ -239,24 +250,24 @@ export const NAV_ITEMS: readonly NavItem[] = [
   { key: "reconciliation", href: "/finance/reconciliation", icon: Activity, module: "finance", permission: "finance.view", roles: ACCOUNTANTS },
   { key: "insurance", href: "/insurance", icon: Shield, module: "insurance", permission: "insurance.view", roles: ACCOUNTANTS },
   { key: "inventory", href: "/inventory", icon: Package, module: "inventory", permission: "inventory.view", roles: [...ACCOUNTANTS, ...STORES_TEAM] },
-  { key: "appointments", href: "/appointments", icon: CalendarClock, module: "appointments", permission: "appointments.view", roles: HR_TEAM, separator: true },
-  { key: "referrals", href: "/referrals", icon: ArrowUpRight, module: "referrals", permission: "referrals.view", roles: HR_TEAM },
-  { key: "hr", href: "/hr", icon: PersonStanding, module: "hr", permission: "hr.view", roles: HR_TEAM },
-  { key: "payroll", href: "/hr/payroll", icon: Wallet, module: "hr", permission: "hr.view", roles: HR_TEAM },
-  { key: "employees", href: "/hr/employees", icon: Users, module: "hr", permission: "hr.view", roles: HR_TEAM },
-  { key: "leave", href: "/hr/leave", icon: CalendarClock, module: "hr", permission: "hr.view", roles: HR_TEAM },
-  { key: "payrollReports", href: "/hr/payroll/reports", icon: FileText, module: "hr", permission: "hr.view", roles: HR_TEAM },
-  { key: "statutory", href: "/hr/payroll/statutory", icon: Shield, module: "hr", permission: "hr.view", roles: HR_TEAM },
-  { key: "aifyaUsage", href: "/hr/aifya-usage", icon: Activity, module: "hr", permission: "hr.view", roles: HR_TEAM },
-  { key: "reports", href: "/reports", icon: BarChart3, module: "reports", permission: "reports.view", roles: HR_TEAM },
-  { key: "analytics", href: "/analytics", icon: Activity, module: "analytics", permission: "analytics.view", roles: HR_TEAM },
-  { key: "performance", href: "/performance", icon: Activity, module: "analytics", permission: "analytics.view", roles: HR_TEAM },
-  { key: "communications", href: "/communications", icon: MessageSquare, module: "communications", permission: "communications.view", roles: HR_TEAM },
-  { key: "integrations", href: "/integrations/fhir", icon: Plug, module: "fhir", permission: "settings.manage", roles: HR_TEAM },
+  { key: "appointments", href: "/appointments", icon: CalendarClock, module: "appointments", permission: "appointments.view", roles: BACK_OFFICE, separator: true },
+  { key: "referrals", href: "/referrals", icon: ArrowUpRight, module: "referrals", permission: "referrals.view", roles: BACK_OFFICE },
+  { key: "hr", href: "/hr", icon: PersonStanding, module: "hr", permission: "hr.view", roles: BACK_OFFICE },
+  { key: "payroll", href: "/hr/payroll", icon: Wallet, module: "hr", permission: "hr.view", roles: BACK_OFFICE },
+  { key: "employees", href: "/hr/employees", icon: Users, module: "hr", permission: "hr.view", roles: BACK_OFFICE },
+  { key: "leave", href: "/hr/leave", icon: CalendarClock, module: "hr", permission: "hr.view", roles: BACK_OFFICE },
+  { key: "payrollReports", href: "/hr/payroll/reports", icon: FileText, module: "hr", permission: "hr.view", roles: BACK_OFFICE },
+  { key: "statutory", href: "/hr/payroll/statutory", icon: Shield, module: "hr", permission: "hr.view", roles: BACK_OFFICE },
+  { key: "aifyaUsage", href: "/hr/aifya-usage", icon: Activity, module: "hr", permission: "hr.view", roles: BACK_OFFICE },
+  { key: "reports", href: "/reports", icon: BarChart3, module: "reports", permission: "reports.view", roles: BACK_OFFICE },
+  { key: "analytics", href: "/analytics", icon: Activity, module: "analytics", permission: "analytics.view", roles: BACK_OFFICE },
+  { key: "performance", href: "/performance", icon: Activity, module: "analytics", permission: "analytics.view", roles: BACK_OFFICE },
+  { key: "communications", href: "/communications", icon: MessageSquare, module: "communications", permission: "communications.view", roles: BACK_OFFICE },
+  { key: "integrations", href: "/integrations/fhir", icon: Plug, module: "fhir", permission: "settings.manage", roles: BACK_OFFICE },
   { key: "trials", href: "/trials", icon: FlaskConical, module: "clinical_trials", permission: "trials.view", roles: TRIALS_TEAM, separator: true },
   { key: "knowledge", href: "/knowledge", icon: BookOpen, module: "knowledge", permission: "knowledge.view", roles: KNOWLEDGE_TEAM },
   { key: "userGuide", href: "/user-guide", icon: GraduationCap, separator: true },
-  { key: "settings", href: "/settings", icon: Settings, permission: "settings.manage", roles: HR_TEAM },
+  { key: "settings", href: "/settings", icon: Settings, permission: "settings.manage", roles: BACK_OFFICE },
 ];
 
 /** Navigation destinations shown before the user starts typing a command. */

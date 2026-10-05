@@ -2,8 +2,8 @@
 
 Active when AUTH_PROVIDER=internal so the branded login and registration
 forms verify credentials against Aifya's own database. Public endpoints:
-POST /auth/login and POST /auth/refresh. GET /auth/me requires a valid
-token and reuses the shared current_user dependency.
+POST /auth/login, POST /auth/refresh and GET /auth/duties. GET /auth/me
+requires a valid token and reuses the shared current_user dependency.
 
 Passwords live in the platform-level auth_accounts table (not RLS-scoped, by
 design - it is the identity lookup that maps an email to a staff member).
@@ -17,6 +17,9 @@ The flow, in the order it happens:
    staff.facility_id is the facility the token is issued for. See _resolve_tenant.
    The caller must have named that same hospital on the sign-in form; a
    mismatch is refused before any token is minted. See _facility_matches.
+   The caller must also declare the state of duty HR recorded for them, because
+   the role is the key that opens a workspace; a mismatch is refused the same
+   way. See duty_matches.
 3. Token. The signed token carries sub, facility_id, email, name and roles.
    Department is deliberately NOT a claim: it is resolved from the staff record
    on every request, so moving a clinician between units in HR takes effect at
@@ -45,6 +48,8 @@ from app.auth.internal_tokens import (
 from app.auth.permissions import (
     ALL_PERMISSIONS,
     ROLE_PERMISSIONS,
+    duty_matches,
+    duty_options,
     effective_role_permissions,
     resolve_permissions,
 )
@@ -66,6 +71,12 @@ class LoginRequest(BaseModel):
     #: the staff row, so asking for it here means a correct email and password
     #: pair still cannot open a session at the wrong hospital.
     facility: str = Field(..., min_length=2, max_length=255)
+    #: The state of duty the employee declares at sign-in. HR records the role
+    #: on the staff row; stating it here again means the workspace that opens is
+    #: the one the declared duty owns, not whichever tabs the account happens to
+    #: qualify for. It is compared on the duty family, so Doctor and clinician
+    #: are the same duty while Doctor and Nurse are not.
+    duty: str = Field(..., min_length=2, max_length=64)
 
 
 class RefreshRequest(BaseModel):
@@ -235,6 +246,11 @@ _LOGIN_REFUSALS: dict[str, tuple[int, str]] = {
         "These details are not registered at that hospital. Check the "
         "hospital name, or contact HR for assistance.",
     ),
+    "role_mismatch": (
+        status.HTTP_403_FORBIDDEN,
+        "These details are not registered for that state of duty. Check the "
+        "duty you selected, or contact HR for assistance.",
+    ),
     "invalid_credentials": (
         status.HTTP_401_UNAUTHORIZED,
         "Invalid email or password.",
@@ -345,6 +361,16 @@ async def login(data: LoginRequest, db: AsyncSession = Depends(get_db)):
         return JSONResponse(
             status_code=refusal_status,
             content={"code": "facility_mismatch", "detail": detail},
+        )
+
+    # The duty is the key to the workspace. HR put the role on the staff record
+    # and the person restates it here, so a correct password cannot open a
+    # clinic the person does not work in; the mismatch is HR's to fix.
+    if not duty_matches(data.duty, staff.role):
+        refusal_status, detail = _LOGIN_REFUSALS["role_mismatch"]
+        return JSONResponse(
+            status_code=refusal_status,
+            content={"code": "role_mismatch", "detail": detail},
         )
 
     name = (staff.first_name + " " + staff.last_name).strip()
@@ -465,6 +491,21 @@ async def me(
             "permissions": sorted(permissions),
         },
     }
+
+
+@router.get("/duties")
+async def list_duties() -> dict:
+    """
+    Report the states of duty the sign-in form offers.
+
+    Public by design: the picker is shown before anyone has a token, and it
+    lists only the duty names HR already recognises. The value that reaches the
+    API is checked against the staff record at sign-in, so this catalogue is a
+    convenience for the form, never the control.
+
+    @returns The duty options as role/label pairs
+    """
+    return {"duties": duty_options()}
 
 
 @router.get("/roles")

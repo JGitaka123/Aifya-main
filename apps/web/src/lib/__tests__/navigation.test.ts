@@ -138,18 +138,42 @@ describe("role destinations", () => {
     expect(tabs).not.toContain("pharmacy");
   });
 
-  it("lets an administrator reach every destination", () => {
+  it("keeps an administrator in the back office", () => {
     const everyPermission = NAV_ITEMS.map((item) => item.permission).filter(
       (permission): permission is string => Boolean(permission),
     );
+    const tabs = tabsFor(["facility_admin"], everyPermission);
 
-    expect(tabsFor(["facility_admin"], everyPermission)).toEqual(
-      NAV_ITEMS.map((item) => item.key),
-    );
+    // The desks an administrator runs.
+    expect(tabs).toContain("hr");
+    expect(tabs).toContain("payroll");
+    expect(tabs).toContain("employees");
+    expect(tabs).toContain("reports");
+    expect(tabs).toContain("settings");
+
+    // The desks that belong to another duty are not opened by being an admin.
+    expect(tabs).not.toContain("finance");
+    expect(tabs).not.toContain("chartOfAccounts");
+    expect(tabs).not.toContain("billing");
+    expect(tabs).not.toContain("pharmacy");
+    expect(tabs).not.toContain("clinical");
+    expect(tabs).not.toContain("laboratory");
   });
 
-  it("does not hide a destination from a session that has not loaded", () => {
+  it("holds a role-owned destination until the roles load", () => {
     const item = NAV_ITEMS.find((candidate) => candidate.key === "pharmacy");
+
+    expect(
+      item &&
+        isNavigationVisible(item, {
+          roles: undefined,
+          hasPermission: () => true,
+        }),
+    ).toBe(false);
+  });
+
+  it("still shows a role-free destination before the roles load", () => {
+    const item = NAV_ITEMS.find((candidate) => candidate.key === "patients");
 
     expect(
       item &&

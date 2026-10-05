@@ -32,6 +32,7 @@ knows is forbidden, but every endpoint enforces them again server-side.
 
 from __future__ import annotations
 
+import re
 import uuid
 from enum import StrEnum
 
@@ -468,6 +469,147 @@ ASSIGNABLE_ROLES: tuple[tuple[str, str, str], ...] = (
 _ASSIGNABLE_ROLE_NAMES: frozenset[str] = frozenset(
     role for role, _label, _purpose in ASSIGNABLE_ROLES
 )
+
+
+#: Administrator duties. HR may not assign these (see ASSIGNABLE_ROLES), but a
+#: bootstrap administrator still signs in and declares a duty like everyone
+#: else, so the sign-in picker lists them.
+_ADMINISTRATOR_DUTIES: tuple[tuple[str, str], ...] = (
+    ("super_admin", "Platform Administrator"),
+    ("admin", "Administrator"),
+    ("facility_admin", "Facility Administrator"),
+    ("hospital_administrator", "Hospital Administrator"),
+)
+
+#: The accepted spellings of each state of duty. HR writes the role onto the
+#: staff record and the employee declares it again at sign-in, so the two are
+#: compared on the duty family rather than the raw string: a person recorded as
+#: `clinician` may sign in as `Doctor` and is still the same duty. Keeping
+#: this list here - beside the role matrix - is what makes the declared duty and
+#: the granted access come from one place.
+_DUTY_ALIASES: dict[str, tuple[str, ...]] = {
+    "doctor": (
+        "doctor",
+        "clinician",
+        "physician",
+        "medical officer",
+        "medical doctor",
+    ),
+    "specialist": ("specialist", "consultant", "surgeon"),
+    "dentist": ("dentist", "dental surgeon"),
+    "nurse": (
+        "nurse",
+        "triage nurse",
+        "ward nurse",
+        "staff nurse",
+        "nursing officer",
+    ),
+    "midwife": ("midwife", "maternal health"),
+    "pharmacist": ("pharmacist", "pharmacy"),
+    "lab_tech": (
+        "lab tech",
+        "lab technician",
+        "laboratory technician",
+        "laboratory",
+        "pathologist",
+    ),
+    "radiologist": ("radiologist", "radiographer", "rad tech", "radiology"),
+    "receptionist": ("receptionist", "front desk", "reception"),
+    "records": ("records", "medical records", "health records"),
+    "cashier": ("cashier", "billing", "billing clerk", "billing officer"),
+    "finance_admin": ("finance", "finance admin", "accountant", "accounting"),
+    "hr_admin": (
+        "hr",
+        "hr admin",
+        "hr officer",
+        "human resource",
+        "human resources",
+        "hr administrator",
+    ),
+    "store_keeper": ("store keeper", "storekeeper", "stores"),
+    "research_coordinator": (
+        "research coordinator",
+        "research",
+        "principal investigator",
+    ),
+    "staff": ("staff", "support staff", "other"),
+    "super_admin": ("platform administrator", "super admin", "super administrator"),
+    "admin": ("administrator", "admin"),
+    "facility_admin": ("facility administrator", "facility admin"),
+    "hospital_administrator": ("hospital administrator", "hospital admin"),
+}
+
+
+def _normalise_duty(value: str) -> str:
+    """
+    Fold a stated duty to the form both sides are compared in.
+
+    @param value: Raw duty label or role code
+    @returns Lowercased, punctuation-free, whitespace-collapsed text
+    """
+    return re.sub(r"[^a-z0-9]+", " ", value.casefold()).strip()
+
+
+def _build_duty_tokens() -> dict[str, str]:
+    """
+    Map every accepted duty spelling to its duty family.
+
+    @returns Normalised duty text to family name
+    """
+    tokens: dict[str, str] = {}
+    for family, aliases in _DUTY_ALIASES.items():
+        tokens[_normalise_duty(family)] = family
+        for alias in aliases:
+            tokens[_normalise_duty(alias)] = family
+    for role, label, _purpose in ASSIGNABLE_ROLES:
+        family = tokens.get(_normalise_duty(role))
+        if family:
+            tokens[_normalise_duty(label)] = family
+    for role, label in _ADMINISTRATOR_DUTIES:
+        family = tokens.get(_normalise_duty(role))
+        if family:
+            tokens[_normalise_duty(label)] = family
+    return tokens
+
+
+_DUTY_TOKENS: dict[str, str] = _build_duty_tokens()
+
+
+def duty_options() -> list[dict[str, str]]:
+    """
+    The role/label pairs the sign-in state-of-duty picker offers.
+
+    @returns One dict per duty: role code and human label
+    """
+    options = [
+        {"role": role, "label": label} for role, label, _purpose in ASSIGNABLE_ROLES
+    ]
+    options.extend(
+        {"role": role, "label": label} for role, label in _ADMINISTRATOR_DUTIES
+    )
+    return options
+
+
+def duty_matches(submitted: str, stored_role: str | None) -> bool:
+    """
+    Whether the duty declared at sign-in is the one HR recorded.
+
+    The declared duty is the key that unlocks a workspace, so it has to agree
+    with the staff record. Accepted spellings are compared on the duty family,
+    so `Doctor` and `clinician` are the same duty while `Doctor` and
+    `Nurse` are not.
+
+    @param submitted: Duty the employee declared at sign-in
+    @param stored_role: Role HR wrote onto the staff record
+    @returns True when the two name the same duty
+    """
+    if not submitted or not stored_role:
+        return False
+    declared = _DUTY_TOKENS.get(_normalise_duty(submitted))
+    recorded = _DUTY_TOKENS.get(_normalise_duty(stored_role))
+    if declared is None or recorded is None:
+        return _normalise_duty(submitted) == _normalise_duty(stored_role)
+    return declared == recorded
 
 
 def normalise_role(role: str) -> str:

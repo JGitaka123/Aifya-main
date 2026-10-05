@@ -3,7 +3,7 @@
 import { type FormEvent, useEffect, useRef, useState } from "react";
 import { useTranslations } from "next-intl";
 import { Link } from "@/i18n/routing";
-import { Building2, Eye, EyeOff, Lock, Mail } from "lucide-react";
+import { Briefcase, Building2, Eye, EyeOff, Lock, Mail } from "lucide-react";
 import AuthShell, {
   AuthMiniBrand,
   AuthTabs,
@@ -85,9 +85,19 @@ function clearRefusedAttempts(): void {
   }
 }
 
+/** One state of duty the sign-in form can declare. */
+export interface DutyOption {
+  /** Role code the API matches against the staff record. */
+  role: string;
+  /** Human label shown in the picker. */
+  label: string;
+}
+
 interface LoginFormProps {
   /** True when the deployment signs users in through Keycloak. */
   keycloakEnabled: boolean;
+  /** States of duty offered by the API. Empty falls back to a free-text field. */
+  duties: DutyOption[];
 }
 
 /**
@@ -103,7 +113,7 @@ interface LoginFormProps {
  * @param props - Which provider is in force
  * @returns The sign-in page contents
  */
-export default function LoginForm({ keycloakEnabled }: LoginFormProps) {
+export default function LoginForm({ keycloakEnabled, duties }: LoginFormProps) {
   const t = useTranslations("auth");
   const [showPassword, setShowPassword] = useState(false);
   const [remember, setRemember] = useState(true);
@@ -112,6 +122,7 @@ export default function LoginForm({ keycloakEnabled }: LoginFormProps) {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [facility, setFacility] = useState("");
+  const [duty, setDuty] = useState("");
   const [alert, setAlert] = useState<SignInAlert | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const emailRef = useRef<HTMLInputElement>(null);
@@ -154,10 +165,12 @@ export default function LoginForm({ keycloakEnabled }: LoginFormProps) {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         credentials: "include",
-        // The hospital travels with the credentials so the API can match it
-        // against the employee's HR record: a valid password still must not
-        // open the wrong hospital's data.
-        body: JSON.stringify({ email, password, facility }),
+        // The hospital and the state of duty travel with the credentials so
+        // the API can match them against the employee's HR record: a valid
+        // password still must not open the wrong hospital, and the duty the
+        // person declares has to be the one HR recorded before any workspace
+        // opens.
+        body: JSON.stringify({ email, password, facility, duty }),
       });
       const data = (await response.json().catch(() => ({}))) as {
         error?: string;
@@ -196,6 +209,15 @@ export default function LoginForm({ keycloakEnabled }: LoginFormProps) {
           setAlert({
             title: t("accessDeniedTitle"),
             body: data.error ?? t("invalidCredentials"),
+          });
+          return;
+        }
+        if (data.code === "role_mismatch") {
+          // The duty declared here is not the one HR recorded. The API says so
+          // plainly, and this is the confusion the duty step exists to stop.
+          setAlert({
+            title: t("accessDeniedTitle"),
+            body: data.error ?? t("roleMismatchBody"),
           });
           return;
         }
@@ -317,6 +339,42 @@ export default function LoginForm({ keycloakEnabled }: LoginFormProps) {
                 required
                 className={`${AUTH_INPUT_CLASS} pl-10 placeholder:font-medium placeholder:text-[#6E7E90]`}
               />
+            </div>
+
+            <div className="relative">
+              <Briefcase className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-[#93A7B6]" />
+              {duties.length > 0 ? (
+                <select
+                  id="duty"
+                  name="duty"
+                  value={duty}
+                  onChange={(event) => setDuty(event.target.value)}
+                  aria-label={t("stateOfDuty")}
+                  required
+                  className={`${AUTH_INPUT_CLASS} appearance-none pl-10 placeholder:font-medium placeholder:text-[#6E7E90]`}
+                >
+                  <option value="" disabled>
+                    {t("stateOfDutyPlaceholder")}
+                  </option>
+                  {duties.map((option) => (
+                    <option key={option.role} value={option.role}>
+                      {option.label}
+                    </option>
+                  ))}
+                </select>
+              ) : (
+                <input
+                  id="duty"
+                  type="text"
+                  name="duty"
+                  value={duty}
+                  onChange={(event) => setDuty(event.target.value)}
+                  aria-label={t("stateOfDuty")}
+                  placeholder={t("stateOfDutyPlaceholder")}
+                  required
+                  className={`${AUTH_INPUT_CLASS} pl-10 placeholder:font-medium placeholder:text-[#6E7E90]`}
+                />
+              )}
             </div>
 
             <div className="relative">

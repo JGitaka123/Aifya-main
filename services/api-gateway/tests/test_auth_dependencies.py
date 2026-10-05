@@ -11,8 +11,9 @@ from fastapi.security import HTTPAuthorizationCredentials
 from jose import JWTError, jwt
 from starlette.requests import Request
 
-from app.auth import keycloak
+from app.auth import internal_tokens, keycloak
 from app.auth.dependencies import CurrentUser, get_current_user
+from app.config import settings
 from app.middleware.facility_context import set_facility_context
 
 USER_ID = uuid.UUID("11111111-1111-1111-1111-111111111111")
@@ -98,6 +99,30 @@ def _set_keycloak_settings(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(keycloak.settings, "keycloak_client_id", CLIENT_ID)
 
 
+def _stub_internal_provider(
+    monkeypatch: pytest.MonkeyPatch,
+    fake_decode_token,
+) -> None:
+    """Make get_current_user use a stubbed internal decoder.
+
+    The dependency imports the active provider's decoder at call time and then
+    re-reads the employee row, so both the decoder and that liveness check are
+    replaced here: these tests cover claim mapping and request wiring, not the
+    database or the signature on a token.
+    """
+
+    monkeypatch.setattr(settings, "auth_provider", "internal")
+    monkeypatch.setattr(settings, "beta_public_access", False)
+    monkeypatch.setattr(internal_tokens, "decode_token", fake_decode_token)
+
+    async def _still_active(_current_user: CurrentUser) -> None:
+        return None
+
+    monkeypatch.setattr(
+        "app.auth.dependencies._assert_internal_account_active", _still_active
+    )
+
+
 @pytest.mark.asyncio
 async def test_decode_token_rejects_unsigned_token(
     monkeypatch: pytest.MonkeyPatch,
@@ -168,11 +193,11 @@ async def test_decode_token_refreshes_jwks_on_unknown_kid(
 async def test_get_current_user_builds_user_from_verified_payload(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    async def fake_decode_token(token: str) -> dict[str, Any]:
+    def fake_decode_token(token: str) -> dict[str, Any]:
         assert token == "verified-token"
         return _payload()
 
-    monkeypatch.setattr("app.auth.dependencies.decode_token", fake_decode_token)
+    _stub_internal_provider(monkeypatch, fake_decode_token)
 
     user = await get_current_user(
         _request(),
@@ -192,11 +217,11 @@ async def test_get_current_user_builds_user_from_verified_payload(
 async def test_get_current_user_accepts_cookie_token(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    async def fake_decode_token(token: str) -> dict[str, Any]:
+    def fake_decode_token(token: str) -> dict[str, Any]:
         assert token == "cookie-token"
         return _payload(realm_access={"roles": ["doctor"]}, resource_access={})
 
-    monkeypatch.setattr("app.auth.dependencies.decode_token", fake_decode_token)
+    _stub_internal_provider(monkeypatch, fake_decode_token)
 
     user = await get_current_user(_request("cookie-token"), None)
 
@@ -209,10 +234,10 @@ async def test_get_current_user_accepts_cookie_token(
 async def test_get_current_user_does_not_default_roles(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    async def fake_decode_token(_token: str) -> dict[str, Any]:
+    def fake_decode_token(_token: str) -> dict[str, Any]:
         return _payload(realm_access={}, resource_access={})
 
-    monkeypatch.setattr("app.auth.dependencies.decode_token", fake_decode_token)
+    _stub_internal_provider(monkeypatch, fake_decode_token)
 
     user = await get_current_user(
         _request(),
@@ -231,15 +256,17 @@ async def test_get_current_user_sets_facility_context_on_live_session(
 
     seen: dict[str, Any] = {}
 
-    async def fake_decode_token(_token: str) -> dict[str, Any]:
+    def fake_decode_token(_token: str) -> dict[str, Any]:
         return _payload()
 
-    async def fake_set_facility_context(session: FakeSession, facility_id: str) -> None:
+    async def fake_set_facility_context(
+        session: FakeSession, facility_id: str, **_kwargs: Any
+    ) -> None:
         seen["session"] = session
         seen["facility_id"] = facility_id
 
     monkeypatch.setattr("app.auth.dependencies.AsyncSession", FakeSession)
-    monkeypatch.setattr("app.auth.dependencies.decode_token", fake_decode_token)
+    _stub_internal_provider(monkeypatch, fake_decode_token)
     monkeypatch.setattr(
         "app.auth.dependencies.set_facility_context",
         fake_set_facility_context,

@@ -16,8 +16,9 @@ from httpx import AsyncClient
 from sqlalchemy import select
 
 from app.models.auth_account import AuthAccount
+from app.models.facility import Facility
 from app.models.staff import Staff
-from tests.conftest import session_factory
+from tests.conftest import FACILITY_ID, session_factory
 
 pytestmark = pytest.mark.asyncio
 
@@ -66,6 +67,30 @@ async def _staff_row(employee_number: str) -> Staff:
         ).scalar_one()
 
 
+async def _seed_facility() -> None:
+    """Create the facility row the signed-in staff record points at."""
+    async with session_factory() as db:
+        db.add(
+            Facility(
+                id=FACILITY_ID,
+                name=FACILITY_NAME,
+                code="AIFYA-TEST",
+                facility_type="hospital",
+                timezone="Africa/Nairobi",
+                currency="KES",
+                onboarding_status="approved",
+                is_active=True,
+            )
+        )
+        await db.commit()
+
+
+@pytest.fixture
+async def facility(setup_database) -> None:
+    """Seed a facility after the schema is cleared, so sign-in can bind it."""
+    await _seed_facility()
+
+
 async def test_role_catalogue_lists_only_assignable_roles(
     client: AsyncClient,
 ) -> None:
@@ -105,6 +130,7 @@ async def test_unknown_role_is_refused(client: AsyncClient) -> None:
 
 async def test_login_is_created_with_the_employee(
     client: AsyncClient,
+    facility: None,
 ) -> None:
     """A password on the form creates a login the employee can actually use."""
     email = f"dorcas.{uuid.uuid4().hex[:6]}@example.com"
@@ -126,6 +152,7 @@ async def test_login_is_created_with_the_employee(
             "email": email,
             "password": "NursePass123",
             "facility": FACILITY_NAME,
+            "duty": "nurse",
         },
     )
     assert login.status_code == 200
@@ -159,6 +186,7 @@ async def test_deactivating_staff_stops_the_login(client: AsyncClient) -> None:
             "email": email,
             "password": "LabPass1234",
             "facility": FACILITY_NAME,
+            "duty": "lab_tech",
         },
     )
     # Deactivation switches the auth account off. The correct password still
@@ -176,7 +204,9 @@ async def test_deactivating_staff_stops_the_login(client: AsyncClient) -> None:
     assert account.is_active is False
 
 
-async def test_role_change_moves_the_access(client: AsyncClient) -> None:
+async def test_role_change_moves_the_access(
+    client: AsyncClient, facility: None
+) -> None:
     """Editing the role is what changes which tabs the employee may open."""
     email = f"mary.{uuid.uuid4().hex[:6]}@example.com"
     created = await _create_employee(
@@ -200,6 +230,7 @@ async def test_role_change_moves_the_access(client: AsyncClient) -> None:
             "email": email,
             "password": "MaryPass123",
             "facility": FACILITY_NAME,
+            "duty": "receptionist",
         },
     )
     permissions = login.json()["user"]["permissions"]

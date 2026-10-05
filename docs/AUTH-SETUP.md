@@ -112,6 +112,12 @@ force.
   credentials to the BFF (`POST /api/auth/login`), which calls
   `POST /api/v1/auth/login` on the API and stores the returned HS256 tokens in
   httpOnly cookies.
+- The form also asks for the **hospital** and the **state of duty**. Both are
+  matched against the staff record HR keeps, so a valid password cannot open
+  the wrong hospital, and the duty the person declares has to be the one HR
+  recorded before any workspace opens. The duty options come from
+  `GET /api/v1/auth/duties`, fetched by the sign-in page so the picker never
+  keeps a second list that can drift.
 - `POST /api/auth/refresh` renews them against `POST /api/v1/auth/refresh`.
 
 ### `keycloak`

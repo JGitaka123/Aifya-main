@@ -11,7 +11,7 @@ import { useAuth } from "@/components/providers/AuthProvider";
  * header, command palette) so the sign-in / registration screens are
  * full-screen branded pages.
  */
-const PUBLIC_AUTH_SUFFIXES = ["/login", "/signup", "/auth/callback"];
+const PUBLIC_AUTH_SUFFIXES = ["/login", "/signup", "/auth/callback", "/display"];
 
 /**
  * True when pathname is a full-screen auth route (locale-prefixed or bare).
