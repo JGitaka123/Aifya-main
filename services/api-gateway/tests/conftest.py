@@ -116,6 +116,9 @@ _schema_ready = False
 FACILITY_ID = uuid.UUID("00000000-0000-0000-0000-000000000001")
 USER_ID = uuid.UUID("00000000-0000-0000-0000-000000000002")
 DB_SESSION_TEST_MODULES = {
+    "test_queue.py",
+    "test_queue_concurrency.py",
+    "test_voice_tts.py",
     # Needs the schema for the role_permissions overrides and the endpoint
     # gates, not only for HTTP tests.
     "test_permissions.py",
@@ -199,6 +202,18 @@ async def client() -> AsyncGenerator[AsyncClient, None]:
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as ac:
         yield ac
+
+
+@pytest_asyncio.fixture
+async def db_session() -> AsyncGenerator[AsyncSession, None]:
+    """A committed-session handle for services the HTTP client cannot reach."""
+    async with session_factory() as session:
+        try:
+            yield session
+            await session.commit()
+        except Exception:
+            await session.rollback()
+            raise
 
 
 @pytest.fixture

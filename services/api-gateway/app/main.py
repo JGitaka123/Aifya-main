@@ -29,6 +29,7 @@ from app.bootstrap_internal import (
     ensure_internal_super_admin,
     ensure_keycloak_bootstrap,
 )
+from app.routers import queue, voice
 from app.routers import (
     agents,
     aifya_usage,
@@ -429,6 +430,12 @@ app.include_router(
     dependencies=_guarded(*_HR),
 )
 app.include_router(help_bot.router, prefix="/api/v1/help", tags=["help-bot"])
+
+# Queue management and patient calling. The state machine lives in
+# services/queue/state_machine.py and the voice layer is proxied here so
+# the TTS API key never reaches a browser.
+app.include_router(queue.router, prefix="/api/v1/queue", tags=["queue"])
+app.include_router(voice.router, prefix="/api/v1/voice", tags=["voice"])
 
 # Institutional Knowledge (RAG). This used to be a separate service on :8025;
 # it now runs inside this process so there is one backend, one port and one

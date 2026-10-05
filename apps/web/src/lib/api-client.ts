@@ -11,12 +11,18 @@ function normalizeApiBaseUrl(baseUrl: string): string {
   return trimmed.endsWith("/api/v1") ? trimmed : `${trimmed}/api/v1`;
 }
 
-const API_BASE_URL = normalizeApiBaseUrl(
+export const API_BASE_URL = normalizeApiBaseUrl(
   process.env.NEXT_PUBLIC_API_URL ?? "/api/v1",
 );
 
 interface RequestOptions extends RequestInit {
   params?: Record<string, string>;
+  /**
+   * Public endpoints (the corridor display board) are called without a staff
+   * session, so a 401 means "wrong display token", not "sign in again". Skip
+   * the refresh-and-redirect dance and let the caller render its own error.
+   */
+  skipAuthRedirect?: boolean;
 }
 
 /**
@@ -59,7 +65,7 @@ class ApiClient {
    * @returns Parsed JSON response
    */
   async request<T>(path: string, options: RequestOptions = {}): Promise<T> {
-    const { params, ...fetchOptions } = options;
+    const { params, skipAuthRedirect, ...fetchOptions } = options;
 
     let url = `${this.baseUrl}${path}`;
     if (params) {
@@ -83,6 +89,7 @@ class ApiClient {
 
     if (
       response.status === 401 &&
+      !skipAuthRedirect &&
       typeof window !== "undefined" &&
       !BETA_PUBLIC_ACCESS_ENABLED
     ) {
@@ -120,8 +127,12 @@ class ApiClient {
    * @param params - Query parameters
    * @returns Parsed response
    */
-  async get<T>(path: string, params?: Record<string, string>): Promise<T> {
-    return this.request<T>(path, { method: "GET", params });
+  async get<T>(
+    path: string,
+    params?: Record<string, string>,
+    options: RequestOptions = {},
+  ): Promise<T> {
+    return this.request<T>(path, { ...options, method: "GET", params });
   }
 
   /**

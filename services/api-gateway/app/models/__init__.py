@@ -72,6 +72,12 @@ from app.models.mch import (
 )
 from app.models.mpesa import MpesaStkRequest
 from app.models.patient import Patient
+from app.models.queue import (
+    QueueAnnouncement,
+    QueueEvent,
+    QueueServicePoint,
+    QueueTicket,
+)
 from app.models.payroll import (
     Employee,
     EmployeeSalary,

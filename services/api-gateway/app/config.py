@@ -112,6 +112,28 @@ class Settings(BaseSettings):
     deepseek_api_key: str = ""
     deepseek_base_url: str = "https://api.deepseek.com"
 
+    # Voice / Patient Calling (TTS)
+    # When VOICE_ENABLED is false (or TTS_API_KEY is blank) the queue still
+    # runs and the board still updates - the speaker just has nothing to play.
+    voice_enabled: bool = False
+    # "openai" calls any OpenAI-compatible /audio/speech endpoint;
+    # "elevenlabs" calls the ElevenLabs text-to-speech API.
+    tts_provider: str = "openai"
+    tts_api_key: str = ""
+    tts_base_url: str = "https://api.openai.com/v1"
+    tts_model: str = "gpt-4o-mini-tts"
+    # For OpenAI this is a voice name (alloy, nova, ...); for ElevenLabs it
+    # is the voice *id* from the ElevenLabs console.
+    tts_voice: str = "alloy"
+    tts_audio_format: str = "mp3"
+    tts_language: str = "en"
+    # Public board / speaker devices prove themselves with this shared
+    # token instead of a staff login, and see only ticket numbers and
+    # rooms. Leave blank to switch the public board off entirely.
+    queue_display_token: str = ""
+    queue_display_facility_id: str = ""
+
+
     # M-Pesa Daraja
     mpesa_consumer_key: str = ""
     mpesa_consumer_secret: str = ""
