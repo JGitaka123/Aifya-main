@@ -5,6 +5,7 @@ from sqlalchemy import case, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.base import EventBase
+from app.models.encounter import Encounter
 from app.models.patient import Patient
 from app.models.radiology import ImagingOrder, ImagingResult
 from app.schemas.radiology import (
@@ -19,6 +20,12 @@ from app.schemas.radiology import (
     ImagingWorklistItem,
     RadiologySummary,
 )
+from app.services.queue.queue_service import (
+    CRITICAL_REVIEW_PRIORITY,
+    RETURN_REVIEW_PRIORITY,
+    QueueService,
+)
+from app.services.queue.routing import find_department_id
 from app.services.service_billing import (
     IMAGING_ORDER,
     ServiceBillingService,
@@ -26,6 +33,16 @@ from app.services.service_billing import (
     post_service_charge,
 )
 from app.services.worklist_context import staff_display_names
+
+
+#: Units that run imaging, matched by code first and then by name.
+RADIOLOGY_DEPARTMENT_CODES = ("RAD", "RADIOLOGY", "IMG", "IMAGING", "XRAY")
+RADIOLOGY_DEPARTMENT_NAME_HINTS = ("radiol", "imaging", "x-ray", "xray")
+
+#: Order priority -> the queue's triage vocabulary and priority. A stat study is
+#: called ahead of an urgent one, and both ahead of a routine visit.
+_ORDER_PRIORITY = {"stat": 5, "urgent": 4, "routine": 2}
+_ORDER_TRIAGE = {"stat": "emergency", "urgent": "urgent", "routine": "non_urgent"}
 
 
 class RadiologyService:
@@ -115,7 +132,50 @@ class RadiologyService:
         )
         self.db.add(event)
 
+        # Bridge the study onto the radiology call board: the patient is waiting
+        # in imaging, and the room speakers have to know their number.
+        await self._queue_imaging_order(order, data, facility_id, ordered_by)
+
         return order
+
+    async def _queue_imaging_order(
+        self,
+        order: ImagingOrder,
+        data: ImagingOrderCreate,
+        facility_id: uuid.UUID,
+        ordered_by: uuid.UUID,
+    ) -> None:
+        """Put the patient in the imaging waiting line.
+
+        Imaging is a room of its own: an order is a wait, not just a charge. The
+        ticket carries the order's urgency, so a stat study is called ahead of a
+        routine one, and the order number, so staff can match the number the
+        speaker reads to the study on the worklist.
+
+        @param order: The order that was just created
+        @param data: The order request
+        @param facility_id: Facility scope
+        @param ordered_by: Clinician who ordered the study
+        """
+
+        department_id = await find_department_id(
+            self.db,
+            facility_id=facility_id,
+            codes=RADIOLOGY_DEPARTMENT_CODES,
+            name_hints=RADIOLOGY_DEPARTMENT_NAME_HINTS,
+        )
+        priority_key = (data.priority or "routine").lower()
+        await QueueService(self.db).enqueue_patient(
+            facility_id=facility_id,
+            patient_id=data.patient_id,
+            actor_id=ordered_by,
+            department_id=department_id,
+            triage_category=_ORDER_TRIAGE.get(priority_key, "non_urgent"),
+            priority=_ORDER_PRIORITY.get(priority_key, 2),
+            prefix="RAD",
+            notes=f"Imaging order {order.order_number}",
+            idempotency_key=f"imaging-order:{order.id}",
+        )
 
     # ── Worklist ──────────────────────────────────────────────────────────
 
@@ -546,6 +606,16 @@ class RadiologyService:
         await self.db.flush()
         await self.db.refresh(imaging_result)
 
+        if order is not None:
+            # The report is ready: put the patient back on the ordering
+            # clinician's board so the review is called in like any other wait.
+            await self._queue_imaging_review(
+                order=order,
+                critical=bool(imaging_result.is_critical),
+                facility_id=facility_id,
+                verified_by=verified_by,
+            )
+
         event = EventBase(
             facility_id=facility_id,
             stream_type="imaging",
@@ -563,6 +633,52 @@ class RadiologyService:
         self.db.add(event)
 
         return imaging_result
+
+    async def _queue_imaging_review(
+        self,
+        *,
+        order: ImagingOrder,
+        critical: bool,
+        facility_id: uuid.UUID,
+        verified_by: uuid.UUID,
+    ) -> None:
+        """Call the patient back to the ordering clinician for review.
+
+        The visit's own ticket was for the first wait. The report is a second
+        one, so the patient is put back on the clinician's board with a fresh
+        number and the report's urgency. A study with no encounter has no
+        clinician to return to, so it is left alone.
+
+        @param order: The completed imaging order
+        @param critical: Whether the report flagged a critical finding
+        @param facility_id: Facility scope
+        @param verified_by: Staff member who released the report
+        """
+
+        if order.encounter_id is None:
+            return
+        encounter = (
+            await self.db.execute(
+                select(Encounter).where(
+                    Encounter.id == order.encounter_id,
+                    Encounter.facility_id == facility_id,
+                )
+            )
+        ).scalars().first()
+        if encounter is None:
+            return
+        await QueueService(self.db).enqueue_return(
+            facility_id=facility_id,
+            patient_id=order.patient_id,
+            encounter_id=order.encounter_id,
+            department_id=encounter.department_id,
+            encounter_type=encounter.encounter_type,
+            actor_id=verified_by,
+            priority=CRITICAL_REVIEW_PRIORITY if critical else RETURN_REVIEW_PRIORITY,
+            triage_category="emergency" if critical else "urgent",
+            notes=f"Imaging report ready: {order.order_number}",
+            idempotency_key=f"imaging-review:{order.id}",
+        )
 
     # ── Critical Finding Notification ─────────────────────────────────────
 

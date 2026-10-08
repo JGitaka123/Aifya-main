@@ -27,10 +27,11 @@ from app.schemas.hr import (
 from app.services.leave_overlap import staff_ids_on_approved_leave
 from app.services.staff_access import (
     find_login,
+    provision_staff_login,
     set_login_active,
-    set_login_password,
     staff_with_login_ids,
 )
+from app.services.staff_notifications import notify_staff_activated
 
 
 class HRService:
@@ -168,6 +169,7 @@ class HRService:
         if staff is None:
             return None
 
+        was_active = staff.is_active
         staff.is_active = is_active
         # The login follows the staff record: deactivating an employee has to
         # stop them signing in, not just hide them from the directory.
@@ -184,6 +186,60 @@ class HRService:
             item.department_name = (
                 await self.db.execute(
                     select(Department.name).where(Department.id == staff.department_id)
+                )
+            ).scalar_one_or_none()
+
+        # Activation is the moment the employee can finally sign in, so it is
+        # the moment Aifya tells them. Only on the off->on transition, and only
+        # when a login exists to sign in with; deactivation is silent.
+        if is_active and not was_active and item.has_login:
+            item.activation_email_sent = await notify_staff_activated(
+                self.db, facility_id=facility_id, staff=staff
+            )
+        return item
+
+    async def set_work_status(
+        self,
+        facility_id: uuid.UUID,
+        staff_id: uuid.UUID,
+        work_status: str,
+    ) -> StaffDirectoryItem | None:
+        """
+        Change a staff member's declared availability.
+
+        Deliberately separate from ``set_staff_active``: deactivation removes
+        the login, availability only says whether the person can take a
+        patient now. Returned in the same directory shape as every other HR
+        edit, so the picker and the screen stay in step.
+
+        @param facility_id: Facility UUID
+        @param staff_id: Staff UUID to change
+        @param work_status: available, busy, on_leave, off_duty or unavailable
+        @returns The updated directory item, or None when not found here
+        """
+        staff = (
+            await self.db.execute(
+                select(Staff).where(
+                    Staff.id == staff_id,
+                    Staff.facility_id == facility_id,
+                    Staff.is_deleted == False,  # noqa: E712
+                )
+            )
+        ).scalar_one_or_none()
+        if staff is None:
+            return None
+
+        staff.work_status = work_status
+        await self.db.flush()
+        await self.db.refresh(staff)
+
+        item = StaffDirectoryItem.model_validate(staff)
+        item.has_login = (await find_login(self.db, staff.id)) is not None
+        department_id = staff.department_id or staff.primary_department_id
+        if department_id is not None:
+            item.department_name = (
+                await self.db.execute(
+                    select(Department.name).where(Department.id == department_id)
                 )
             ).scalar_one_or_none()
         return item
@@ -259,18 +315,23 @@ class HRService:
         password: str,
     ) -> Staff | None:
         """
-        Set or reset the sign-in password of a staff member.
+        Set or create the sign-in password of a staff member.
+
+        Setting a first password is how a record-only employee is granted
+        access: when no login exists this creates one, so HR does not have to
+        send the person back through the payroll form. A later call resets the
+        password on the login that is already there.
 
         @param facility_id: Facility UUID
         @param staff_id: Staff UUID
         @param password: New plaintext password
         @returns The staff row, or None when not found here
-        @raises StaffAccessError: When the password is weak or no login exists
+        @raises StaffAccessError: When the password is weak or the email is taken
         """
         staff = await self.get_staff(facility_id, staff_id)
         if staff is None:
             return None
-        await set_login_password(self.db, staff=staff, password=password)
+        await provision_staff_login(self.db, staff=staff, password=password)
         return staff
 
     # ── Staff Profiles ───────────────────────────────────────────────────

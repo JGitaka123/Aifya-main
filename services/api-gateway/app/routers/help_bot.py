@@ -60,7 +60,7 @@ async def ask_help_bot(
     """
     Ask the help bot a navigation / how-do-I question.
     Clinical questions are refused — the user is redirected to a clinician
-    or to the Clinical Decision Support module.
+    or to the Clinical module.
 
     @param data: Help question, plus the screen it was asked from
     @param current_user: Authenticated user from JWT (used for role + tenant)

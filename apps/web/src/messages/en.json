@@ -174,6 +174,7 @@
     "userGuide": "User Guide",
     "communications": "Communications",
     "integrations": "Integrations",
+    "myAvailability": "My Availability",
     "settings": "Settings",
     "pos": "Point of Sale",
     "consultationRoom": "Consultation Room",
@@ -322,6 +323,7 @@
     "startVisitTakeFee": "Start visit & take consultation fee",
     "visitStarted": "Visit started - queue number {queue}. Take the consultation fee below.",
     "sendToOpd": "Send to OPD for vitals",
+    "sentToOpdNote": "Patient is queued for OPD - the nurse will call the next patient.",
     "returningPatientTitle": "Returning patient - start today's visit",
     "returningPatientHint": "Find the patient's existing record, then open today's visit and take the consultation fee. Use this for anyone who has been seen here before.",
     "registrationError": "Failed to register patient",
@@ -594,6 +596,23 @@
     "referHistoryTitle": "Routing history",
     "referHistoryEmpty": "This patient has not been sent to another unit yet.",
     "referUnassigned": "Unassigned",
+    "referSpecialty": "Specialty",
+    "referSpecialtyAll": "All specialties",
+    "referAvailability": "Availability",
+    "referAvailabilityAvailable": "Available only",
+    "referAvailabilityAll": "Everyone",
+    "referProvidersTitle": "Eligible providers",
+    "referProviderCount": "{count} providers",
+    "referProviderChooseUnit": "Choose a unit to see who can take the patient.",
+    "referProviderLoading": "Checking who is available...",
+    "referProviderEmpty": "No clinician matches these filters right now.",
+    "referProviderAnyHint": "Leave the selection empty to send the patient to the unit's queue for any clinician to pick up.",
+    "referProviderSelected": "Assigning to {name}",
+    "referStatusAvailable": "Available",
+    "referStatusBusy": "Busy",
+    "referStatusOnLeave": "On leave",
+    "referStatusOffDuty": "Off duty",
+    "referStatusUnavailable": "Unavailable",
     "referFlow": "{step} Refer",
     "testsTab": "Tests",
     "testsFlow": "{step} Tests",
@@ -1207,7 +1226,8 @@
         "lab_order": "Lab request",
         "imaging_order": "Imaging study",
         "prescription": "Prescription",
-        "point_of_care": "Point-of-care tests"
+        "point_of_care": "Point-of-care tests",
+        "mch_anc_visit": "ANC visit"
       }
     },
     "mpesaPanel": {
@@ -2139,6 +2159,7 @@
     "roleUpdated": "Role updated. Their access changed with it.",
     "passwordUpdated": "Password updated.",
     "accessGranted": "Access granted. They can sign in now.",
+    "activationEmailSent": "Activation email sent to {email}.",
     "accessRevoked": "Access revoked. They can no longer sign in.",
     "accessUpdateFailed": "Could not update the access for this employee.",
     "active": "Active",
@@ -3951,6 +3972,7 @@
     "initialPasswordHint": "At least 8 characters. Leave blank to add the employee without a login for now.",
     "passwordTooShort": "The password must be at least 8 characters long.",
     "loginCreated": "Employee added and login created. They can sign in with the password you set.",
+    "activationEmailSent": "Employee added and the activation email sent to {email}.",
     "weekday": {
       "monday": "Monday",
       "tuesday": "Tuesday",
@@ -4252,7 +4274,26 @@
       }
     }
   },
-  "home": {
+  "availability": {
+    "title": "My Availability",
+    "subtitle": "The days and hours you are on duty. HR owns your role, department and specialty.",
+    "currentStatus": "Current availability",
+    "scheduledToday": "You are on duty today.",
+    "notScheduledToday": "You are not scheduled for duty today.",
+    "save": "Save availability",
+    "saving": "Saving...",
+    "saved": "Availability saved.",
+    "failed": "Could not save availability. Please try again.",
+    "saveHint": "Patients are only routed to you on the days and hours you set here.",
+    "notLinked": "Your sign-in is not linked to a staff record yet. Ask HR to complete your employee record.",
+    "hrPanelTitle": "Work schedule and current availability",
+    "hrPanelHint": "Edit this if the employee is away and cannot update their own week.",
+    "status_available": "Available",
+    "status_busy": "Busy",
+    "status_on_leave": "On leave",
+    "status_off_duty": "Off duty",
+    "status_unavailable": "Unavailable"
+  },  "home": {
     "goodMorning": "Good Morning",
     "goodAfternoon": "Good Afternoon",
     "goodEvening": "Good Evening",
@@ -4319,7 +4360,8 @@
     "statusInactive": "Inactive",
     "activate": "Activate",
     "deactivate": "Deactivate",
-    "statusError": "Could not change the staff member's status."
+    "statusError": "Could not change the staff member's status.",
+    "activationEmailSent": "Activation email sent to {email}."
   },
   "queue": {
     "title": "Waiting Room",

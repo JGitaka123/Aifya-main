@@ -76,7 +76,12 @@ from app.schemas.payroll import (
 )
 from app.services.hr_service import HRService
 from app.services.payroll.employee_staff_sync import sync_employee_to_staff
-from app.services.staff_access import StaffAccessError, find_login, provision_login
+from app.services.staff_access import (
+    StaffAccessError,
+    find_login,
+    provision_staff_login,
+)
+from app.services.staff_notifications import notify_staff_activated
 from app.services.payroll.engine import run_monthly_payroll
 from app.services.payroll.gl_integration import post_payroll_to_gl
 from app.services.payroll.leave import (
@@ -457,9 +462,10 @@ async def create_employee(
         role_override=role,
     )
     has_login = False
+    activation_email_sent = False
     if login_password and staff is not None:
         try:
-            await provision_login(
+            await provision_staff_login(
                 db,
                 staff=staff,
                 password=login_password,
@@ -470,6 +476,20 @@ async def create_employee(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)
             ) from exc
         has_login = True
+
+        # HR set a first password, so the employee can sign in the moment the
+        # record is saved: hand them the sign-in details at the same time
+        # rather than making HR relay them. Best effort - a mail server that
+        # is down leaves the account created and the record tells HR why.
+        # Only when HR gave a real address. sync_employee_to_staff invents one
+        # otherwise, and there is nothing to deliver to an invented mailbox.
+        if staff.is_active and (emp.email or "").strip():
+            activation_email_sent = await notify_staff_activated(
+                db,
+                facility_id=current_user.facility_id,
+                staff=staff,
+                password=login_password,
+            )
     await db.refresh(emp)
     response = EmployeeResponse.model_validate(emp)
     return response.model_copy(
@@ -478,6 +498,7 @@ async def create_employee(
                 db, current_user.facility_id, emp.department_id
             ),
             "has_login": has_login,
+            "activation_email_sent": activation_email_sent,
         }
     )
 

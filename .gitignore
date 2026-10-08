@@ -78,3 +78,9 @@ services/ai-service/knowledge/data/
 
 # Local data volumes (generic bind-mount data dirs)
 data/
+
+# Test overlays / local TTS smoke artifacts
+test_announcement.wav
+.testdeps/
+test.db
+test.db-journal

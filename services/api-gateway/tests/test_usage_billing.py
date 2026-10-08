@@ -259,6 +259,7 @@ async def test_report_defaults_to_the_facility_rate() -> None:
     await _seed_september()
     async with session_factory() as db:
         await AifyaUsageService(db).set_config(FACILITY_ID, 3_500, "KES", None)
+        await db.commit()
 
     async with session_factory() as db:
         report = await UsageBillingService(db).build_report(
@@ -350,6 +351,7 @@ async def test_usage_billing_endpoint_follows_the_configured_rate(
     await _seed_september()
     async with session_factory() as db:
         await AifyaUsageService(db).set_config(FACILITY_ID, 3_500, "KES", None)
+        await db.commit()
 
     response = await client.get(f"/api/v1/reports/usage-billing?month={MONTH}")
 

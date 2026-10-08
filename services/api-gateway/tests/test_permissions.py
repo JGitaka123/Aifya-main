@@ -86,6 +86,12 @@ def as_doctor() -> Iterator[None]:
     yield from _role_fixture("doctor")
 
 
+@pytest.fixture
+def as_nurse() -> Iterator[None]:
+    """Sign in at the nursing station."""
+    yield from _role_fixture("nurse")
+
+
 @pytest_asyncio.fixture
 async def grant() -> AsyncGenerator[GrantFn, None]:
     """Insert role_permissions rows for the test facility."""
@@ -240,6 +246,19 @@ async def test_receptionist_cannot_call_the_next_patient(
     response = await client.post("/api/v1/encounters/queue/call-next")
 
     assert response.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_a_nurse_can_call_the_next_patient(
+    client: AsyncClient, as_nurse: None
+) -> None:
+    """Calling the next waiting patient is nursing work, not just a doctor's."""
+    response = await client.post("/api/v1/queue/call-next", json={})
+
+    # An empty queue answers 404; a permission refusal would be 403 and
+    # would mean the OPD button is dead for the people who run the line.
+    assert response.status_code == 404
+
 
 
 async def test_cashier_cannot_open_the_clinical_worklist(

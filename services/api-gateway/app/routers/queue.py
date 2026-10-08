@@ -150,6 +150,44 @@ def _respond(ticket: QueueTicket, context: dict) -> QueueTicketResponse:
     return base.model_copy(update=context.get(str(ticket.id), {}))
 
 
+async def announce_ticket_call(
+    ticket: QueueTicket,
+    service: QueueService,
+    *,
+    destination: str | None = None,
+    recalled: bool = False,
+) -> dict:
+    """Publish one spoken call for a ticket to every connected board.
+
+    The waiting board is no longer the only caller: a nurse pulling a
+    patient into OPD and a doctor pulling one into the consultation room
+    both speak through here, so whichever surface presses the button the
+    patient hears the same sentence their ticket number deserves.
+
+    @param ticket: The ticket being called
+    @param service: Queue service bound to the request session
+    @param destination: Room to name; falls back to the ticket label
+    @param recalled: True when this repeats a call already made
+    @returns The speech payload that was published
+    """
+
+    context = await service.display_context(
+        facility_id=ticket.facility_id, tickets=[ticket]
+    )
+    ctx = context.get(str(ticket.id), {})
+    label = destination or ctx.get("service_point_label") or ctx.get("department_name")
+    announcement = AnnouncementService(service.db)
+    text, normalized = announcement.script_for(ticket, label, recalled=recalled)
+    speech = {
+        "text": text,
+        "normalized": normalized,
+        "language": announcement.language,
+        "recalled": recalled,
+    }
+    await _publish(ticket, service, "RECALLED" if recalled else "CALLED", speech=speech)
+    return speech
+
+
 async def _load_ticket(
     *, service: QueueService, facility_id: uuid.UUID, ticket_id: uuid.UUID
 ) -> QueueTicket:
@@ -267,7 +305,16 @@ async def get_stats(
 async def call_next_patient(
     data: QueueCallNextRequest,
     db: AsyncSession = Depends(get_db),
-    current_user: CurrentUser = Depends(require_permission(Permission.CLINICAL_CONSULT)),
+    current_user: CurrentUser = Depends(
+        require_permission(
+            Permission.CLINICAL_CONSULT,
+            # Nursing runs the OPD line: the nurse calls the next
+            # waiting patient to the station, exactly like the
+            # waiting board used to.
+            Permission.TRIAGE_RECORD,
+            any_of=True,
+        )
+    ),
 ) -> QueueTicketResponse:
     """Call the highest priority waiting patient.
 

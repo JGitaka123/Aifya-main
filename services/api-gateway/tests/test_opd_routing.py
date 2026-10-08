@@ -91,7 +91,11 @@ async def test_route_moves_patient_to_destination_and_queues_them(
     assert data["encounter"]["department_id"] == dental_id
     assert data["encounter"]["status"] == "waiting"
 
-    queue = await client.get("/api/v1/encounters/queue")
+    # The destination owns the patient now, so they appear on that unit's
+    # board rather than the front-door queue they were routed out of.
+    queue = await client.get(
+        f"/api/v1/encounters/queue?department_id={dental_id}"
+    )
     routed = next(
         item
         for item in queue.json()["items"]

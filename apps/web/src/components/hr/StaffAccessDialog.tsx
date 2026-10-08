@@ -82,19 +82,30 @@ export function StaffAccessDialog({ staff, onClose }: StaffAccessDialogProps) {
   const toggleActive = () =>
     run(async () => {
       const next = !isActive;
-      await setActive.mutateAsync({ staffId: staff.id, isActive: next });
+      const updated = await setActive.mutateAsync({
+        staffId: staff.id,
+        isActive: next,
+      });
       setIsActive(next);
-      setNotice(next ? t("accessGranted") : t("accessRevoked"));
+      if (next && updated.activation_email_sent) {
+        setNotice(t("activationEmailSent", { email: staff.email }));
+      } else {
+        setNotice(next ? t("accessGranted") : t("accessRevoked"));
+      }
     });
 
   const savePassword = () =>
     run(async () => {
-      await setLoginPassword.mutateAsync({
+      const result = await setLoginPassword.mutateAsync({
         staffId: staff.id,
         data: { password },
       });
       setPassword("");
-      setNotice(t("passwordUpdated"));
+      if (result.activation_email_sent) {
+        setNotice(t("activationEmailSent", { email: staff.email }));
+      } else {
+        setNotice(t("passwordUpdated"));
+      }
     });
 
   const currentLabel =

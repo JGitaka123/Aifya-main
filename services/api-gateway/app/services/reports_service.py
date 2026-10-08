@@ -623,192 +623,198 @@ class ReportsService:
         today = date.today()
         month_start = today.replace(day=1)
 
-        # Patients
-        total_patients = await self._count(Patient, facility_id)
-        patients_today = await self._count_date(Patient, facility_id, today, today)
-        patients_month = await self._count_date(Patient, facility_id, month_start, today)
-
-        # OPD
-        opd_today = await self._count_encounters(facility_id, "opd", today, today)
-        opd_month = await self._count_encounters(facility_id, "opd", month_start, today)
-
-        # IPD
-        active_admissions = await self.db.execute(
-            select(func.count(Admission.id)).where(
-                Admission.facility_id == facility_id,
-                Admission.is_deleted == False,  # noqa: E712
-                Admission.status == "admitted",
+        def count_of(model: Any, *criteria: Any) -> Any:
+            """Scalar subquery counting the facility's non-deleted rows."""
+            return (
+                select(func.count(model.id))
+                .where(
+                    model.facility_id == facility_id,
+                    model.is_deleted == False,  # noqa: E712
+                    *criteria,
+                )
+                .scalar_subquery()
             )
-        )
-        admissions_today = await self._count_date(Admission, facility_id, today, today)
-        discharges_today = await self.db.execute(
-            select(func.count(Admission.id)).where(
-                Admission.facility_id == facility_id,
-                Admission.is_deleted == False,  # noqa: E712
+
+        def count_created_between(
+            model: Any, column: Any, d_from: date, d_to: date
+        ) -> Any:
+            """Scalar subquery counting rows created within a date range."""
+            return count_of(
+                model,
+                func.date(column) >= d_from,
+                func.date(column) <= d_to,
+            )
+
+        def sum_of(model: Any, column: Any, *criteria: Any) -> Any:
+            """Scalar subquery totalling a money column for the facility."""
+            return (
+                select(func.coalesce(func.sum(column), 0))
+                .where(
+                    model.facility_id == facility_id,
+                    model.is_deleted == False,  # noqa: E712
+                    *criteria,
+                )
+                .scalar_subquery()
+            )
+
+        counters: dict[str, Any] = {
+            # Patients
+            "total_patients": count_of(Patient),
+            "patients_today": count_created_between(
+                Patient, Patient.created_at, today, today
+            ),
+            "patients_month": count_created_between(
+                Patient, Patient.created_at, month_start, today
+            ),
+            # OPD
+            "opd_today": count_of(
+                Encounter,
+                Encounter.encounter_type == "opd",
+                func.date(Encounter.encounter_date) >= today,
+                func.date(Encounter.encounter_date) <= today,
+            ),
+            "opd_month": count_of(
+                Encounter,
+                Encounter.encounter_type == "opd",
+                func.date(Encounter.encounter_date) >= month_start,
+                func.date(Encounter.encounter_date) <= today,
+            ),
+            # IPD
+            "active_admissions": count_of(
+                Admission, Admission.status == "admitted"
+            ),
+            "admissions_today": count_created_between(
+                Admission, Admission.created_at, today, today
+            ),
+            "discharges_today": count_of(
+                Admission,
                 Admission.status == "discharged",
                 func.date(Admission.discharged_at) == today,
-            )
-        )
-        total_beds = await self.db.execute(
-            select(func.count(Bed.id)).where(
-                Bed.facility_id == facility_id,
-                Bed.is_deleted == False,  # noqa: E712
-            )
-        )
-        active_adm = active_admissions.scalar() or 0
-        beds_count = total_beds.scalar() or 1
-        occupancy = round((active_adm / beds_count) * 100, 1)
-
-        # Appointments - "today" reflects expected visits, so cancelled and
-        # no-show bookings do not inflate the count.
-        appts_today = await self.db.execute(
-            select(func.count(Appointment.id)).where(
-                Appointment.facility_id == facility_id,
-                Appointment.is_deleted == False,  # noqa: E712
+            ),
+            "total_beds": count_of(Bed),
+            # Appointments - "today" reflects expected visits, so cancelled
+            # and no-show bookings do not inflate the count.
+            "appointments_today": count_of(
+                Appointment,
                 Appointment.appointment_date == today,
                 Appointment.status.notin_(["cancelled", "no_show"]),
-            )
-        )
-        appts_completed = await self.db.execute(
-            select(func.count(Appointment.id)).where(
-                Appointment.facility_id == facility_id,
-                Appointment.is_deleted == False,  # noqa: E712
+            ),
+            "appointments_completed": count_of(
+                Appointment,
                 Appointment.appointment_date == today,
                 Appointment.status == "completed",
-            )
-        )
-        appts_noshow = await self.db.execute(
-            select(func.count(Appointment.id)).where(
-                Appointment.facility_id == facility_id,
-                Appointment.is_deleted == False,  # noqa: E712
+            ),
+            "appointments_no_show": count_of(
+                Appointment,
                 Appointment.appointment_date == today,
                 Appointment.status == "no_show",
-            )
-        )
-
-        # Lab
-        lab_today = await self._count_date(LabOrder, facility_id, today, today)
-        lab_pending = await self.db.execute(
-            select(func.count(LabOrder.id)).where(
-                LabOrder.facility_id == facility_id,
-                LabOrder.is_deleted == False,  # noqa: E712
+            ),
+            # Lab
+            "lab_orders_today": count_created_between(
+                LabOrder, LabOrder.created_at, today, today
+            ),
+            "lab_pending": count_of(
+                LabOrder,
                 LabOrder.status.in_(["ordered", "specimen_collected"]),
-            )
-        )
-        lab_critical = await self.db.execute(
-            select(func.count(LabResult.id)).where(
-                LabResult.facility_id == facility_id,
-                LabResult.is_deleted == False,  # noqa: E712
+            ),
+            "lab_critical": count_of(
+                LabResult,
                 LabResult.is_critical == True,  # noqa: E712
                 func.date(LabResult.created_at) == today,
-            )
-        )
-
-        # Pharmacy
-        rx_today = await self._count_date(Dispensing, facility_id, today, today)
-        dispensed_today = await self.db.execute(
-            select(func.count(Dispensing.id)).where(
-                Dispensing.facility_id == facility_id,
-                Dispensing.is_deleted == False,  # noqa: E712
+            ),
+            # Pharmacy
+            "prescriptions_today": count_created_between(
+                Dispensing, Dispensing.created_at, today, today
+            ),
+            "dispensed_today": count_of(
+                Dispensing,
                 Dispensing.status == "dispensed",
                 func.date(Dispensing.created_at) == today,
-            )
-        )
-        stock_alerts_count = await self.db.execute(
-            select(func.count(PharmacyItem.id)).where(
-                PharmacyItem.facility_id == facility_id,
-                PharmacyItem.is_deleted == False,  # noqa: E712
+            ),
+            "stock_alerts": count_of(
+                PharmacyItem,
                 PharmacyItem.is_active == True,  # noqa: E712
                 PharmacyItem.current_quantity <= PharmacyItem.reorder_level,
-            )
-        )
-
-        # Billing
-        revenue_today_q = await self.db.execute(
-            select(func.coalesce(func.sum(Payment.amount_cents), 0)).where(
-                Payment.facility_id == facility_id,
-                Payment.is_deleted == False,  # noqa: E712
+            ),
+            # Billing
+            "revenue_today": sum_of(
+                Payment,
+                Payment.amount_cents,
                 func.date(Payment.created_at) == today,
-            )
-        )
-        revenue_month_q = await self.db.execute(
-            select(func.coalesce(func.sum(Payment.amount_cents), 0)).where(
-                Payment.facility_id == facility_id,
-                Payment.is_deleted == False,  # noqa: E712
+            ),
+            "revenue_month": sum_of(
+                Payment,
+                Payment.amount_cents,
                 func.date(Payment.created_at) >= month_start,
                 func.date(Payment.created_at) <= today,
-            )
-        )
-        outstanding_q = await self.db.execute(
-            select(func.coalesce(func.sum(Invoice.balance_cents), 0)).where(
-                Invoice.facility_id == facility_id,
-                Invoice.is_deleted == False,  # noqa: E712
+            ),
+            "outstanding_balance": sum_of(
+                Invoice,
+                Invoice.balance_cents,
                 Invoice.status.in_(["finalized", "partially_paid"]),
-            )
-        )
-
-        # Radiology
-        imaging_today = await self._count_date(ImagingOrder, facility_id, today, today)
-        imaging_pending = await self.db.execute(
-            select(func.count(ImagingOrder.id)).where(
-                ImagingOrder.facility_id == facility_id,
-                ImagingOrder.is_deleted == False,  # noqa: E712
+            ),
+            # Radiology
+            "imaging_orders_today": count_created_between(
+                ImagingOrder, ImagingOrder.created_at, today, today
+            ),
+            "imaging_pending_reports": count_of(
+                ImagingOrder,
                 ImagingOrder.status.in_(["ordered", "scheduled", "in_progress"]),
-            )
-        )
+            ),
+            # MCH
+            "active_anc_profiles": count_of(
+                ANCProfile, ANCProfile.status == "active"
+            ),
+            "deliveries_month": count_created_between(
+                DeliveryRecord, DeliveryRecord.created_at, month_start, today
+            ),
+            "immunizations_month": count_created_between(
+                Immunization, Immunization.created_at, month_start, today
+            ),
+        }
 
-        # MCH
-        active_anc = await self.db.execute(
-            select(func.count(ANCProfile.id)).where(
-                ANCProfile.facility_id == facility_id,
-                ANCProfile.is_deleted == False,  # noqa: E712
-                ANCProfile.status == "active",
+        # One round trip for the whole dashboard. Issuing these counters as
+        # separate statements made the landing page the slowest screen in
+        # the app, because every counter paid its own network round trip.
+        row = (
+            await self.db.execute(
+                select(*(
+                    subquery.label(name) for name, subquery in counters.items()
+                ))
             )
-        )
-        deliveries_month = await self.db.execute(
-            select(func.count(DeliveryRecord.id)).where(
-                DeliveryRecord.facility_id == facility_id,
-                DeliveryRecord.is_deleted == False,  # noqa: E712
-                func.date(DeliveryRecord.created_at) >= month_start,
-                func.date(DeliveryRecord.created_at) <= today,
-            )
-        )
-        immunizations_month = await self.db.execute(
-            select(func.count(Immunization.id)).where(
-                Immunization.facility_id == facility_id,
-                Immunization.is_deleted == False,  # noqa: E712
-                func.date(Immunization.created_at) >= month_start,
-                func.date(Immunization.created_at) <= today,
-            )
-        )
+        ).one()
+
+        active_adm = row.active_admissions or 0
+        beds_count = row.total_beds or 1
+        occupancy = round((active_adm / beds_count) * 100, 1)
 
         return FacilityDashboard(
-            total_patients=total_patients,
-            patients_today=patients_today,
-            patients_this_month=patients_month,
-            opd_visits_today=opd_today,
-            opd_visits_month=opd_month,
+            total_patients=row.total_patients or 0,
+            patients_today=row.patients_today or 0,
+            patients_this_month=row.patients_month or 0,
+            opd_visits_today=row.opd_today or 0,
+            opd_visits_month=row.opd_month or 0,
             active_admissions=active_adm,
-            admissions_today=admissions_today,
-            discharges_today=discharges_today.scalar() or 0,
+            admissions_today=row.admissions_today or 0,
+            discharges_today=row.discharges_today or 0,
             bed_occupancy_rate=occupancy,
-            appointments_today=appts_today.scalar() or 0,
-            appointments_completed=appts_completed.scalar() or 0,
-            appointments_no_show=appts_noshow.scalar() or 0,
-            lab_orders_today=lab_today,
-            lab_pending=lab_pending.scalar() or 0,
-            lab_critical=lab_critical.scalar() or 0,
-            prescriptions_today=rx_today,
-            dispensed_today=dispensed_today.scalar() or 0,
-            stock_alerts=stock_alerts_count.scalar() or 0,
-            revenue_today=revenue_today_q.scalar() or 0,
-            revenue_month=revenue_month_q.scalar() or 0,
-            outstanding_balance=outstanding_q.scalar() or 0,
-            imaging_orders_today=imaging_today,
-            imaging_pending_reports=imaging_pending.scalar() or 0,
-            active_anc_profiles=active_anc.scalar() or 0,
-            deliveries_month=deliveries_month.scalar() or 0,
-            immunizations_month=immunizations_month.scalar() or 0,
+            appointments_today=row.appointments_today or 0,
+            appointments_completed=row.appointments_completed or 0,
+            appointments_no_show=row.appointments_no_show or 0,
+            lab_orders_today=row.lab_orders_today or 0,
+            lab_pending=row.lab_pending or 0,
+            lab_critical=row.lab_critical or 0,
+            prescriptions_today=row.prescriptions_today or 0,
+            dispensed_today=row.dispensed_today or 0,
+            stock_alerts=row.stock_alerts or 0,
+            revenue_today=row.revenue_today or 0,
+            revenue_month=row.revenue_month or 0,
+            outstanding_balance=row.outstanding_balance or 0,
+            imaging_orders_today=row.imaging_orders_today or 0,
+            imaging_pending_reports=row.imaging_pending_reports or 0,
+            active_anc_profiles=row.active_anc_profiles or 0,
+            deliveries_month=row.deliveries_month or 0,
+            immunizations_month=row.immunizations_month or 0,
         )
 
     # ── Dashboard Trends ─────────────────────────────────────────────────

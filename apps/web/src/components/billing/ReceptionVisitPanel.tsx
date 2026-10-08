@@ -6,6 +6,8 @@ import { AlertTriangle, ArrowRight, Loader2, Stethoscope } from "lucide-react";
 import { Link } from "@/i18n/routing";
 import { useCreateEncounter } from "@/hooks/useEncounters";
 import { ConsultationFeePanel } from "@/components/billing/ConsultationFeePanel";
+import { usePermissions } from "@/hooks/usePermissions";
+import { canOpenDestination } from "@/lib/navigation";
 import type { Encounter } from "@aifya/shared";
 
 interface ReceptionVisitPanelProps {
@@ -36,6 +38,16 @@ export function ReceptionVisitPanel({ patient }: ReceptionVisitPanelProps) {
   const [visit, setVisit] = useState<Encounter | null>(null);
 
   const createEncounter = useCreateEncounter();
+
+  // "Send to OPD" is a door into the clinical workspace. The front desk does
+  // not own that room, so only draw the link for a role the sidebar would let
+  // through - otherwise the hand-off ends on the 403 panel instead of a
+  // receipt. The visit itself is already started and queued either way.
+  const { roles, hasPermission } = usePermissions();
+  const canSendToOpd = canOpenDestination("/opd", {
+    roles: roles ?? [],
+    hasPermission,
+  });
 
   /**
    * Open the visit this fee is owed on, then let the desk settle it.
@@ -119,12 +131,16 @@ export function ReceptionVisitPanel({ patient }: ReceptionVisitPanelProps) {
             {tp("visitStarted", { queue: visit.queue_number ?? "-" })}
           </p>
           <ConsultationFeePanel encounterId={visit.id} />
-          <Link
-            href="/opd"
-            className="inline-flex items-center gap-2 rounded-lg border border-border px-4 py-2 text-sm font-medium text-foreground transition-colors hover:bg-muted"
-          >
-            {tp("sendToOpd")}
-          </Link>
+          {canSendToOpd ? (
+            <Link
+              href="/opd"
+              className="inline-flex items-center gap-2 rounded-lg border border-border px-4 py-2 text-sm font-medium text-foreground transition-colors hover:bg-muted"
+            >
+              {tp("sendToOpd")}
+            </Link>
+          ) : (
+            <p className="mt-1 text-sm text-muted-foreground">{tp("sentToOpdNote")}</p>
+          )}
         </div>
       )}
     </section>

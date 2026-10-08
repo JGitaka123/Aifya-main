@@ -44,9 +44,14 @@ clear `503` and nothing else breaks.
 In the `aifya` realm, create a confidential client `aifya-admin`:
 - Client authentication: **On** (confidential); Standard flow: Off; Direct
   access grants: Off; **Service accounts roles: On**.
-- Under **Service account roles**, assign the `realm-management` client roles
-  **`manage-users`** and **`view-users`** (add `manage-realm` only if you later
-  automate client/role changes).
+- Under **Service account roles**, assign these `realm-management` client roles.
+  All four are load-bearing:
+  - **`manage-users`** - create users and set their password.
+  - **`view-users`** - look a user up by email before creating one.
+  - **`view-realm`** - read `GET /roles/{name}`, which is how a new user is given
+    their role. Without it no role resolves and the user is created with none.
+  - **`manage-realm`** - the re-assert of the realm user profile during facility
+    approval, so `facility_id` survives on every new user.
 - Copy the client secret.
 
 ### 2. Configure SMTP in the realm
@@ -121,6 +126,22 @@ force.
 - `POST /api/auth/refresh` renews them against `POST /api/v1/auth/refresh`.
 
 ### `keycloak`
+
+**Required realm client scopes.** On a fresh realm import the `aifya-web` and
+`aifya-api` clients must both list `profile`, `basic`, `email`, `roles`,
+`web-origins` and `aifya-scope` under **Client scopes -> Default**. These are not
+cosmetic:
+
+- `basic` carries the `sub` mapper. Without it the token has no `sub`, and the
+  API rejects every request with `401 Invalid or expired token`.
+- `roles` carries `realm_access.roles`. Without it the token authenticates but
+  the API reads no roles, so the user signs in and sees nothing.
+- `aifya-scope` carries `facility_id` and the `aifya-api` audience.
+
+Both clients declare an explicit `defaultClientScopes` list in
+`infrastructure/keycloak/aifya-realm.json`. A list that omits any of the above
+stops the realm-level defaults being applied to that client, so the import in the
+repo - not the running container - is what has to be correct.
 
 - `/en/login` renders a single **Continue with your hospital account** button
   instead of the password form. `/en/signup` is unchanged: registering a facility

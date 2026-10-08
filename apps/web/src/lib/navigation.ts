@@ -11,7 +11,6 @@ import {
   FileText,
   FlaskConical,
   LayoutDashboard,
-  ListOrdered,
   MessageSquare,
   Package,
   PersonStanding,
@@ -114,6 +113,19 @@ const TRIALS_TEAM: readonly string[] = [...CLINICAL_TEAM, ...RESEARCH_TEAM];
 
 /** The knowledge base: HR and the clinical team. */
 const KNOWLEDGE_TEAM: readonly string[] = [...HR_TEAM, ...DOCTORS, ...NURSES];
+
+/**
+ * Everyone the patient picker may offer, and so everyone who keeps a working
+ * week. The clinician self-service screen belongs to these roles and nobody
+ * else; HR reaches anyone's week from the staff record instead.
+ */
+const PROVIDERS: readonly string[] = [
+  ...DOCTORS,
+  ...SPECIALISTS,
+  ...DENTISTS,
+  ...NURSES,
+  ...MIDWIVES,
+];
 
 /** The back-office desks: HR's rooms, staffed by HR and the administrators. */
 const BACK_OFFICE: readonly string[] = [...HR_TEAM, ...ADMINISTRATOR_ROLES];
@@ -227,8 +239,6 @@ export const NAV_ITEMS: readonly NavItem[] = [
   { key: "registration", href: "/patients/register", icon: UserPlus, module: "patients", permission: "patients.register", roles: FRONT_DESK },
   { key: "consultationRoom", href: "/consultation", icon: Stethoscope, module: "encounters", permission: "clinical.view", roles: NURSES, separator: true },
   { key: "clinical", href: "/clinical", icon: ClipboardList, module: "encounters", permission: "clinical.view", roles: CLINICAL_TEAM },
-  // The waiting room: reception issues tickets, nurses call patients in.
-  { key: "queue", href: "/queue", icon: ListOrdered, module: "encounters", permission: "clinical.view", roles: [...FRONT_DESK, ...NURSES] },
   { key: "opd", href: "/opd", icon: Stethoscope, module: "opd", permission: "opd.view", roles: CLINICAL_TEAM },
   { key: "ipd", href: "/ipd", icon: BedDouble, module: "ipd", permission: "ipd.view", roles: CLINICAL_TEAM },
   { key: "emergency", href: "/emergency", icon: Siren, module: "emergency", permission: "emergency.view", roles: CLINICAL_TEAM },
@@ -267,6 +277,7 @@ export const NAV_ITEMS: readonly NavItem[] = [
   { key: "trials", href: "/trials", icon: FlaskConical, module: "clinical_trials", permission: "trials.view", roles: TRIALS_TEAM, separator: true },
   { key: "knowledge", href: "/knowledge", icon: BookOpen, module: "knowledge", permission: "knowledge.view", roles: KNOWLEDGE_TEAM },
   { key: "userGuide", href: "/user-guide", icon: GraduationCap, separator: true },
+  { key: "myAvailability", href: "/settings/availability", icon: CalendarClock, permission: "clinical.view", roles: PROVIDERS },
   { key: "settings", href: "/settings", icon: Settings, permission: "settings.manage", roles: BACK_OFFICE },
 ];
 

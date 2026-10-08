@@ -174,6 +174,7 @@
     "userGuide": "Mwongozo wa Mtumiaji",
     "communications": "Mawasiliano",
     "integrations": "Miunganisho",
+    "myAvailability": "Upatikanaji Wangu",
     "settings": "Mipangilio",
     "pos": "Kituo cha Malipo",
     "consultationRoom": "Chumba cha Uchunguzi",
@@ -322,6 +323,7 @@
     "startVisitTakeFee": "Anza ziara na toa ada ya ushauri",
     "visitStarted": "Ziara imeanza - namba ya foleni {queue}. Toa ada ya ushauri hapa chini.",
     "sendToOpd": "Tuma OPD kwa vipimo",
+    "sentToOpdNote": "Mgonjwa amepangwa kwenye OPD - muuguzi atamwita mgonjwa anayefuata.",
     "returningPatientTitle": "Mgonjwa anayerudi - anza ziara ya leo",
     "returningPatientHint": "Tafuta kadi ya mgonjwa aliyepo, kisha anza ziara ya leo na toa ada ya ushauri. Tumia hii kwa yeyote aliyewahi kuhudhuria hapa.",
     "registrationError": "Imeshindwa kusajili mgonjwa",
@@ -594,6 +596,23 @@
     "referHistoryTitle": "Historia ya kupelekwa",
     "referHistoryEmpty": "Mgonjwa huyu hajapelekwa kwa kitengo kingine bado.",
     "referUnassigned": "Hakuna kitengo",
+    "referSpecialty": "Utaalamu",
+    "referSpecialtyAll": "Utaalamu wote",
+    "referAvailability": "Upatikanaji",
+    "referAvailabilityAvailable": "Anapatikana tu",
+    "referAvailabilityAll": "Kila mtu",
+    "referProvidersTitle": "Watoa huduma wanaofaa",
+    "referProviderCount": "Watoa huduma {count}",
+    "referProviderChooseUnit": "Chagua kitengo ili kuona atakayempokea mgonjwa.",
+    "referProviderLoading": "Inaangalia upatikanaji...",
+    "referProviderEmpty": "Hakuna mtoa huduma anayelingana na vichujio hivi kwa sasa.",
+    "referProviderAnyHint": "Acha uteuzi wazi ili mgonjwa aingie kwenye foleni ya kitengo kwa mtoa huduma yeyote.",
+    "referProviderSelected": "Unamkabidhi {name}",
+    "referStatusAvailable": "Anapatikana",
+    "referStatusBusy": "Ana shughuli",
+    "referStatusOnLeave": "Likizoni",
+    "referStatusOffDuty": "Hayupo kazini",
+    "referStatusUnavailable": "Hapatikani",
     "referFlow": "{step} Peleka",
     "testsTab": "Vipimo",
     "testsFlow": "{step} Vipimo",
@@ -1207,7 +1226,8 @@
         "lab_order": "Ombi la maabara",
         "imaging_order": "Picha za eksirei",
         "prescription": "Dawa",
-        "point_of_care": "Vipimo vya OPD"
+        "point_of_care": "Vipimo vya OPD",
+        "mch_anc_visit": "Ziara ya ANC"
       }
     },
     "mpesaPanel": {
@@ -2140,6 +2160,7 @@
     "roleUpdated": "Jukumu limebadilishwa. Ufikiaji wake umebadilika pia.",
     "passwordUpdated": "Nenosiri limebadilishwa.",
     "accessGranted": "Ufikiaji umetolewa. Anaweza kuingia sasa.",
+    "activationEmailSent": "Barua pepe ya uanzishaji imetumwa kwa {email}.",
     "accessRevoked": "Ufikiaji umeondolewa. Hawezi kuingia tena.",
     "accessUpdateFailed": "Imeshindwa kubadilisha ufikiaji wa mfanyakazi huyu.",
     "active": "Hai",
@@ -3951,6 +3972,7 @@
     "initialPasswordHint": "Angalau herufi 8. Acha wazi ili kuongeza mfanyakazi bila kuingia kwa sasa.",
     "passwordTooShort": "Nenosiri lazima liwe na angalau herufi 8.",
     "loginCreated": "Mfanyakazi ameongezwa na kuingia kumewekwa. Anaweza kuingia kwa nenosiri uliloweka.",
+    "activationEmailSent": "Mfanyakazi ameongezwa na barua pepe ya uanzishaji imetumwa kwa {email}.",
     "weekday": {
       "monday": "Jumatatu",
       "tuesday": "Jumanne",
@@ -4252,7 +4274,26 @@
       }
     }
   },
-  "home": {
+  "availability": {
+    "title": "Upatikanaji Wangu",
+    "subtitle": "Siku na saa unazokuwa kazini. HR anamiliki jukumu lako, idara na taaluma.",
+    "currentStatus": "Upatikanaji wa sasa",
+    "scheduledToday": "Uko kazini leo.",
+    "notScheduledToday": "Hujapangwa kufanya kazi leo.",
+    "save": "Hifadhi upatikanaji",
+    "saving": "Inahifadhi...",
+    "saved": "Upatikanaji umehifadhiwa.",
+    "failed": "Imeshindwa kuhifadhi upatikanaji. Tafadhali jaribu tena.",
+    "saveHint": "Wagonjwa huelekezwa kwako tu katika siku na saa unazoweka hapa.",
+    "notLinked": "Kuingia kwako hakujaunganishwa na rekodi ya mfanyakazi bado. Omba HR kamilishe rekodi yako.",
+    "hrPanelTitle": "Ratiba ya kazi na upatikanaji wa sasa",
+    "hrPanelHint": "Hariri hii ikiwa mfanyakazi hayupo na hawezi kusasisha wiki yake mwenyewe.",
+    "status_available": "Yupo",
+    "status_busy": "Ana shughuli",
+    "status_on_leave": "Likizoni",
+    "status_off_duty": "Hayupo kazini",
+    "status_unavailable": "Hapatikani"
+  },  "home": {
     "goodMorning": "Habari za Asubuhi",
     "goodAfternoon": "Habari za Mchana",
     "goodEvening": "Habari za Jioni",
@@ -4319,7 +4360,8 @@
     "statusInactive": "Imezimwa",
     "activate": "Washa",
     "deactivate": "Zima",
-    "statusError": "Imeshindwa kubadilisha hali ya mfanyakazi."
+    "statusError": "Imeshindwa kubadilisha hali ya mfanyakazi.",
+    "activationEmailSent": "Barua pepe ya uanzishaji imetumwa kwa {email}."
   },
   "queue": {
     "title": "Chumba cha Kusubiri",

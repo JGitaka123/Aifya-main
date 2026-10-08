@@ -3,7 +3,7 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { apiClient } from "@/lib/api-client";
 import { useOfflineQuery } from "@/hooks/useOfflineQuery";
-import type { StaffDirectoryResponse } from "@aifya/shared";
+import type { StaffDirectoryItem, StaffDirectoryResponse } from "@aifya/shared";
 
 // ── Facility profile ──────────────────────────────────────────────────────
 
@@ -137,12 +137,14 @@ export function useStaffDirectory() {
 export function useSetStaffActive() {
   const queryClient = useQueryClient();
   return useMutation<
-    unknown,
+    StaffDirectoryItem,
     Error,
     { staffId: string; isActive: boolean }
   >({
     mutationFn: ({ staffId, isActive }) =>
-      apiClient.patch(`/hr/staff/${staffId}/active`, { is_active: isActive }),
+      apiClient.patch<StaffDirectoryItem>(`/hr/staff/${staffId}/active`, {
+        is_active: isActive,
+      }),
     onSuccess: () => {
       // The HR directory lists the same people under its own key, so refresh
       // both or the other screen keeps showing the old state.

@@ -73,7 +73,9 @@ async def facility_signup(
                 )
             else:
                 facility, _ = await service.approve_facility(
-                    facility.id, admin_client
+                    facility.id,
+                    admin_client,
+                    initial_password=data.admin_password,
                 )
         await db.commit()
     except OnboardingError as exc:
@@ -102,10 +104,15 @@ async def facility_signup(
             "The platform admin will approve it, then you can sign in."
         )
     else:
+        # The message has to match what actually happened. When the request
+        # carried a password we stored it on the account (internal mode) or on
+        # the Keycloak user (keycloak mode), so the administrator signs in with
+        # it straight away. Only a request with no password falls back to the
+        # set-password email.
         message = (
             "Your facility is approved. Sign in with the administrator email "
             "and password you set."
-            if settings.auth_provider == "internal"
+            if data.admin_password
             else "Facility approved. Check your email to set your password."
         )
     return FacilitySignupResponse(
@@ -162,7 +169,10 @@ async def approve_facility(
                     ),
                 )
             facility, created = await service.approve_facility(
-                facility_id, admin_client, approver_id=current_user.user_id
+                facility_id,
+                admin_client,
+                approver_id=current_user.user_id,
+                initial_password=body.admin_password if body else None,
             )
         await db.commit()
     except HTTPException:

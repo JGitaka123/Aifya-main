@@ -19,6 +19,7 @@ import { Link } from "@/i18n/routing";
 import { useStaffDirectory, useStaffProfile } from "@/hooks/useHR";
 import { useEmployees, useLeaveRequests } from "@/hooks/usePayroll";
 import { StaffAccessDialog } from "@/components/hr/StaffAccessDialog";
+import { StaffAvailabilityPanel } from "@/components/hr/StaffAvailabilityPanel";
 import type { StaffDirectoryItem } from "@aifya/shared";
 import { formatDate } from "@/lib/utils";
 
@@ -303,6 +304,9 @@ export default function StaffDetailPage() {
             </div>
           )}
         </div>
+
+        {/* Work Schedule / Current Availability */}
+        <StaffAvailabilityPanel staffId={staffId} />
 
         {/* Emergency Contact */}
         {profile.emergency_contact_name && (

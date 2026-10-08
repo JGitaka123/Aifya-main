@@ -8,7 +8,10 @@ import uuid
 from typing import Any
 
 import pytest
-from httpx import AsyncClient
+from httpx import AsyncClient, Response
+
+from app.models.facility import Facility
+from tests.conftest import FACILITY_ID, session_factory
 
 # ── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -962,3 +965,244 @@ async def test_full_mch_workflow(client: AsyncClient) -> None:
     # Profile moved to "delivered", so it is no longer an active ANC profile
     assert summary["active_anc_profiles"] == 0
     assert summary["active_children"] == 1
+
+
+# ---- ANC billing + queue re-triage -----------------------------------------
+
+
+async def _open_encounter(client: AsyncClient, patient_id: str) -> str:
+    """Open an OPD visit for a patient and return its id.
+
+    @param client: Async HTTP test client
+    @param patient_id: UUID string of the patient
+    @returns Encounter UUID string
+    """
+    response = await client.post(
+        "/api/v1/encounters",
+        json={
+            "patient_id": patient_id,
+            "encounter_type": "opd",
+            "chief_complaint": "Antenatal review",
+        },
+    )
+    assert response.status_code == 201, response.text
+    return response.json()["id"]
+
+
+async def _anc_charges(
+    client: AsyncClient, encounter_id: str
+) -> list[dict[str, Any]]:
+    """The ANC lines the point-of-sale screen reports for a visit.
+
+    @param client: Async HTTP test client
+    @param encounter_id: Encounter UUID string
+    @returns ANC charge dicts
+    """
+    response = await client.get(
+        f"/api/v1/billing/pos/encounters/{encounter_id}/charges",
+        params={"include_paid": "true"},
+    )
+    assert response.status_code == 200, response.text
+    return [
+        item
+        for item in response.json()["items"]
+        if item["reference_type"] == "mch_anc_visit"
+    ]
+
+
+async def _record_visit(
+    client: AsyncClient, profile_id: str, **overrides: Any
+) -> Response:
+    """Post an ANC visit, letting the caller override any field.
+
+    @param client: Async HTTP test client
+    @param profile_id: UUID string of the ANC profile
+    @param overrides: Field values that replace the defaults
+    @returns The raw HTTP response, so a refusal can be asserted
+    """
+    payload: dict[str, Any] = {
+        "anc_profile_id": profile_id,
+        "visit_date": "2026-04-10",
+        "gestation_weeks": 12,
+        "bp_systolic": 120,
+        "bp_diastolic": 75,
+    }
+    payload.update(overrides)
+    return await client.post("/api/v1/mch/anc/visits", json=payload)
+
+
+async def _mch_ticket(client: AsyncClient, patient_id: str) -> dict[str, Any]:
+    """The patient's live maternal ticket on the call board.
+
+    @param client: Async HTTP test client
+    @param patient_id: UUID string of the patient
+    @returns The board row for the maternal ticket
+    """
+    board = (await client.get("/api/v1/queue")).json()
+    tickets = [
+        item
+        for item in board["items"]
+        if item["patient_id"] == patient_id
+        and item["ticket_number"].startswith("MCH")
+    ]
+    assert len(tickets) == 1, f"expected one MCH ticket, saw {len(tickets)}"
+    return tickets[0]
+
+
+async def _seed_anc_settings(settings: dict[str, Any]) -> None:
+    """Give the test facility an ANC fee configuration.
+
+    @param settings: Facility settings document
+    """
+    async with session_factory() as db:
+        db.add(
+            Facility(
+                id=FACILITY_ID,
+                name="Aifya Test Hospital",
+                code="AIFYA-ANC",
+                facility_type="hospital",
+                timezone="Africa/Nairobi",
+                currency="KES",
+                settings=settings,
+                onboarding_status="approved",
+                is_active=True,
+            )
+        )
+        await db.commit()
+
+
+@pytest.mark.asyncio
+async def test_anc_visit_is_itemised_on_the_encounter_bill(
+    client: AsyncClient,
+) -> None:
+    """A recorded ANC visit reaches the visit bill as its own line."""
+    patient = await create_female_patient(client)
+    encounter_id = await _open_encounter(client, patient["id"])
+    profile = await create_anc_profile(client, patient["id"])
+
+    response = await _record_visit(
+        client, profile["id"], encounter_id=encounter_id
+    )
+    assert response.status_code == 201, response.text
+
+    charges = await _anc_charges(client, encounter_id)
+    assert len(charges) == 1
+    assert charges[0]["reference_id"] == encounter_id
+    assert charges[0]["description"] == "MCH: ANC visit"
+    assert charges[0]["total_cents"] == 20_000
+    assert charges[0]["balance_cents"] == 20_000
+    assert charges[0]["paid"] is False
+
+
+@pytest.mark.asyncio
+async def test_anc_visits_share_one_collectable_charge(
+    client: AsyncClient,
+) -> None:
+    """Two reviews on one visit bill the ANC fee once, not twice."""
+    patient = await create_female_patient(client)
+    encounter_id = await _open_encounter(client, patient["id"])
+    profile = await create_anc_profile(client, patient["id"])
+
+    for _ in range(2):
+        response = await _record_visit(
+            client, profile["id"], encounter_id=encounter_id
+        )
+        assert response.status_code == 201, response.text
+
+    charges = await _anc_charges(client, encounter_id)
+    assert len(charges) == 1
+    assert charges[0]["total_cents"] == 20_000
+
+
+@pytest.mark.asyncio
+async def test_zero_anc_fee_adds_no_charge(client: AsyncClient) -> None:
+    """A facility that switches ANC billing off keeps the visit free."""
+    await _seed_anc_settings({"anc_visit_fees": {"default_cents": 0}})
+    patient = await create_female_patient(client)
+    encounter_id = await _open_encounter(client, patient["id"])
+    profile = await create_anc_profile(client, patient["id"])
+
+    response = await _record_visit(
+        client, profile["id"], encounter_id=encounter_id
+    )
+    assert response.status_code == 201, response.text
+    assert await _anc_charges(client, encounter_id) == []
+
+
+@pytest.mark.asyncio
+async def test_enforced_unpaid_anc_charge_blocks_a_further_visit(
+    client: AsyncClient,
+) -> None:
+    """When payment is enforced, an open ANC balance stops the next review."""
+    await _seed_anc_settings(
+        {"anc_visit_fees": {"default_cents": 20_000, "enforce_payment": True}}
+    )
+    patient = await create_female_patient(client)
+    encounter_id = await _open_encounter(client, patient["id"])
+    profile = await create_anc_profile(client, patient["id"])
+
+    first = await _record_visit(
+        client, profile["id"], encounter_id=encounter_id
+    )
+    assert first.status_code == 201, first.text
+
+    second = await _record_visit(
+        client, profile["id"], encounter_id=encounter_id
+    )
+    assert second.status_code == 400, second.text
+    assert "not paid" in second.json()["detail"]
+    # The refused visit leaves exactly one, still-unpaid, ANC line behind.
+    charges = await _anc_charges(client, encounter_id)
+    assert len(charges) == 1
+    assert charges[0]["paid"] is False
+
+
+@pytest.mark.asyncio
+async def test_retriage_raises_a_called_tickets_priority(
+    client: AsyncClient,
+) -> None:
+    """Escalating risk on a called patient re-ranks the ticket they hold."""
+    patient = await create_female_patient(client)
+    profile = await create_anc_profile(client, patient["id"])
+    ticket = await _mch_ticket(client, patient["id"])
+    assert ticket["status"] == "WAITING"
+    assert ticket["priority"] == 2
+
+    called = await client.post(
+        f"/api/v1/queue/tickets/{ticket['id']}/call", json={}
+    )
+    assert called.status_code == 200, called.text
+    assert called.json()["status"] == "CALLED"
+
+    response = await _record_visit(client, profile["id"], bp_systolic=165)
+    assert response.status_code == 201, response.text
+
+    after = await _mch_ticket(client, patient["id"])
+    assert after["status"] == "CALLED"
+    assert after["priority"] == 4
+    assert after["triage_category"] == "urgent"
+
+
+@pytest.mark.asyncio
+async def test_retriage_keeps_an_in_service_ticket_in_the_chair(
+    client: AsyncClient,
+) -> None:
+    """A patient already being seen keeps their place while priority rises."""
+    patient = await create_female_patient(client)
+    profile = await create_anc_profile(client, patient["id"])
+    ticket = await _mch_ticket(client, patient["id"])
+
+    await client.post(f"/api/v1/queue/tickets/{ticket['id']}/call", json={})
+    started = await client.post(
+        f"/api/v1/queue/tickets/{ticket['id']}/start", json={}
+    )
+    assert started.status_code == 200, started.text
+    assert started.json()["status"] == "IN_SERVICE"
+
+    response = await _record_visit(client, profile["id"], oedema="severe")
+    assert response.status_code == 201, response.text
+
+    after = await _mch_ticket(client, patient["id"])
+    assert after["status"] == "IN_SERVICE"
+    assert after["priority"] == 4
+    assert after["triage_category"] == "urgent"

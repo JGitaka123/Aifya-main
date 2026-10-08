@@ -166,7 +166,8 @@ export type ServiceReferenceType =
   | "lab_order"
   | "imaging_order"
   | "prescription"
-  | "point_of_care";
+  | "point_of_care"
+  | "mch_anc_visit";
 
 /**
  * Payment state of one ordered service, as a department sees it.

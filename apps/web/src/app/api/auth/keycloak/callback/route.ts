@@ -48,6 +48,11 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
 
   const providerError = params.get("error");
   if (providerError) {
+    console.error(
+      "[auth/callback] Keycloak returned an error:",
+      providerError,
+      params.get("error_description"),
+    );
     // access_denied means the user pressed "cancel" on the Keycloak page;
     // anything else is a realm/client misconfiguration we cannot fix here.
     const code =
@@ -61,6 +66,11 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
   const codeVerifier = request.cookies.get(OIDC_VERIFIER_COOKIE)?.value;
 
   if (!code || !codeVerifier || !cookieState) {
+    console.error("[auth/callback] missing code/verifier/state cookie", {
+      hasCode: Boolean(code),
+      hasVerifier: Boolean(codeVerifier),
+      hasState: Boolean(cookieState),
+    });
     return fail(returnTo, "session_expired");
   }
 
@@ -80,6 +90,7 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
   });
 
   if (!tokens) {
+    console.error("[auth/callback] token exchange failed");
     return fail(returnTo, "exchange_failed");
   }
 

@@ -1,3 +1,5 @@
+import type { ProviderWorkStatus } from "./provider";
+
 /**
  * A role a staff record can hold.
  *
@@ -76,9 +78,13 @@ export interface StaffDirectoryItem {
   phone: string | null;
   email: string;
   is_active: boolean;
+  /** Declared availability for provider assignment, independent of is_active. */
+  work_status: ProviderWorkStatus;
   license_number: string | null;
   /** Whether this person has a sign-in yet. Access is the role above. */
   has_login: boolean;
+  /** Set on the activation response when the activation email was delivered. */
+  activation_email_sent: boolean;
 }
 
 /** Staff directory response */
@@ -121,6 +127,8 @@ export interface StaffAccessResponse {
   staff_id: string;
   role: StaffRole;
   has_login: boolean;
+  /** Whether this change emailed the employee their sign-in details. */
+  activation_email_sent: boolean;
   message: string;
 }
 

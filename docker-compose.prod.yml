@@ -39,6 +39,7 @@ services:
       KAFKA_BOOTSTRAP_SERVERS: ${KAFKA_BOOTSTRAP_SERVERS:-kafka:9092}
       KEYCLOAK_URL: ${KEYCLOAK_URL:?KEYCLOAK_URL is required}
       KEYCLOAK_REALM: ${KEYCLOAK_REALM:-aifya}
+      AUTH_PROVIDER: ${AUTH_PROVIDER:-internal}
       KEYCLOAK_CLIENT_ID: ${API_KEYCLOAK_CLIENT_ID:-aifya-api}
       # This deployment is the explicitly approved no-login beta environment.
       # Set BETA_PUBLIC_ACCESS=false in server.env when authentication is restored.

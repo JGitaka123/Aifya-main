@@ -45,13 +45,48 @@ export function AudioAnnouncer({
   const [blocked, setBlocked] = useState(false);
   const spoken = useRef<QueueSpeech | null>(null);
 
-  useEffect(() => {
+useEffect(() => {
+  let stored: string | null = null;
+  try {
+    stored = window.localStorage.getItem(UNLOCK_KEY);
+  } catch {
+    // Private mode: the speaker simply starts off.
+    return;
+  }
+  if (stored === "1") {
+    setEnabled(true);
+    return;
+  }
+  if (stored === "0") {
+    // The desk switched the speaker off on purpose; leave it off.
+    return;
+  }
+  // A fresh browser will not start audio before a gesture, so arm a
+  // one-time unlock. The first click - usually "Call next patient" -
+  // switches the speaker on in time for the announcement it triggers.
+  const unlock = () => {
+    setEnabled(true);
+    setBlocked(false);
     try {
-      setEnabled(window.localStorage.getItem(UNLOCK_KEY) === "1");
+      window.localStorage.setItem(UNLOCK_KEY, "1");
     } catch {
-      // Private mode: the speaker simply starts off.
+      // Ignore: the speaker stays on for this session.
     }
-  }, []);
+    if (typeof window.speechSynthesis !== "undefined") {
+      try {
+        window.speechSynthesis.resume();
+      } catch {
+        // Ignore.
+      }
+    }
+  };
+  window.addEventListener("pointerdown", unlock, { once: true });
+  window.addEventListener("keydown", unlock, { once: true });
+  return () => {
+    window.removeEventListener("pointerdown", unlock);
+    window.removeEventListener("keydown", unlock);
+  };
+}, []);
 
   const speakLocally = useCallback((line: QueueSpeech) => {
     if (typeof window === "undefined" || !("speechSynthesis" in window)) return;
@@ -69,7 +104,11 @@ export function AudioAnnouncer({
     // Remember it either way, so switching the speaker on does not replay an
     // announcement the room already heard.
     spoken.current = speech;
-    if (!enabled) return;
+    if (!enabled) {
+      // A call arrived while the speaker is off: prompt the desk to switch it on.
+      setBlocked(true);
+      return;
+    }
 
     const url = announcementAudioUrl({
       ticketId,

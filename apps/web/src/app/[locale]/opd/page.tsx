@@ -2,7 +2,6 @@
 
 import { useState } from "react";
 import { useTranslations } from "next-intl";
-import { useRouter } from "next/navigation";
 import {
   Stethoscope,
   Phone,
@@ -16,15 +15,18 @@ import {
 import { Link } from "@/i18n/routing";
 import {
   useOPDQueue,
-  useCallNext,
   useDepartments,
   useCompleteAssessment,
 } from "@/hooks/useEncounters";
+import { useCallNext as useQueueCallNext, useQueueBoard } from "@/hooks/useQueue";
 import { usePermissions } from "@/hooks/usePermissions";
 import { PERMISSIONS } from "@/lib/auth/permissions";
+import { ApiError } from "@/lib/api-client";
 import { formatDateTime } from "@/lib/utils";
 import { cn } from "@/lib/utils";
+import { QueueAnnouncer } from "@/components/queue/QueueAnnouncer";
 import { PageHeader } from "@/components/ui/PageHeader";
+import { useToast } from "@/components/ui/Toast";
 import { StatusBadge } from "@/components/ui/StatusBadge";
 import { Avatar } from "@/components/ui/Avatar";
 import { EmptyState } from "@/components/ui/EmptyState";
@@ -127,7 +129,8 @@ function OpdAssessmentButton({ encounterId }: { encounterId: string }) {
 export default function OPDQueuePage() {
   const t = useTranslations("opd");
   const tc = useTranslations("common");
-  const router = useRouter();
+  const tq = useTranslations("queue");
+  const toast = useToast();
   const [statusFilter, setStatusFilter] = useState<string>("");
   // One patient journey, two desks. "assessment" is the nurse taking the
   // observations; "consultation" is the doctor's waiting list. OPD opens on the
@@ -147,28 +150,49 @@ export default function OPDQueuePage() {
   );
   const { data: departmentDirectory } = useDepartments();
   const departments = departmentDirectory ?? [];
-  const callNext = useCallNext();
-  // Calling the next patient claims a consultation, which the API only allows
-  // a clinician to do, so the front desk never sees the button.
+  const callNext = useQueueCallNext();
+  // What the button will actually pull: the live waiting count for the chosen
+  // unit. Nothing waiting means nothing to call, so the button says so instead
+  // of answering with a 404 and silence. Left alone when the board cannot be
+  // read (a role without board permission), so the old button still works.
+  const { data: queueBoard } = useQueueBoard({
+    departmentId: departmentFilter || undefined,
+  });
+  const queueEmpty = queueBoard !== undefined && queueBoard.waiting === 0;
+  // Nursing and clinicians both run the line: the nurse calls the next
+  // waiting patient up by ticket number, and the same button is offered
+  // to a clinician when no nurse is on shift.
   const { hasPermission } = usePermissions();
-  const canConsult = hasPermission(PERMISSIONS.CLINICAL_CONSULT);
+  const canCallNext =
+    hasPermission(PERMISSIONS.TRIAGE_RECORD) ||
+    hasPermission(PERMISSIONS.CLINICAL_CONSULT);
   // The nurse closes the assessment; a clinician may do it too when no nurse
   // is on shift, which is why the server accepts either permission.
   const canTriage = hasPermission(PERMISSIONS.TRIAGE_RECORD);
 
   /**
-   * Call the next patient in queue and navigate to their encounter.
+   * Call the next waiting patient in and announce their ticket number.
    */
   const handleCallNext = () => {
     setCallError("");
-    callNext.mutate(undefined, {
-      onSuccess: (encounter) => {
-        router.push(`/opd/${encounter.id}?tab=consultation`);
+    callNext.mutate(
+      {
+        department_id: departmentFilter || undefined,
+        announce: true,
       },
-      onError: (err: Error) => {
-        setCallError(err.message || t("callNextFailed"));
+      {
+        onSuccess: (ticket) => {
+          toast.success(tq("calledNext", { number: ticket.ticket_number }));
+        },
+        onError: (err: Error) => {
+          if (err instanceof ApiError && err.status === 404) {
+            toast.info(tq("nobodyWaiting"));
+            return;
+          }
+          setCallError(err.message || t("callNextFailed"));
+        },
       },
-    });
+    );
   };
 
   const stageOptions: { value: string; label: string }[] = [
@@ -222,17 +246,23 @@ export default function OPDQueuePage() {
               ))}
             </select>
 
-            {/* Call next button - clinicians only */}
-            {canConsult && (
+            {/* Call the next waiting patient in by ticket number. */}
+            {canCallNext && (
               <button
                 onClick={handleCallNext}
-                disabled={callNext.isPending}
+                disabled={callNext.isPending || queueEmpty}
                 className="flex items-center gap-2 rounded-lg bg-primary px-4 py-2 text-sm font-medium text-primary-foreground shadow-sm transition-colors hover:bg-primary/90 disabled:opacity-50"
               >
                 <Phone className="h-4 w-4" />
-                {callNext.isPending ? t("callingNext") : t("callNext")}
+                {callNext.isPending
+            ? t("callingNext")
+            : queueEmpty
+              ? tq("nobodyWaiting")
+              : t("callNext")}
               </button>
             )}
+
+              <QueueAnnouncer />
 
             {/* New encounter link */}
             <Link

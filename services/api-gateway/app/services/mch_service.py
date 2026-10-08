@@ -5,6 +5,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.base import EventBase
+from app.models.encounter import Encounter
 from app.models.mch import (
     ANCProfile,
     ANCVisit,
@@ -13,6 +14,7 @@ from app.models.mch import (
     Immunization,
 )
 from app.models.patient import Patient
+from app.models.staff import Department
 from app.schemas.mch import (
     ANCProfileCreate,
     ANCProfileDetail,
@@ -27,6 +29,16 @@ from app.schemas.mch import (
     ImmunizationScheduleItem,
     ImmunizationUpdate,
     MCHSummary,
+)
+from app.services.anc_fee import (
+    load_anc_visit_enforce_payment,
+    load_anc_visit_fee_cents,
+)
+from app.services.queue.queue_service import QueueService
+from app.services.service_billing import (
+    MCH_ANC_VISIT,
+    ServiceBillingService,
+    post_service_charge,
 )
 
 # ── Kenya EPI (KEPI) routine immunization schedule ──────────────────────────────
@@ -121,6 +133,24 @@ def kepi_outstanding_doses(
     return outstanding
 
 
+#: Units maternal patients wait in, in the order we prefer them. Codes are
+#: matched first, then names, so a facility that words its department
+#: differently still lands on the right queue.
+MCH_DEPARTMENT_CODES = ("MCH", "ANC", "MAT", "OBGYN", "REPRO")
+MCH_DEPARTMENT_NAME_HINTS = (
+    "maternal",
+    "child health",
+    "obstetric",
+    "antenatal",
+)
+
+#: Risk level -> the queue's triage vocabulary and priority. Deliberately the
+#: same scale the encounter queue uses, so a high-risk pregnancy is called
+#: before a routine visit rather than after it.
+MCH_RISK_TRIAGE = {"low": "non_urgent", "moderate": "standard", "high": "urgent"}
+MCH_RISK_PRIORITY = {"low": 2, "moderate": 3, "high": 4}
+
+
 class MCHService:
     """
     Service for Maternal & Child Health: ANC profiles, visits, delivery,
@@ -132,6 +162,189 @@ class MCHService:
         self.db = db
 
     # ── ANC Profile ───────────────────────────────────────────────────────
+
+    async def _mch_department_id(self, facility_id: uuid.UUID) -> uuid.UUID | None:
+        """Find the unit maternal patients wait in, if the facility has one.
+
+        @param facility_id: Facility to search
+        @returns The maternal unit's id, or None when the facility has none
+        """
+
+        rows = (
+            await self.db.execute(
+                select(Department.id, Department.code, Department.name).where(
+                    Department.facility_id == facility_id,
+                    Department.is_deleted == False,  # noqa: E712
+                    Department.is_active == True,  # noqa: E712
+                )
+            )
+        ).all()
+        if not rows:
+            return None
+        by_code = {code.upper(): dept_id for dept_id, code, _name in rows}
+        for code in MCH_DEPARTMENT_CODES:
+            if code in by_code:
+                return by_code[code]
+        for dept_id, _code, name in rows:
+            lowered = (name or "").lower()
+            if any(hint in lowered for hint in MCH_DEPARTMENT_NAME_HINTS):
+                return dept_id
+        return None
+
+    async def _active_encounter_id(
+        self,
+        *,
+        facility_id: uuid.UUID,
+        patient_id: uuid.UUID,
+        encounter_id: uuid.UUID | None,
+    ) -> uuid.UUID | None:
+        """Resolve the visit an ANC record should be billed against.
+
+        A clinician usually names the encounter, but a visit recorded from the
+        maternal register may not carry one. In that case the patient's live
+        visit is used, so the fee lands on the bill the desk is already
+        holding rather than on a second, orphan invoice.
+
+        @param facility_id: Facility UUID
+        @param patient_id: Patient the record belongs to
+        @param encounter_id: Encounter the caller named, if any
+        @returns A facility-scoped encounter id, or None when there is none
+        """
+
+        conditions = [
+            Encounter.facility_id == facility_id,
+            Encounter.is_deleted == False,  # noqa: E712
+        ]
+        if encounter_id is not None:
+            conditions.append(Encounter.id == encounter_id)
+        else:
+            conditions.append(Encounter.patient_id == patient_id)
+            conditions.append(
+                Encounter.status.in_(("waiting", "in_consultation"))
+            )
+        return (
+            await self.db.execute(
+                select(Encounter.id)
+                .where(*conditions)
+                .order_by(Encounter.encounter_date.desc())
+                .limit(1)
+            )
+        ).scalar_one_or_none()
+
+    async def _bill_anc_visit(
+        self,
+        *,
+        facility_id: uuid.UUID,
+        patient_id: uuid.UUID,
+        encounter_id: uuid.UUID,
+        provider_id: uuid.UUID,
+        risk_level: str | None,
+    ) -> None:
+        """Put one ANC visit on the encounter bill, exactly once.
+
+        The charge is keyed on the encounter so a day of ANC reviews shares a
+        single collectable line rather than posting a fee per keystroke. When
+        the facility enforces payment, an ANC balance left over on that
+        encounter from an earlier visit blocks a further visit until the desk
+        collects it; the line posted by this visit never blocks itself.
+
+        @param facility_id: Facility UUID
+        @param patient_id: Patient being billed
+        @param encounter_id: Encounter carrying the ANC visit
+        @param provider_id: Clinician recording the visit
+        @param risk_level: Profile risk level, used to price the visit
+        @raises ValueError: When an earlier ANC charge is still unpaid
+        """
+
+        billing = ServiceBillingService(self.db)
+        existing = await billing.charge_for(
+            facility_id, MCH_ANC_VISIT, encounter_id
+        )
+        if existing is not None:
+            if not existing.paid and await load_anc_visit_enforce_payment(
+                self.db, facility_id
+            ):
+                await billing.assert_service_paid(
+                    facility_id, MCH_ANC_VISIT, encounter_id
+                )
+            return
+
+        price = await load_anc_visit_fee_cents(
+            self.db, facility_id, risk_level=risk_level
+        )
+        if price <= 0:
+            return
+        await post_service_charge(
+            self.db,
+            facility_id=facility_id,
+            encounter_id=encounter_id,
+            patient_id=patient_id,
+            item_type="procedure",
+            description="MCH: ANC visit",
+            unit_price_cents=price,
+            reference_type=MCH_ANC_VISIT,
+            reference_id=encounter_id,
+            created_by=provider_id,
+        )
+
+    async def _queue_maternal_wait(
+        self,
+        *,
+        facility_id: uuid.UUID,
+        patient_id: uuid.UUID,
+        risk_level: str | None,
+        actor_id: uuid.UUID | None,
+        idempotency_key: str,
+    ) -> None:
+        """Put a maternal patient on the unit's board while they wait.
+
+        The maternal clinic records pregnancies and visits directly, so there
+        is no encounter to hang a ticket on. When the facility has no maternal
+        unit configured the ticket still carries the MCH prefix, so the patient
+        is never invisible and the speaker still calls a clean number.
+
+        @param facility_id: Facility the patient is waiting in
+        @param patient_id: The patient who is waiting
+        @param risk_level: ANC risk level, used for triage and priority
+        @param actor_id: Staff member registering the wait
+        @param idempotency_key: Retry key for this registration
+        """
+
+        department_id = await self._mch_department_id(facility_id)
+        prefix = None if department_id is not None else "MCH"
+        priority = MCH_RISK_PRIORITY.get(risk_level or "low", 2)
+        triage_category = MCH_RISK_TRIAGE.get(
+            risk_level or "low", "non_urgent"
+        )
+        queue = QueueService(self.db)
+        # A visit recorded for a patient who is already on the board re-ranks
+        # the ticket they hold instead of leaving it behind: a waiting patient
+        # escalated to high risk jumps the line, and one already called or in
+        # the chair keeps that place while their priority rises. Only a patient
+        # with no live ticket needs a brand new one.
+        retriaged = await queue.retriage_patient(
+            facility_id=facility_id,
+            patient_id=patient_id,
+            department_id=department_id,
+            prefix=prefix,
+            actor_id=actor_id,
+            priority=priority,
+            triage_category=triage_category,
+            reason="mch_anc_visit",
+            source_id=idempotency_key,
+        )
+        if retriaged is not None:
+            return
+        await queue.enqueue_patient(
+            facility_id=facility_id,
+            patient_id=patient_id,
+            actor_id=actor_id,
+            department_id=department_id,
+            triage_category=triage_category,
+            priority=priority,
+            prefix=prefix,
+            idempotency_key=idempotency_key,
+        )
 
     async def create_anc_profile(
         self,
@@ -225,6 +438,16 @@ class MCHService:
             created_by=created_by,
         )
         self.db.add(event)
+
+        # A pregnancy registration is a patient now waiting in the maternal
+        # clinic, so it must show on the board and be callable by the speaker.
+        await self._queue_maternal_wait(
+            facility_id=facility_id,
+            patient_id=profile.patient_id,
+            risk_level=profile.risk_level,
+            actor_id=created_by,
+            idempotency_key=f"anc-profile:{profile.id}",
+        )
 
         return profile
 
@@ -404,11 +627,19 @@ class MCHService:
         )
         visit_number = (count_result.scalar() or 0) + 1
 
+        # Bill the visit against the encounter the clinician named, or the
+        # patient's live visit when the maternal register did not name one.
+        encounter_id = await self._active_encounter_id(
+            facility_id=facility_id,
+            patient_id=profile.patient_id,
+            encounter_id=data.encounter_id,
+        )
+
         visit = ANCVisit(
             facility_id=facility_id,
             anc_profile_id=data.anc_profile_id,
             patient_id=profile.patient_id,
-            encounter_id=data.encounter_id,
+            encounter_id=encounter_id,
             provider_id=provider_id,
             visit_number=visit_number,
             visit_date=data.visit_date,
@@ -469,6 +700,28 @@ class MCHService:
             created_by=provider_id,
         )
         self.db.add(event)
+
+        # The visit is a billable service: put it on the visit's bill so the
+        # cashier can collect for it, and let an enforcing facility refuse a
+        # further ANC visit while an earlier ANC balance is still open.
+        if encounter_id is not None:
+            await self._bill_anc_visit(
+                facility_id=facility_id,
+                patient_id=profile.patient_id,
+                encounter_id=encounter_id,
+                provider_id=provider_id,
+                risk_level=profile.risk_level,
+            )
+
+        # A recorded visit is the patient sitting in the clinic; keep them on
+        # the board so the speaker can call them in.
+        await self._queue_maternal_wait(
+            facility_id=facility_id,
+            patient_id=profile.patient_id,
+            risk_level=profile.risk_level,
+            actor_id=provider_id,
+            idempotency_key=f"anc-visit:{visit.id}",
+        )
 
         return visit
 

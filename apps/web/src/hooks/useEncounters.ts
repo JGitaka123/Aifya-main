@@ -32,6 +32,7 @@ import type {
   EncounterRouteResult,
   PointOfCareTest,
   PointOfCareTestCreate,
+  ProviderDirectoryResponse,
 } from "@aifya/shared";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000/api/v1";
@@ -206,6 +207,60 @@ export function useDepartments() {
     queryKey: ["departments", "options"],
     queryFn: () => apiClient.get<DepartmentOption[]>("/encounters/departments"),
     staleTime: 5 * 60_000,
+  });
+}
+
+/**
+ * Hook for the consultation room's provider picker.
+ *
+ * The room assigns to a person, not a department, so this lists the clinical
+ * staff of one unit with their specialty and their *effective* availability.
+ * Leave and open consultations change the answer, so the list is re-read on a
+ * short interval rather than cached for the day.
+ *
+ * @param filters.departmentId - The unit the patient is being sent to
+ * @param filters.specialty - Optional specialty to narrow the list
+ * @param filters.workStatus - Optional effective availability to narrow by
+ * @param filters.role - Optional single role to narrow by
+ * @param filters.availableOnly - Keep only clinicians who can be assigned now
+ * @param filters.search - Optional name search
+ * @param filters.enabled - Skip the request until a unit is chosen
+ * @returns Query result with matching providers and the unit's specialties
+ */
+export function useProviders(
+  filters: {
+    departmentId?: string;
+    specialty?: string;
+    workStatus?: string;
+    role?: string;
+    availableOnly?: boolean;
+    search?: string;
+    enabled?: boolean;
+  } = {}
+) {
+  const params: Record<string, string> = {};
+  if (filters.departmentId) params["department_id"] = filters.departmentId;
+  if (filters.specialty) params["specialty"] = filters.specialty;
+  if (filters.workStatus) params["work_status"] = filters.workStatus;
+  if (filters.role) params["role"] = filters.role;
+  if (filters.availableOnly) params["available_only"] = "true";
+  const search = filters.search?.trim();
+  if (search) params["search"] = search;
+
+  return useOfflineQuery<ProviderDirectoryResponse>({
+    queryKey: [
+      "providers",
+      filters.departmentId ?? "",
+      filters.specialty ?? "",
+      filters.workStatus ?? "",
+      filters.role ?? "",
+      filters.availableOnly ?? false,
+      search ?? "",
+    ],
+    queryFn: () =>
+      apiClient.get<ProviderDirectoryResponse>("/encounters/providers", params),
+    refetchInterval: 20_000,
+    enabled: (filters.enabled ?? true) && !!filters.departmentId,
   });
 }
 

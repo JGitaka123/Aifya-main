@@ -42,6 +42,16 @@ export type {
   PointOfCareCategory,
 } from "./types/encounter";
 export type {
+  AvailabilitySlot,
+  WeeklyScheduleUpdate,
+  WeeklyScheduleResponse,
+} from "./types/availability";
+export type {
+  Provider,
+  ProviderDirectoryResponse,
+  ProviderWorkStatus,
+} from "./types/provider";
+export type {
   PharmacyItem,
   PharmacyItemCreate,
   PharmacyItemUpdate,

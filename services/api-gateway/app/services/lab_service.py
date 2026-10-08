@@ -6,6 +6,7 @@ from sqlalchemy import case, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.base import EventBase
+from app.models.encounter import Encounter
 from app.models.lab import LabOrder, LabResult
 from app.models.patient import Patient
 from app.schemas.lab import (
@@ -13,6 +14,12 @@ from app.schemas.lab import (
     LabResultEntry,
     LabWorklistItem,
 )
+from app.services.queue.queue_service import (
+    CRITICAL_REVIEW_PRIORITY,
+    RETURN_REVIEW_PRIORITY,
+    QueueService,
+)
+from app.services.queue.routing import find_department_id
 from app.services.service_billing import (
     LAB_ORDER,
     ServiceBillingService,
@@ -38,6 +45,16 @@ CRITICAL_LAB_VALUES: dict[str, dict[str, float | str]] = {
     "LACTATE": {"low": 0.0, "high": 4.0, "unit": "mmol/L"},
     "CD4": {"low": 0.0, "high": 99999.0, "unit": "cells/uL"},
 }
+
+#: Units that run a lab, matched by code first and then by name, so a patient
+#: sent for tests lands in the right waiting room however it is labelled.
+LAB_DEPARTMENT_CODES = ("LAB", "LABORATORY", "PATH", "PATHOLOGY", "HAEM")
+LAB_DEPARTMENT_NAME_HINTS = ("laborator", "patholog", "haematolog", "hematolog")
+
+#: Order priority -> the queue's triage vocabulary and priority. A stat sample
+#: is called ahead of an urgent one, and both ahead of a routine visit.
+_ORDER_PRIORITY = {"stat": 5, "urgent": 4, "routine": 2}
+_ORDER_TRIAGE = {"stat": "emergency", "urgent": "urgent", "routine": "non_urgent"}
 
 
 class LabService:
@@ -125,7 +142,50 @@ class LabService:
 
         await self.db.flush()
         await self.db.refresh(order)
+
+        # Bridge the order onto the lab's call board: a patient sent for tests
+        # is waiting in the lab, and the lab speakers have to know their number.
+        await self._queue_lab_order(order, data, facility_id, ordered_by)
         return order
+
+    async def _queue_lab_order(
+        self,
+        order: LabOrder,
+        data: LabOrderCreate,
+        facility_id: uuid.UUID,
+        ordered_by: uuid.UUID,
+    ) -> None:
+        """Put the patient in the lab's waiting line.
+
+        The lab is a room of its own: an order is a wait, not just a charge. The
+        ticket carries the order's urgency, so a stat sample is called ahead of
+        a routine one, and the order number, so lab staff can match the number
+        the speaker reads to the sample in front of them.
+
+        @param order: The order that was just created
+        @param data: The order request
+        @param facility_id: Facility scope
+        @param ordered_by: Clinician who ordered the tests
+        """
+
+        department_id = await find_department_id(
+            self.db,
+            facility_id=facility_id,
+            codes=LAB_DEPARTMENT_CODES,
+            name_hints=LAB_DEPARTMENT_NAME_HINTS,
+        )
+        priority_key = (data.priority or "routine").lower()
+        await QueueService(self.db).enqueue_patient(
+            facility_id=facility_id,
+            patient_id=data.patient_id,
+            actor_id=ordered_by,
+            department_id=department_id,
+            triage_category=_ORDER_TRIAGE.get(priority_key, "non_urgent"),
+            priority=_ORDER_PRIORITY.get(priority_key, 2),
+            prefix="LAB",
+            notes=f"Lab order {order.order_number}",
+            idempotency_key=f"lab-order:{order.id}",
+        )
 
     async def _bill_lab_order(
         self,
@@ -690,16 +750,28 @@ class LabService:
         all_results = list(order_result.scalars().all())
         all_final = all(r.status == "final" for r in all_results)
 
+        completed_order: LabOrder | None = None
         if all_final:
             order_q = await self.db.execute(
                 select(LabOrder).where(LabOrder.id == lab_result.order_id)
             )
-            order = order_q.scalar_one_or_none()
-            if order:
-                order.status = "completed"
+            completed_order = order_q.scalar_one_or_none()
+            if completed_order:
+                completed_order.status = "completed"
 
         await self.db.flush()
         await self.db.refresh(lab_result)
+
+        if completed_order is not None:
+            # Results are ready: put the patient back on the doctor's board so
+            # the review is called in like any other wait. A critical value is
+            # called back ahead of a routine review.
+            await self._queue_lab_review(
+                order=completed_order,
+                critical=any(r.is_critical for r in all_results),
+                facility_id=facility_id,
+                verified_by=verified_by,
+            )
 
         # Emit event
         event = EventBase(
@@ -720,6 +792,52 @@ class LabService:
         self.db.add(event)
 
         return lab_result
+
+    async def _queue_lab_review(
+        self,
+        *,
+        order: LabOrder,
+        critical: bool,
+        facility_id: uuid.UUID,
+        verified_by: uuid.UUID,
+    ) -> None:
+        """Call the patient back to the ordering clinician for review.
+
+        The visit's own ticket was for the first wait. The result is a second
+        one, so the patient is put back on the clinician's board with a fresh
+        number and the result's urgency. A visit with no encounter (a walk-in
+        order) has no clinician to return to, so it is left alone.
+
+        @param order: The completed lab order
+        @param critical: Whether any result crossed a critical threshold
+        @param facility_id: Facility scope
+        @param verified_by: Staff member who released the result
+        """
+
+        if order.encounter_id is None:
+            return
+        encounter = (
+            await self.db.execute(
+                select(Encounter).where(
+                    Encounter.id == order.encounter_id,
+                    Encounter.facility_id == facility_id,
+                )
+            )
+        ).scalars().first()
+        if encounter is None:
+            return
+        await QueueService(self.db).enqueue_return(
+            facility_id=facility_id,
+            patient_id=order.patient_id,
+            encounter_id=order.encounter_id,
+            department_id=encounter.department_id,
+            encounter_type=encounter.encounter_type,
+            actor_id=verified_by,
+            priority=CRITICAL_REVIEW_PRIORITY if critical else RETURN_REVIEW_PRIORITY,
+            triage_category="emergency" if critical else "urgent",
+            notes=f"Lab results ready: {order.order_number}",
+            idempotency_key=f"lab-review:{order.id}",
+        )
 
     # ── Critical Notification ─────────────────────────────────────────────
 

@@ -1,4 +1,4 @@
-"""Point-of-sale billing for ordered services (lab, imaging, pharmacy, OPD).
+"""Point-of-sale billing for ordered services (lab, imaging, pharmacy, OPD, MCH).
 
 A clinician orders lab tests, an imaging study or a medicine, or a nurse runs a
 bedside screening test during the OPD assessment. The patient pays for that
@@ -36,12 +36,14 @@ LAB_ORDER = "lab_order"
 IMAGING_ORDER = "imaging_order"
 PRESCRIPTION = "prescription"
 POINT_OF_CARE = "point_of_care"
+MCH_ANC_VISIT = "mch_anc_visit"
 
 SERVICE_REFERENCE_TYPES: tuple[str, ...] = (
     LAB_ORDER,
     IMAGING_ORDER,
     PRESCRIPTION,
     POINT_OF_CARE,
+    MCH_ANC_VISIT,
 )
 
 # Event tying a payment to the request it settles.
@@ -53,6 +55,7 @@ REFERENCE_LABELS: dict[str, str] = {
     IMAGING_ORDER: "Imaging request",
     PRESCRIPTION: "Prescription",
     POINT_OF_CARE: "Point-of-care tests",
+    MCH_ANC_VISIT: "ANC visit",
 }
 
 # Statuses that mean the bill can no longer take money.
@@ -361,7 +364,7 @@ class ServiceBillingService:
         Fetch the charge for a single ordered service.
 
         @param facility_id: Facility UUID
-        @param reference_type: lab_order, imaging_order, prescription or point_of_care
+        @param reference_type: lab_order, imaging_order, prescription, point_of_care or mch_anc_visit
         @param reference_id: The request UUID
         @returns The charge, or None when the request was never billed
         """
@@ -467,7 +470,7 @@ class ServiceBillingService:
         services keep working and legacy records are never stranded.
 
         @param facility_id: Facility UUID
-        @param reference_type: lab_order, imaging_order, prescription or point_of_care
+        @param reference_type: lab_order, imaging_order, prescription, point_of_care or mch_anc_visit
         @param reference_id: The request UUID
         @param label: Optional label for the message
         @raises ValueError: When the request has an unpaid charge
@@ -697,7 +700,8 @@ class ServiceBillingService:
 
         Money confirmed by the machine (an M-Pesa callback) lands against an
         invoice rather than a named request, so which requests it pays for has
-        to be decided here: a named request is settled first, then the
+        to be decided here: a named request is settled first, then a request
+        whose outstanding balance the money matches exactly, then the
         remaining requests oldest first. The amount is consumed request by
         request until it runs out, so one payment can settle several requests
         and a part payment leaves only the requests it did not reach still
@@ -751,6 +755,9 @@ class ServiceBillingService:
                     and charge.reference_id == reference_id
                 ):
                     take(charge)
+        for charge in on_invoice:
+            if charge.balance_cents == amount_cents:
+                take(charge)
         for charge in on_invoice:
             take(charge)
 

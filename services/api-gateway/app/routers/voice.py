@@ -63,6 +63,7 @@ async def _render(
         ticket=ticket,
         destination=announcement.destination_for(ticket, context.get("service_point_label")),
         recalled=recalled,
+        with_audio=with_audio,
     )
     payload = QueueAnnouncementResponse(
         ticket_id=ticket.id,

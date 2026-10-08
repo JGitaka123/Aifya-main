@@ -221,6 +221,16 @@ export default function LoginForm({ keycloakEnabled, duties }: LoginFormProps) {
           });
           return;
         }
+        if (data.code === "account_locked") {
+          // Too many wrong passwords. The API already words this and says how
+          // long the wait is, so the screen only has to show it as a warning
+          // rather than as one more rejected credential.
+          setAlert({
+            tone: "warning",
+            body: data.error ?? t("invalidCredentials"),
+          });
+          return;
+        }
         setAlert({ body: data.error ?? t("invalidCredentials") });
         return;
       }

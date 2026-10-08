@@ -11,7 +11,7 @@ import uuid
 import pytest
 from httpx import AsyncClient
 
-from app.models.staff import Staff
+from app.models.staff import Department, Staff
 from app.services.clinical_workspace import (
     SCOPE_DEPARTMENT,
     SCOPE_FACILITY,
@@ -162,10 +162,29 @@ async def _register_clinician(
                 last_name="Mwangi",
                 role="doctor",
                 department_id=department_id,
+                email="alice.mwangi@aifya.health",
                 is_active=True,
             )
         )
         await db.commit()
+
+
+async def _make_department(code: str, name: str) -> str:
+    """Insert a real department, since tests do not seed the HR module."""
+    async with session_factory() as db:
+        department = Department(
+            facility_id=FACILITY_ID,
+            code=code,
+            name=name,
+            department_type="clinical",
+            is_active=True,
+            created_by=USER_ID,
+            updated_by=USER_ID,
+        )
+        db.add(department)
+        await db.commit()
+        await db.refresh(department)
+        return str(department.id)
 
 
 @pytest.mark.asyncio
@@ -288,7 +307,7 @@ async def test_patients_routed_to_another_unit_do_not_reach_my_list(
 @pytest.mark.asyncio
 async def test_department_scope_returns_the_whole_unit(client: AsyncClient) -> None:
     """The departmental view is every patient routed to the unit today."""
-    department_id = uuid.uuid4()
+    department_id = uuid.UUID(await _make_department("DEN", "Dental"))
     await _register_clinician(department_id)
     colleague = await _encounter(
         client,
@@ -303,7 +322,7 @@ async def test_department_scope_returns_the_whole_unit(client: AsyncClient) -> N
     assert response.status_code == 200
     body = response.json()
     assert body["scope"] == SCOPE_DEPARTMENT
-    assert body["clinician"]["department_name"] is None
+    assert body["clinician"]["department_name"] == "Dental"
     assert [i["id"] for i in body["items"]] == [colleague["id"]]
 
 

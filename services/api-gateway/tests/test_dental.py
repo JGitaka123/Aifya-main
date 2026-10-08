@@ -232,15 +232,13 @@ async def test_create_treatment_plan(client: AsyncClient) -> None:
     """Test creating a dental treatment plan."""
     patient_id = await _create_patient(client)
 
-    plan_items: dict[str, object] = {
-        "items": [
-            {
-                "procedure": "filling",
-                "tooth": 11,
-                "estimated_cost": 250000,
-            },
-        ],
-    }
+    plan_items: list[dict[str, object]] = [
+        {
+            "procedure": "filling",
+            "tooth": 11,
+            "estimated_cost": 250000,
+        },
+    ]
     response = await client.post(
         "/api/v1/dental/treatment-plans",
         json={

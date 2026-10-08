@@ -82,3 +82,15 @@ class Staff(AuditMixin, Base):
     signature_url: Mapped[str | None] = mapped_column(String(500))
 
     is_active: Mapped[bool] = mapped_column(default=True, nullable=False)
+
+    # Work availability. Deliberately separate from ``is_active``: an active
+    # account is not the same as a clinician who can take a patient *now* -
+    # they may be on leave, off duty, in surgery or already occupied. The
+    # consultation room assigns on this, not on the account state. One of:
+    # available, busy, on_leave, off_duty, unavailable.
+    work_status: Mapped[str] = mapped_column(
+        String(20),
+        nullable=False,
+        default="available",
+        server_default="available",
+    )

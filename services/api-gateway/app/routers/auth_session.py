@@ -32,6 +32,7 @@ Clinical/tenant rows stay isolated by facility via row level security.
 
 import re
 import uuid
+from datetime import UTC, datetime, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import JSONResponse
@@ -255,6 +256,15 @@ _LOGIN_REFUSALS: dict[str, tuple[int, str]] = {
         status.HTTP_401_UNAUTHORIZED,
         "Invalid email or password.",
     ),
+    # Throttling answer. 429 rather than 401 so the sign-in screen can ask the
+    # person to wait instead of calling a correct password wrong, and so a
+    # lockout is never mistaken for a credential error.
+    "account_locked": (
+        status.HTTP_429_TOO_MANY_REQUESTS,
+        "Too many failed sign-in attempts. This account is locked for a "
+        "short while. Wait, then try again, or contact HR/Admin to have "
+        "your password reset.",
+    ),
 }
 
 
@@ -279,6 +289,55 @@ def _login_refusal(account: AuthAccount | None, password: str) -> str | None:
     if not account.is_active:
         return "access_revoked"
     return None
+
+
+def _lock_seconds_remaining(account: AuthAccount) -> int:
+    """
+    Seconds left on the lockout for an account, or 0 when it is not locked.
+
+    @param account: The account being signed into
+    @returns Whole seconds remaining, floored at zero
+    """
+    if account.locked_until is None:
+        return 0
+    remaining = (account.locked_until - datetime.now(UTC)).total_seconds()
+    return max(0, int(remaining))
+
+
+async def _record_failed_attempt(
+    db: AsyncSession, account: AuthAccount
+) -> None:
+    """
+    Count a wrong password and lock the account once the limit is reached.
+
+    The counter resets when the lock is applied, so the cooling-off period
+    starts from a clean slate rather than locking twice in a row.
+
+    @param db: Database session
+    @param account: The account a wrong password was given for
+    """
+    account.failed_login_attempts = (account.failed_login_attempts or 0) + 1
+    if account.failed_login_attempts >= settings.login_max_failed_attempts:
+        account.locked_until = datetime.now(UTC) + timedelta(
+            minutes=settings.login_lockout_minutes
+        )
+        account.failed_login_attempts = 0
+    await db.flush()
+
+
+async def _clear_failed_attempts(
+    db: AsyncSession, account: AuthAccount
+) -> None:
+    """
+    Forget the failure count after a successful sign-in.
+
+    @param db: Database session
+    @param account: The account that just signed in
+    """
+    if account.failed_login_attempts or account.locked_until is not None:
+        account.failed_login_attempts = 0
+        account.locked_until = None
+        await db.flush()
 
 
 def _normalise_facility(value: str) -> str:
@@ -329,20 +388,42 @@ async def login(data: LoginRequest, db: AsyncSession = Depends(get_db)):
         select(AuthAccount).where(func.lower(AuthAccount.email) == email)
     )
 
+    # Throttle before the password is checked at all: a locked account cannot be
+    # brute-forced, and the answer does not depend on whether the guess was
+    # right. Retry-After tells the sign-in screen how long to ask the person to
+    # wait, without saying anything else about the account.
+    if account is not None:
+        remaining = _lock_seconds_remaining(account)
+        if remaining > 0:
+            refusal_status, detail = _LOGIN_REFUSALS["account_locked"]
+            return JSONResponse(
+                status_code=refusal_status,
+                content={"code": "account_locked", "detail": detail},
+                headers={"Retry-After": str(remaining)},
+            )
+
     # Aifya has no self-registration: an account exists only because HR created
     # the employee and issued a password. The three ways this can fail are
     # therefore not the same failure, and only one of them is the person's to
-    # fix - so each gets its own answer rather than one blanket "invalid email or
-    # password" that sends a new hire round in circles. The code travels with
-    # the message so the sign-in screen can word it, and escalate it, without
-    # parsing prose.
+    # fix - so each gets its own answer rather than one blanket "invalid email
+    # or password" that sends a new hire round in circles. The code travels
+    # with the message so the sign-in screen can word it, without parsing prose.
     refusal = _login_refusal(account, data.password)
     if refusal is not None:
+        # Only a wrong password counts against the limit. Being told HR switched
+        # your access off is not a failed guess and must not lock you out.
+        if refusal == "invalid_credentials" and account is not None:
+            await _record_failed_attempt(db, account)
         refusal_status, detail = _LOGIN_REFUSALS[refusal]
         return JSONResponse(
             status_code=refusal_status,
             content={"code": refusal, "detail": detail},
         )
+
+    # The credentials are good, so the counter starts over: earlier typos must
+    # not count against a correct password tomorrow.
+    if account is not None:
+        await _clear_failed_attempts(db, account)
 
     staff, facility, reason = await _resolve_tenant(db, account)
     if reason is not None:

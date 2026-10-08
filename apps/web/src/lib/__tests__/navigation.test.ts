@@ -82,6 +82,7 @@ describe("role destinations", () => {
       "trials",
       "knowledge",
       "userGuide",
+      "myAvailability",
     ]);
   });
 

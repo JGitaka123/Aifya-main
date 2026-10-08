@@ -59,6 +59,9 @@ export default function TeamPage() {
   const [accessStaff, setAccessStaff] = useState<StaffDirectoryItem | null>(
     null,
   );
+  // Confirmation shown after switching an account on or off. Activation is
+  // where the employee is emailed, so HR is told whether that message went out.
+  const [statusNotice, setStatusNotice] = useState<string | null>(null);
 
   const {
     register,
@@ -75,6 +78,21 @@ export default function TeamPage() {
       const res = await invite.mutateAsync(data);
       setInvited((prev) => [res.email, ...prev]);
       reset({ role: "nurse" });
+    } catch {
+      // surfaced below
+    }
+  };
+
+  const toggleActive = async (member: StaffDirectoryItem) => {
+    setStatusNotice(null);
+    try {
+      const updated = await setActive.mutateAsync({
+        staffId: member.id,
+        isActive: !member.is_active,
+      });
+      if (updated.activation_email_sent) {
+        setStatusNotice(t("activationEmailSent", { email: member.email }));
+      }
     } catch {
       // surfaced below
     }
@@ -253,12 +271,7 @@ export default function TeamPage() {
                         <button
                           type="button"
                           disabled={setActive.isPending}
-                          onClick={() =>
-                            setActive.mutate({
-                              staffId: member.id,
-                              isActive: !member.is_active,
-                            })
-                          }
+                          onClick={() => toggleActive(member)}
                           className="rounded-lg border border-border bg-background px-3 py-1.5 text-xs font-medium text-foreground transition-colors hover:bg-muted disabled:opacity-50"
                         >
                           {member.is_active ? t("deactivate") : t("activate")}
@@ -269,6 +282,12 @@ export default function TeamPage() {
                 ))}
               </tbody>
             </table>
+          </div>
+        )}
+
+        {statusNotice && (
+          <div className="mt-3 rounded-lg border border-green-300 bg-green-50 p-3 text-sm text-green-800 dark:border-green-800 dark:bg-green-950 dark:text-green-200">
+            {statusNotice}
           </div>
         )}
 

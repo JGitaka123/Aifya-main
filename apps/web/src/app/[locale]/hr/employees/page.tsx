@@ -266,9 +266,14 @@ export default function EmployeesListPage() {
       setCreateError(null);
       setNotice(
         scheduleNotice ??
-          (employee?.has_login
-            ? { tone: "success" as const, text: t("loginCreated") }
-            : null),
+          (employee?.activation_email_sent
+            ? {
+                tone: "success" as const,
+                text: t("activationEmailSent", { email: values.email }),
+              }
+            : employee?.has_login
+              ? { tone: "success" as const, text: t("loginCreated") }
+              : null),
       );
     } catch (err) {
       setCreateError(

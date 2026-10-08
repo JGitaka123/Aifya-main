@@ -170,3 +170,21 @@ engines:
 - If `.venv\Scripts\python.exe` ever fails with "No Python at ...Python312",
   recreate the virtualenv once from a normal terminal:
   `uv venv .venv --python 3.12` then `uv pip sync uv.lock`.
+
+## `test_queue_call.py` - Queue Patient-Calling Smoke Test
+
+Signs in, issues one ticket, calls it, reads back the spoken line and the
+rendered audio, checks the board, and cancels the ticket. Pure HTTP with no DB
+access, so it can be pointed at any environment with `--api`.
+
+```powershell
+cd C:\Users\User\Downloads\Aifya-main\Aifya-main\services\api-gateway
+.\.venv\Scripts\python.exe scripts\test_queue_call.py
+```
+
+Defaults to the local test account. Override with `--email`, `--password`,
+`--facility`, `--duty`, `--patient-id`, or the `AIFYA_*` environment
+variables. `--call-next` exercises the real next-patient path (it claims
+whoever is genuinely first, so use an empty or test queue); `--keep` leaves the
+ticket open; `--audio-out PATH` chooses where the MP3 is written. The exit code
+is the number of failed checks.

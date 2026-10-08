@@ -74,6 +74,7 @@ class KeycloakAdminClient:
         facility_id: str,
         roles: list[str],
         temporary_password: str | None = None,
+        force_password_change: bool = True,
         send_invite_email: bool = True,
     ) -> str:
         """
@@ -85,6 +86,8 @@ class KeycloakAdminClient:
         @param facility_id: Facility UUID string set as the facility_id attribute
         @param roles: Realm role names to assign
         @param temporary_password: Optional initial password (must be changed)
+        @param force_password_change: When False the initial password is usable
+            as-is, for a password the person chose themselves at sign-up
         @param send_invite_email: Trigger Keycloak UPDATE_PASSWORD + VERIFY_EMAIL email
         @returns The created Keycloak user id (sub)
         @raises KeycloakAdminError on any failure
@@ -128,7 +131,19 @@ class KeycloakAdminClient:
                     raise KeycloakAdminError("Created user could not be located")
                 user_id = rows[0]["id"]
 
-            await self._assign_realm_roles(client, admin, headers, user_id, roles)
+            try:
+                await self._assign_realm_roles(
+                    client, admin, headers, user_id, roles
+                )
+            except KeycloakAdminError:
+                # A half-provisioned account - created but holding no roles -
+                # would sign in and see nothing, and a retry would only fail
+                # with "already exists". Remove it so the caller can retry.
+                with contextlib.suppress(httpx.HTTPError):
+                    await client.delete(
+                        f"{admin}/users/{user_id}", headers=headers
+                    )
+                raise
 
             if temporary_password:
                 await client.put(
@@ -136,7 +151,7 @@ class KeycloakAdminClient:
                     json={
                         "type": "password",
                         "value": temporary_password,
-                        "temporary": True,
+                        "temporary": force_password_change,
                     },
                     headers=headers,
                 )
@@ -153,6 +168,75 @@ class KeycloakAdminClient:
 
             return user_id
 
+    async def set_user_password(
+        self,
+        *,
+        user_id: str,
+        password: str,
+        temporary: bool = False,
+    ) -> None:
+        """
+        Set (or reset) a Keycloak user's password.
+
+        This is how an account created without credentials - a facility admin
+        who signed up, or a staff member HR registered - gets a usable login
+        without waiting on the set-password email.
+
+        @param user_id: Keycloak user id (sub)
+        @param password: New plaintext password
+        @param temporary: Force the change at next sign-in
+        @raises KeycloakAdminError on any failure
+        """
+        if not self.is_configured:
+            raise KeycloakAdminError("Keycloak admin client is not configured")
+
+        admin = f"{self.base_url}/admin/realms/{self.realm}"
+        async with httpx.AsyncClient(timeout=20.0) as client:
+            token = await self._token(client)
+            headers = {"Authorization": f"Bearer {token}"}
+            resp = await client.put(
+                f"{admin}/users/{user_id}/reset-password",
+                json={
+                    "type": "password",
+                    "value": password,
+                    "temporary": temporary,
+                },
+                headers=headers,
+            )
+            if resp.status_code not in (200, 204):
+                raise KeycloakAdminError(
+                    f"Keycloak password set failed: "
+                    f"{resp.status_code} {resp.text}"
+                )
+
+    async def find_user_id(self, *, email: str) -> str | None:
+        """
+        Look a user up by email.
+
+        @param email: Exact email (Keycloak username) to match
+        @returns The Keycloak user id, or None when the realm has no such user
+        @raises KeycloakAdminError when the admin call itself fails
+        """
+        if not self.is_configured:
+            raise KeycloakAdminError("Keycloak admin client is not configured")
+
+        admin = f"{self.base_url}/admin/realms/{self.realm}"
+        async with httpx.AsyncClient(timeout=20.0) as client:
+            token = await self._token(client)
+            headers = {"Authorization": f"Bearer {token}"}
+            resp = await client.get(
+                f"{admin}/users",
+                params={"email": email, "exact": "true"},
+                headers=headers,
+            )
+            if resp.status_code != 200:
+                raise KeycloakAdminError(
+                    f"Keycloak user lookup failed: "
+                    f"{resp.status_code} {resp.text}"
+                )
+            rows = resp.json()
+            return rows[0]["id"] if rows else None
+
     async def _assign_realm_roles(
         self,
         client: httpx.AsyncClient,
@@ -161,17 +245,39 @@ class KeycloakAdminClient:
         user_id: str,
         roles: list[str],
     ) -> None:
-        """Resolve realm role representations and assign them to a user."""
+        """Resolve realm role representations and assign them to a user.
+
+        Every requested role must resolve, and Keycloak must accept the
+        assignment. Skipping a role the service account cannot read would leave
+        the user created but holding no realm roles, which the API reads as
+        holding no permissions - a silent "signs in and sees nothing" failure
+        with no error anywhere in the logs. Raising makes the misconfiguration
+        visible at the moment a user is provisioned.
+
+        @raises KeycloakAdminError: When a role is unknown or unreadable, or
+            when Keycloak rejects the assignment
+        """
         reps: list[dict] = []
         for role in roles:
             r = await client.get(f"{admin}/roles/{role}", headers=headers)
-            if r.status_code == 200:
-                reps.append(r.json())
-        if reps:
-            await client.post(
-                f"{admin}/users/{user_id}/role-mappings/realm",
-                json=reps,
-                headers=headers,
+            if r.status_code != 200:
+                raise KeycloakAdminError(
+                    f"Could not read realm role {role!r} ({r.status_code}). "
+                    "The aifya-admin service account needs view-realm (or "
+                    "manage-realm) in the aifya realm to assign roles."
+                )
+            reps.append(r.json())
+        if not reps:
+            return
+        resp = await client.post(
+            f"{admin}/users/{user_id}/role-mappings/realm",
+            json=reps,
+            headers=headers,
+        )
+        if resp.status_code not in (201, 204):
+            raise KeycloakAdminError(
+                f"Assigning realm roles {roles} failed: "
+                f"{resp.status_code} {resp.text}"
             )
 
 

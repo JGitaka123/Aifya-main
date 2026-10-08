@@ -57,6 +57,8 @@ export interface Employee {
   disability_exemption: boolean;
   /** Whether the matching staff record has a sign-in. Their access is the staff role. */
   has_login?: boolean;
+  /** Whether registering this employee emailed them their activation message. */
+  activation_email_sent?: boolean;
 }
 
 export interface EmployeeListResponse {

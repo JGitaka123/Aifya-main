@@ -51,7 +51,10 @@ from app.schemas.prescription import (
     PrescriptionResponse,
     PrescriptionWithInteractions,
 )
+from app.schemas.provider import ProviderDirectoryResponse
 from app.schemas.vital import VitalSignCreate, VitalSignResponse
+from app.models.encounter import Encounter
+from app.routers.queue import announce_ticket_call
 from app.services.clinical_workspace import (
     SCOPE_DEPARTMENT,
     SCOPE_FACILITY,
@@ -68,6 +71,8 @@ from app.services.encounter_service import (
 from app.services.lab_service import LabService
 from app.services.point_of_care_service import PointOfCareService
 from app.services.prescription_service import PrescriptionService
+from app.services.provider_directory import ProviderDirectoryService
+from app.services.queue.queue_service import QueueService
 from app.services.vitals_service import VitalsService, vitals_report_payload
 
 router = APIRouter(dependencies=[Depends(require_module("encounters"))])
@@ -173,6 +178,37 @@ async def get_opd_queue(
     return QueueResponse(items=items, total=len(items))
 
 
+# -- Room calls ---------------------------------------------------------------
+
+#: Where a patient is told to go when a room call has no unit of its own.
+_CONSULTATION_ROOM = "Consultation Room"
+
+
+async def _announce_room_call(
+    db: AsyncSession, encounter: Encounter, facility_id: uuid.UUID
+) -> None:
+    """Speak the ticket number for a call made from a room.
+
+    A room call moves the visit, but the ticket is what the patient is
+    holding, so the announcement repeats the printed number and names the
+    room. A visit with no live ticket is skipped: the call itself already
+    succeeded and must not fail just because nobody could speak it.
+
+    @param db: Database session
+    @param encounter: The visit that has just been claimed
+    @param facility_id: Facility the visit belongs to
+    """
+
+    queue = QueueService(db)
+    ticket = await queue.ticket_for_encounter(
+        facility_id=facility_id, encounter_id=encounter.id
+    )
+    if ticket is None:
+        return
+    destination = getattr(encounter, "department_name", None) or _CONSULTATION_ROOM
+    await announce_ticket_call(ticket, queue, destination=destination)
+
+
 @router.post("/queue/call-next", response_model=EncounterResponse)
 async def call_next_patient(
     db: AsyncSession = Depends(get_db),
@@ -219,6 +255,7 @@ async def call_next_patient(
                 else "No patients waiting in queue"
             ),
         )
+    await _announce_room_call(db, encounter, current_user.facility_id)
     return EncounterResponse.model_validate(encounter)
 
 
@@ -265,6 +302,7 @@ async def call_in_patient(
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT, detail=str(exc)
         ) from exc
+    await _announce_room_call(db, encounter, current_user.facility_id)
     return EncounterResponse.model_validate(encounter)
 
 
@@ -707,6 +745,66 @@ async def list_departments(
     return options
 
 
+@router.get("/providers", response_model=ProviderDirectoryResponse)
+async def list_providers(
+    department_id: uuid.UUID | None = Query(
+        None, description="Restrict to one unit"
+    ),
+    role: str | None = Query(None, description="Restrict to one role"),
+    specialty: str | None = Query(None, description="Restrict to one specialty"),
+    work_status: str | None = Query(
+        None, description="Restrict to one effective availability"
+    ),
+    available_only: bool = Query(
+        False, description="Only clinicians who can be assigned now"
+    ),
+    search: str | None = Query(None, description="Name search"),
+    include_inactive: bool = Query(False),
+    db: AsyncSession = Depends(get_db),
+    current_user: CurrentUser = Depends(
+        require_permission(
+            Permission.CLINICAL_VIEW,
+            Permission.OPD_MANAGE,
+            any_of=True,
+        )
+    ),
+) -> ProviderDirectoryResponse:
+    """
+    The clinicians a patient in the consultation room can be handed to.
+
+    The room assigns to a qualified person, not to a department: this lists
+    the clinical staff of one unit with their specialty and their *effective*
+    availability - an active account that is on leave or already in a
+    consultation is not available. Declared before the /{encounter_id} route
+    so "providers" is not parsed as an encounter UUID.
+
+    @param department_id: Restrict to one unit
+    @param role: Restrict to one role (defaults to every clinical role)
+    @param specialty: Restrict to one specialty
+    @param work_status: Restrict to one effective availability
+    @param available_only: Keep only clinicians who can be assigned now
+    @param search: Optional name substring
+    @param include_inactive: Include deactivated accounts
+    @param db: Database session
+    @param current_user: Authenticated clinician
+    @returns Providers ordered available-first, plus the specialties offered
+    """
+    service = ProviderDirectoryService(db)
+    items, specialties = await service.list_providers(
+        facility_id=current_user.facility_id,
+        department_id=department_id,
+        role=role,
+        specialty=specialty,
+        work_status=work_status,
+        available_only=available_only,
+        search=search,
+        include_inactive=include_inactive,
+    )
+    return ProviderDirectoryResponse(
+        items=items, total=len(items), specialties=specialties
+    )
+
+
 @router.get("/{encounter_id}", response_model=EncounterResponse)
 async def get_encounter(
     encounter_id: uuid.UUID,
@@ -819,6 +917,7 @@ async def record_vitals(
     @param db: Database session
     @param current_user: Authenticated user from JWT
     @returns Recorded vital signs with critical alerts if any
+    @raises HTTPException 404: When the encounter is not in this facility
     """
     if data.encounter_id != encounter_id:
         raise HTTPException(
@@ -826,11 +925,25 @@ async def record_vitals(
             detail="Encounter ID in path and body must match",
         )
     service = VitalsService(db)
-    vital = await service.record_vitals(
-        data=data,
-        facility_id=current_user.facility_id,
-        recorded_by=current_user.user_id,
-    )
+    try:
+        vital = await service.record_vitals(
+            data=data,
+            facility_id=current_user.facility_id,
+            recorded_by=current_user.user_id,
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
+    # "No such visit" and "another hospital's visit" are answered identically
+    # on purpose: telling them apart would let a caller probe for encounter
+    # ids that are not theirs.
+    if vital is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Encounter not found",
+        )
     return _vital_response(vital)
 
 

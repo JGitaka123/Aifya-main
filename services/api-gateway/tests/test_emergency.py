@@ -42,6 +42,46 @@ async def _create_emergency_visit(client: AsyncClient, patient_id: str) -> dict[
     return data
 
 
+async def _create_ward(client: AsyncClient) -> dict[str, object]:
+    """Create a ward for an emergency admission.
+
+    @param client: Async HTTP test client
+    @returns Ward response dict
+    """
+    response = await client.post(
+        "/api/v1/ipd/wards",
+        json={
+            "name": "Emergency Admission Ward",
+            "code": "ERW",
+            "ward_type": "general",
+            "total_beds": 10,
+        },
+    )
+    assert response.status_code == 201
+    return response.json()
+
+
+async def _create_bed(
+    client: AsyncClient, ward_id: str
+) -> dict[str, object]:
+    """Create an available bed in a ward.
+
+    @param client: Async HTTP test client
+    @param ward_id: Ward UUID string
+    @returns Bed response dict
+    """
+    response = await client.post(
+        "/api/v1/ipd/beds",
+        json={
+            "ward_id": ward_id,
+            "bed_number": "ER-101",
+            "bed_type": "standard",
+        },
+    )
+    assert response.status_code == 201
+    return response.json()
+
+
 # ── Summary ──────────────────────────────────────────────────────────────────
 
 
@@ -172,7 +212,8 @@ async def test_assign_doctor_to_emergency_visit(client: AsyncClient) -> None:
     data: dict[str, object] = response.json()
     assert data["id"] == visit_id
     assert data["assigned_doctor_id"] == "00000000-0000-0000-0000-000000000002"
-    assert data["status"] == "in_treatment"
+    # Assignment names the clinician; it does not start treatment.
+    assert data["status"] == "arrived"
 
 
 # ── Disposition ──────────────────────────────────────────────────────────────
@@ -185,9 +226,13 @@ async def test_record_disposition(client: AsyncClient) -> None:
     visit = await _create_emergency_visit(client, patient_id)
     visit_id: str = str(visit["id"])
 
+    ward = await _create_ward(client)
+    bed = await _create_bed(client, str(ward["id"]))
     disposition_payload: dict[str, str] = {
         "disposition": "admit",
         "disposition_notes": "Admit to cardiology ward",
+        "admitted_to_ward_id": str(ward["id"]),
+        "bed_id": str(bed["id"]),
     }
     response = await client.post(
         f"/api/v1/emergency/visits/{visit_id}/disposition",

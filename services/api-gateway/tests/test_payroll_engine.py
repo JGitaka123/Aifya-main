@@ -350,7 +350,7 @@ async def test_p9_reconciles_to_monthly_paye_sum() -> None:
         )
         # Must reconcile: sum of monthly PAYEs == total_paye
         sum_paye = sum((row["paye"] for row in p9["rows"]), Decimal("0"))
-        assert sum_paye == p9["total_paye"]
+        assert sum_paye == p9["totals"]["paye"]
         assert len(p9["rows"]) == 3
 
 

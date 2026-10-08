@@ -33,9 +33,13 @@ from app.schemas.hr import (
     StaffProfileCreate,
     StaffProfileResponse,
     StaffRoleUpdate,
+    StaffWorkStatusUpdate,
 )
+from app.schemas.availability import WeeklyScheduleResponse, WeeklyScheduleUpdate
+from app.services.availability_service import AvailabilityService
 from app.services.hr_service import HRService
 from app.services.staff_access import StaffAccessError
+from app.services.staff_notifications import notify_staff_activated
 
 router = APIRouter(dependencies=[Depends(require_module("hr"))])
 
@@ -142,7 +146,8 @@ async def set_staff_active(
 
     The role says what someone may open; this says whether they may sign in at
     all. Deactivating takes the login away with it, so an employee who leaves
-    cannot keep using a session they already had.
+    cannot keep using a session they already had. Switching an account back on
+    emails the employee, at the address HR recorded, that they can sign in.
 
     @param staff_id: Staff UUID
     @param data: Desired active state
@@ -155,6 +160,40 @@ async def set_staff_active(
         facility_id=current_user.facility_id,
         staff_id=staff_id,
         is_active=data.is_active,
+    )
+    if item is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Staff member not found"
+        )
+    return item
+
+
+@router.patch("/staff/{staff_id}/work-status", response_model=StaffDirectoryItem)
+async def set_staff_work_status(
+    staff_id: uuid.UUID,
+    data: StaffWorkStatusUpdate,
+    db: AsyncSession = Depends(get_db),
+    current_user: CurrentUser = Depends(require_roles(*_HR_ROLES)),
+) -> StaffDirectoryItem:
+    """
+    Change a staff member's declared availability.
+
+    Account activation and work availability are different questions. This is
+    the one the consultation room's picker reads: a clinician can have a valid
+    login and still be off duty, on leave or unavailable, and the picker must
+    only offer people who can take a patient now.
+
+    @param staff_id: Staff UUID
+    @param data: Desired availability
+    @param db: Database session
+    @param current_user: Authenticated administrator
+    @returns The updated directory entry
+    """
+    service = HRService(db)
+    item = await service.set_work_status(
+        facility_id=current_user.facility_id,
+        staff_id=staff_id,
+        work_status=data.work_status,
     )
     if item is None:
         raise HTTPException(
@@ -237,11 +276,14 @@ async def set_staff_password(
     ),
 ) -> StaffAccessResponse:
     """
-    Set or reset a staff member's sign-in password.
+    Set or create a staff member's sign-in password.
 
-    With no email delivery in internal-auth mode, HR hands the password over
-    in person; this is how a new employee gets their first one and how a
-    forgotten one is replaced.
+    This is how a new employee gets their first password and how a forgotten
+    one is replaced. Setting a first password on a record with no login also
+    creates the login, so HR can grant access here instead of sending the
+    person back through the payroll form. When the employee is active they are
+    emailed their sign-in details, including this password, at the address on
+    their record.
 
     @param staff_id: Staff UUID
     @param data: The new password
@@ -266,10 +308,19 @@ async def set_staff_password(
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Staff member not found"
         )
+    activation_email_sent = False
+    if staff.is_active:
+        activation_email_sent = await notify_staff_activated(
+            db,
+            facility_id=current_user.facility_id,
+            staff=staff,
+            password=data.password,
+        )
     return StaffAccessResponse(
         staff_id=staff.id,
         role=staff.role,
         has_login=True,
+        activation_email_sent=activation_email_sent,
         message=(
             f"Password updated for {staff.first_name} {staff.last_name}."
         ),
@@ -646,3 +697,149 @@ async def clock_out(
             detail="Attendance record not found",
         )
     return AttendanceResponse.model_validate(attendance)
+
+
+# -- My availability ---------------------------------------------------
+
+
+@router.get("/me/schedule", response_model=WeeklyScheduleResponse)
+async def get_my_schedule(
+    db: AsyncSession = Depends(get_db),
+    current_user: CurrentUser = Depends(get_current_user),
+) -> WeeklyScheduleResponse:
+    """
+    The signed-in clinician's own weekly working hours.
+
+    The staff row is resolved from the token, never from a query parameter,
+    so this route cannot be pointed at someone else's week.
+
+    @param db: Database session
+    @param current_user: Authenticated user from JWT
+    @returns The caller's week and its effective work status
+    @raises HTTPException 404: When the token has no staff record
+    """
+    service = AvailabilityService(db)
+    staff_id = await service.resolve_own_staff_id(
+        current_user.user_id, current_user.facility_id
+    )
+    if staff_id is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No staff profile is linked to this user",
+        )
+    week = await service.get_week(current_user.facility_id, staff_id)
+    if week is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No staff profile is linked to this user",
+        )
+    return week
+
+
+@router.put("/me/schedule", response_model=WeeklyScheduleResponse)
+async def update_my_schedule(
+    data: WeeklyScheduleUpdate,
+    db: AsyncSession = Depends(get_db),
+    current_user: CurrentUser = Depends(get_current_user),
+) -> WeeklyScheduleResponse:
+    """
+    Replace the signed-in clinician's own weekly working hours.
+
+    Only the working day and the hours are writable; the schema has no field
+    for role, department, specialty or facility, so a self-service edit can
+    never widen what the clinician is allowed to do.
+
+    @param data: The complete set of sessions the week should contain
+    @param db: Database session
+    @param current_user: Authenticated user from JWT
+    @returns The saved week and its effective work status
+    @raises HTTPException 404: When the token has no staff record
+    """
+    service = AvailabilityService(db)
+    staff_id = await service.resolve_own_staff_id(
+        current_user.user_id, current_user.facility_id
+    )
+    if staff_id is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No staff profile is linked to this user",
+        )
+    week = await service.replace_week(
+        current_user.facility_id,
+        staff_id,
+        data.slots,
+        current_user.user_id,
+    )
+    if week is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No staff profile is linked to this user",
+        )
+    return week
+
+
+# -- Staff availability, for HR ---------------------------------------
+
+
+@router.get("/staff/{staff_id}/schedule", response_model=WeeklyScheduleResponse)
+async def get_staff_schedule(
+    staff_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: CurrentUser = Depends(require_roles(*_HR_ROLES)),
+) -> WeeklyScheduleResponse:
+    """
+    Read any employee's weekly working hours.
+
+    HR's oversight is facility-scoped: a staff member outside the caller's
+    facility is simply not found, so a crafted id cannot cross tenants.
+
+    @param staff_id: Staff UUID whose week is wanted
+    @param db: Database session
+    @param current_user: Authenticated HR user from JWT
+    @returns The staff member's week and its effective work status
+    @raises HTTPException 404: When the staff member is not in this facility
+    """
+    week = await AvailabilityService(db).get_week(
+        current_user.facility_id, staff_id
+    )
+    if week is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Staff member not found",
+        )
+    return week
+
+
+@router.put("/staff/{staff_id}/schedule", response_model=WeeklyScheduleResponse)
+async def update_staff_schedule(
+    staff_id: uuid.UUID,
+    data: WeeklyScheduleUpdate,
+    db: AsyncSession = Depends(get_db),
+    current_user: CurrentUser = Depends(require_roles(*_HR_ROLES)),
+) -> WeeklyScheduleResponse:
+    """
+    Replace any employee's weekly working hours.
+
+    This is the edit HR uses when a clinician is absent and cannot sign in to
+    fix their own week, so it takes the same day-and-hours shape as the
+    self-service edit rather than a second, wider vocabulary.
+
+    @param staff_id: Staff UUID whose week is being rewritten
+    @param data: The complete set of sessions the week should contain
+    @param db: Database session
+    @param current_user: Authenticated HR user from JWT
+    @returns The saved week and its effective work status
+    @raises HTTPException 404: When the staff member is not in this facility
+    """
+    week = await AvailabilityService(db).replace_week(
+        current_user.facility_id,
+        staff_id,
+        data.slots,
+        current_user.user_id,
+    )
+    if week is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Staff member not found",
+        )
+    return week

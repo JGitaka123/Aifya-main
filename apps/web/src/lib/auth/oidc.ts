@@ -179,19 +179,35 @@ async function postToTokenEndpoint(
   issuer: string,
   body: URLSearchParams,
 ): Promise<OidcTokens | null> {
+  const endpoint = `${issuer}/protocol/openid-connect/token`;
   try {
-    const response = await fetch(`${issuer}/protocol/openid-connect/token`, {
+    const response = await fetch(endpoint, {
       method: "POST",
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
       body,
       cache: "no-store",
     });
     if (!response.ok) {
+      const detail = await response.text().catch(() => "");
+      console.error(
+        `[oidc] token endpoint rejected the request (${response.status}): ${detail}`,
+        {
+          endpoint,
+          grant_type: body.get("grant_type"),
+          client_id: body.get("client_id"),
+          redirect_uri: body.get("redirect_uri"),
+        },
+      );
       return null;
     }
     const data = (await response.json()) as OidcTokens;
-    return data.access_token ? data : null;
-  } catch {
+    if (!data.access_token) {
+      console.error("[oidc] token response contained no access_token", data);
+      return null;
+    }
+    return data;
+  } catch (error) {
+    console.error(`[oidc] token request to ${endpoint} threw:`, error);
     return null;
   }
 }

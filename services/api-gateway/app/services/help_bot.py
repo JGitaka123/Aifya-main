@@ -86,8 +86,16 @@ _MODULE_KEYWORDS: Final[tuple[tuple[str, str, tuple[str, ...]], ...]] = (
         "/opd",
         "OPD",
         (
-            "opd", "outpatient", "out-patient", "consultation",
-            "clinic visit",
+            "opd", "outpatient", "out-patient", "clinic visit",
+            "opd queue", "queue", "ticket", "tickets", "call next patient",
+        ),
+    ),
+    (
+        "/consultation",
+        "Consultation Room",
+        (
+            "consultation room", "consultation", "consulting room",
+            "doctor room", "call the next patient",
         ),
     ),
     (
@@ -160,6 +168,15 @@ _MODULE_KEYWORDS: Final[tuple[tuple[str, str, tuple[str, ...]], ...]] = (
         ),
     ),
     (
+        "/billing/pos",
+        "Point of Sale (Cashier)",
+        (
+            "point of sale", "pos", "cashier", "cash desk",
+            "take payment", "collect payment", "receive payment",
+            "record a payment", "accept payment", "pay a bill",
+        ),
+    ),
+    (
         "/insurance",
         "Insurance",
         (
@@ -176,7 +193,7 @@ _MODULE_KEYWORDS: Final[tuple[tuple[str, str, tuple[str, ...]], ...]] = (
         ),
     ),
     (
-        "/finance/payroll",
+        "/hr/payroll",
         "Payroll",
         (
             "payroll", "salary", "salaries", "payslip", "paye", "nssf",
@@ -276,10 +293,13 @@ _SYSTEM_PROMPT: Final[str] = (
     "education in simple language. Your main job is helping with Aifya "
     "itself: how to use the system, navigate modules, register patients, "
     "and work with billing, pharmacy, laboratory, appointments and "
-    "reports. Be concise (max 4 short paragraphs). "
+    "reports. A registered patient joins the OPD queue (the nurse calls "
+    "the next ticket on the OPD screen), and the Consultation Room then "
+    "calls the next patient for the clinician. " 
+    "Be concise (max 4 short paragraphs). "
     "If asked clinical questions (drug doses, diagnosis, treatment), do "
     "NOT answer - instead politely redirect the user to the clinician or "
-    "to the Clinical Decision Support module. "
+    "to the Clinical module. "
     "When you suggest a feature, name the module exactly as it appears in "
     "the navigation list below. "
     "These are the only screens that exist. Never invent a path, a menu "
@@ -401,11 +421,11 @@ async def answer_help_query(
             answer=(
                 "This looks like a clinical question. For safety, the help "
                 "assistant does not provide medical advice. Please consult "
-                "the attending clinician, or open the Clinical Decision "
-                "Support module for evidence-based guidance."
+                "the attending clinician, or open the Clinical module for "
+                "guidance and decision support."
             ),
             suggested_links=[
-                SuggestedLink(label="Clinical Decision Support", href="/cds"),
+                SuggestedLink(label="Clinical", href="/clinical"),
             ],
             confidence=0.95,
             model="guardrail",

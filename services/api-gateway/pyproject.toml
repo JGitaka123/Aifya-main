@@ -31,6 +31,12 @@ dependencies = [
     "PyMuPDF>=1.25.1",
     "python-docx>=1.1.2",
     "qdrant-client>=1.12.1",
+    # Offline text-to-speech (TTS_PROVIDER=local). Imported lazily, so the
+    # gateway still runs without it; only the local provider needs the package.
+    "pyttsx3>=2.90",
+    # Free, keyless access to the same neural voices as Azure Speech
+    # (TTS_PROVIDER=edge). Imported lazily; only the edge provider needs it.
+    "edge-tts>=6.1",
 ]
 
 [project.optional-dependencies]
@@ -98,6 +104,8 @@ module = [
     "kafka.*",
     "aiokafka.*",
     "jose.*",
+    "pyttsx3.*",
+    "edge_tts.*",
 ]
 ignore_missing_imports = true
 

@@ -26,6 +26,7 @@ from app.schemas.ipd import (
     WardCreate,
     WardResponse,
 )
+from app.services.queue.queue_service import QueueService
 
 
 #: Statuses that still need the admission desk's attention.
@@ -280,6 +281,14 @@ class IPDService:
             encounter.bed_id = data.bed_id
             encounter.admission_date = datetime.now(UTC)
             encounter.disposition = "admitted"
+            # The patient is no longer waiting in a unit; take their ticket
+            # off the call board so a bed does not sit in the waiting count.
+            await QueueService(self.db).close_for_encounter(
+                facility_id=facility_id,
+                encounter_id=encounter.id,
+                actor_id=admitted_by,
+                reason="admitted to ward",
+            )
 
         # Emit event
         event = EventBase(

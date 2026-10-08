@@ -138,6 +138,7 @@ class OnboardingService:
         facility_id: uuid.UUID,
         admin_client: KeycloakAdminClient,
         approver_id: uuid.UUID | None = None,
+        initial_password: str | None = None,
     ) -> tuple[Facility, bool]:
         """
         Approve a pending facility: activate it, seed baseline data, and
@@ -146,6 +147,9 @@ class OnboardingService:
         @param facility_id: Facility to approve
         @param admin_client: Keycloak admin client for user provisioning
         @param approver_id: Super-admin performing the approval
+        @param initial_password: Password the administrator chose at sign-up,
+            stored on the Keycloak account so they can sign in without waiting
+            on the set-password email. None falls back to the email flow.
         @returns (facility, admin_user_created)
         """
         facility = await self.db.get(Facility, facility_id)
@@ -183,6 +187,8 @@ class OnboardingService:
                 last_name=onboarding.get("admin_last_name", "Admin"),
                 facility_id=str(facility_id),
                 roles=["facility_admin"],
+                temporary_password=initial_password,
+                force_password_change=False,
                 send_invite_email=True,
             )
             await self._create_staff(

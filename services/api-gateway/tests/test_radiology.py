@@ -74,6 +74,28 @@ async def _create_imaging_order(
     return response.json()
 
 
+async def _pay_imaging_order(
+    client: AsyncClient,
+    encounter_id: str,
+    order_id: str,
+) -> None:
+    """Settle an imaging order at the point of sale.
+
+    @param client: Async HTTP test client
+    @param encounter_id: Encounter UUID string
+    @param order_id: Imaging order UUID string
+    """
+    response = await client.post(
+        f"/api/v1/billing/pos/encounters/{encounter_id}/pay",
+        json={
+            "payment_method": "cash",
+            "reference_type": "imaging_order",
+            "reference_id": order_id,
+        },
+    )
+    assert response.status_code == 201
+
+
 # -- Summary ------------------------------------------------------------------
 
 
@@ -207,6 +229,7 @@ async def test_perform_imaging_order(client: AsyncClient) -> None:
     encounter_id = await _create_encounter(client, patient_id)
     order = await _create_imaging_order(client, patient_id, encounter_id)
     order_id: str = order["id"]  # type: ignore[assignment]
+    await _pay_imaging_order(client, encounter_id, order_id)
 
     response = await client.post(
         f"/api/v1/radiology/orders/{order_id}/perform",

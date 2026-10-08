@@ -109,6 +109,8 @@ class EmployeeResponse(BaseModel):
     #: Whether this employee can sign in. Their access is the staff role, which
     #: lives in the staff directory; this only says whether credentials exist.
     has_login: bool = False
+    #: Whether registering this employee also emailed them an activation message.
+    activation_email_sent: bool = False
 
     model_config = ConfigDict(from_attributes=True)
 

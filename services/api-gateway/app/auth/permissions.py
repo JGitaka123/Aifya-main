@@ -612,6 +612,26 @@ def duty_matches(submitted: str, stored_role: str | None) -> bool:
     return declared == recorded
 
 
+def duty_label(role: str | None) -> str:
+    """
+    The human duty name for a stored role, as the picker spells it.
+
+    Used wherever Aifya has to name the duty back to the employee in prose -
+    the activation email tells them which state of duty to declare at sign-in,
+    and it has to match the picker exactly or the sign-in is refused.
+
+    @param role: Role as stored on the staff record
+    @returns The picker's label, or a title-cased role when there is no match
+    """
+    if not role:
+        return ""
+    normalised = normalise_role(role)
+    for option in duty_options():
+        if option["role"] == normalised:
+            return option["label"]
+    return role.replace("_", " ").title()
+
+
 def normalise_role(role: str) -> str:
     """
     Normalise a role string for matrix lookup.

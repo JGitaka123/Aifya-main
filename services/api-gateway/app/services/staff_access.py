@@ -10,9 +10,11 @@ Deactivating a staff member flips the login off with them. The account row is
 kept rather than deleted: a returning employee is re-activated instead of
 re-created, and the audit trail keeps its references.
 
-Only Aifya's own login (``AUTH_PROVIDER=internal``) is provisioned here. Under
-Keycloak the identity lives in the realm and staff invitations go through
-``onboarding_service.invite_staff`` instead.
+Under ``AUTH_PROVIDER=internal`` the login is an ``auth_accounts`` row created
+here. Under ``AUTH_PROVIDER=keycloak`` the credential lives in the realm, so
+this module writes it there through the Keycloak Admin API: staff invitations
+go through ``onboarding_service.invite_staff``, and HR issuing or resetting a
+password goes through ``set_keycloak_staff_password``.
 """
 
 import uuid
@@ -20,8 +22,13 @@ import uuid
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import settings
 from app.models.auth_account import AuthAccount
 from app.models.staff import Staff
+from app.utils.keycloak_admin import (
+    KeycloakAdminError,
+    get_keycloak_admin_client,
+)
 from app.utils.passwords import hash_password
 
 #: Shortest password HR may set on a colleague's account. The login form
@@ -210,3 +217,94 @@ async def set_login_active(
         return
     account.is_active = is_active
     await db.flush()
+
+
+async def set_keycloak_staff_password(
+    db: AsyncSession,
+    *,
+    staff: Staff,
+    password: str,
+    temporary: bool = False,
+) -> None:
+    """
+    Set a staff member's Keycloak password.
+
+    Under ``AUTH_PROVIDER=keycloak`` the credential lives in the realm rather
+    than in ``auth_accounts``, so this is the Keycloak counterpart of
+    ``provision_login``. It is how HR gives a registered employee their first
+    way in, and how a forgotten password is replaced.
+
+    A staff row can exist with no realm account behind it: "Add Employee"
+    writes the directory row with a placeholder id. So when the email has no
+    Keycloak user the account is created here and the real id is written back,
+    which is what lets HR register someone and hand them a login in one step.
+
+    @param db: Database session
+    @param staff: Staff member the credential belongs to
+    @param password: New plaintext password
+    @param temporary: Force the change at next sign-in
+    @raises StaffAccessError: When provisioning is unconfigured or refuses
+    """
+    _check_password(password)
+    client = get_keycloak_admin_client()
+    if not client.is_configured:
+        raise StaffAccessError(
+            "User provisioning is not configured (Keycloak admin credentials "
+            "missing)."
+        )
+    try:
+        user_id = await client.find_user_id(email=staff.email)
+        if user_id is None:
+            user_id = await client.create_user(
+                email=staff.email,
+                first_name=staff.first_name,
+                last_name=staff.last_name,
+                facility_id=str(staff.facility_id),
+                roles=[staff.role],
+                temporary_password=password,
+                force_password_change=temporary,
+                send_invite_email=False,
+            )
+        else:
+            await client.set_user_password(
+                user_id=user_id,
+                password=password,
+                temporary=temporary,
+            )
+        if str(staff.keycloak_user_id) != user_id:
+            staff.keycloak_user_id = uuid.UUID(user_id)
+            await db.flush()
+    except KeycloakAdminError as exc:
+        raise StaffAccessError(str(exc)) from exc
+
+
+async def provision_staff_login(
+    db: AsyncSession,
+    *,
+    staff: Staff,
+    password: str,
+    actor_id: uuid.UUID | None = None,
+    temporary: bool = False,
+) -> None:
+    """
+    Create or reset a staff member's login under the active auth provider.
+
+    Callers should not need to know where the credential lives. Under
+    ``internal`` this writes the ``auth_accounts`` row; under ``keycloak`` it
+    writes the realm. Routing every "give this person a password" through one
+    function is what keeps the payroll Add Employee form and the HR password
+    dialog from drifting apart on which store they update.
+
+    @param db: Database session
+    @param staff: Staff member the login belongs to
+    @param password: Plaintext password to set
+    @param actor_id: HR user performing the change (internal mode audit)
+    @param temporary: Force a change at next sign-in (keycloak mode)
+    @raises StaffAccessError: When the password is weak or provisioning fails
+    """
+    if settings.auth_provider == "keycloak":
+        await set_keycloak_staff_password(
+            db, staff=staff, password=password, temporary=temporary
+        )
+        return
+    await provision_login(db, staff=staff, password=password, actor_id=actor_id)

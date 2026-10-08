@@ -14,6 +14,8 @@ from app.models.prescription import Prescription
 from app.schemas.prescription import PrescriptionCreate
 from app.services.cds.engine import evaluate_prescription
 from app.services.cds.models import CDSAlert
+from app.services.queue.queue_service import QueueService
+from app.services.queue.routing import find_department_id
 from app.services.service_billing import (
     PRESCRIPTION,
     ServiceBillingService,
@@ -58,6 +60,11 @@ def _cds_alert_to_dict(alert: CDSAlert) -> dict[str, str | list[str]]:
         "source_rule": alert.source_rule,
         "action": alert.action.value,
     }
+
+
+#: Units that dispense medicines, matched by code first and then by name.
+PHARMACY_DEPARTMENT_CODES = ("PHARM", "PHARMACY", "DISPENSARY", "DISP")
+PHARMACY_DEPARTMENT_NAME_HINTS = ("pharmac", "dispensar", "dispens")
 
 
 class PrescriptionService:
@@ -142,7 +149,47 @@ class PrescriptionService:
         )
         self.db.add(event)
 
+        # Bridge the prescription onto the pharmacy call board: the patient now
+        # waits at the dispensary, and its speakers have to know their number.
+        await self._queue_prescription(prescription, facility_id, prescriber_id)
+
         return prescription, interactions, False
+
+    async def _queue_prescription(
+        self,
+        prescription: Prescription,
+        facility_id: uuid.UUID,
+        prescriber_id: uuid.UUID,
+    ) -> None:
+        """Put the patient in the pharmacy's waiting line.
+
+        Dispensing is a wait of its own: once a medicine is prescribed the
+        patient leaves the consulting room and queues at the dispensary. A
+        second prescription for the same visit reuses the patient's place in
+        that line rather than calling them twice.
+
+        @param prescription: The prescription that was just saved
+        @param facility_id: Facility scope
+        @param prescriber_id: Clinician who wrote the prescription
+        """
+
+        department_id = await find_department_id(
+            self.db,
+            facility_id=facility_id,
+            codes=PHARMACY_DEPARTMENT_CODES,
+            name_hints=PHARMACY_DEPARTMENT_NAME_HINTS,
+        )
+        await QueueService(self.db).enqueue_patient(
+            facility_id=facility_id,
+            patient_id=prescription.patient_id,
+            actor_id=prescriber_id,
+            department_id=department_id,
+            triage_category="non_urgent",
+            priority=2,
+            prefix="PHARM",
+            notes=f"Prescription: {prescription.drug_name}",
+            idempotency_key=f"prescription:{prescription.id}",
+        )
 
     async def _bill_prescription(
         self,

@@ -16,6 +16,7 @@ assert the behaviour rather than relying on the database.
 from __future__ import annotations
 
 import uuid
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -36,6 +37,54 @@ from app.services.voice.text import build_call_text
 #: How many times to retry a ticket number that lost a collision race.
 _NUMBER_RETRIES = 6
 
+#: Ticket states that still own a place in a waiting line. A ticket that has
+#: been completed, cancelled, transferred or missed no longer blocks a fresh
+#: one for the same visit.
+_OPEN_TICKET_STATUSES = (
+    QueueTicketStatus.WAITING,
+    QueueTicketStatus.CALLED,
+    QueueTicketStatus.IN_SERVICE,
+)
+
+#: The unique index that protects a per-day ticket number (see migration 043).
+_TICKET_NUMBER_CONSTRAINT = "uq_queue_tickets_facility_day_number"
+
+#: Number prefixes for a visit that is not attached to a unit, by visit type.
+#: Kept in step with the encounter bridge so a front-desk OPD return reads as
+#: OPD-014 rather than a bare Q-014.
+ENCOUNTER_QUEUE_PREFIXES = {
+    "opd": "OPD",
+    "mch": "MCH",
+    "dental": "DENTAL",
+    "follow_up": "FU",
+}
+
+#: A patient called back to a clinician for review is urgent by default: the
+#: clinician asked for the result and is waiting on it, so the patient is called
+#: ahead of a routine visit. A critical result is called back ahead even of that.
+RETURN_REVIEW_PRIORITY = 4
+CRITICAL_REVIEW_PRIORITY = 5
+
+
+@dataclass
+class _TicketRequest:
+    """Attribute bag accepted by :meth:`QueueService.issue_ticket`.
+
+    Internal callers (the encounter bridge, the maternal clinic, transfers)
+    build one of these instead of importing the API request schema, so the
+    service behaves the same whether the request came from HTTP or from another
+    service sharing the transaction.
+    """
+
+    patient_id: uuid.UUID
+    encounter_id: uuid.UUID | None = None
+    department_id: uuid.UUID | None = None
+    service_point_id: uuid.UUID | None = None
+    priority: int | None = 0
+    triage_category: str | None = None
+    notes: str | None = None
+    idempotency_key: str | None = None
+
 
 def _is_ticket_number_collision(exc: IntegrityError) -> bool:
     """Is this IntegrityError the ticket-number unique violation?
@@ -49,11 +98,13 @@ def _is_ticket_number_collision(exc: IntegrityError) -> bool:
     """
     original = getattr(exc, "orig", exc)
     constraint = getattr(original, "constraint_name", None)
-    if constraint == "uq_queue_tickets_facility_number":
+    if constraint in ("uq_queue_tickets_facility_number", _TICKET_NUMBER_CONSTRAINT):
         return True
     message = str(original).lower()
-    return "uq_queue_tickets_facility_number" in message or (
-        "duplicate key" in message and "ticket_number" in message
+    return (
+        "uq_queue_tickets_facility_number" in message
+        or _TICKET_NUMBER_CONSTRAINT in message
+        or ("duplicate key" in message and "ticket_number" in message)
     )
 
 
@@ -241,6 +292,466 @@ class QueueService:
         raise RuntimeError(
             "Could not allocate a queue ticket number"
         ) from last_error
+
+    async def _open_ticket_for_encounter(
+        self, *, facility_id: uuid.UUID, encounter_id: uuid.UUID
+    ) -> QueueTicket | None:
+        """The visit's live ticket, if it still owns a place in a line."""
+
+        stmt = (
+            select(QueueTicket)
+            .where(
+                QueueTicket.facility_id == facility_id,
+                QueueTicket.encounter_id == encounter_id,
+                QueueTicket.status.in_(_OPEN_TICKET_STATUSES),
+                QueueTicket.is_deleted.is_(False),
+            )
+            .order_by(QueueTicket.issued_at.desc())
+            .limit(1)
+        )
+        return (await self.db.execute(stmt)).scalars().first()
+
+    async def enqueue_encounter(
+        self,
+        *,
+        facility_id: uuid.UUID,
+        encounter: Any,
+        actor_id: uuid.UUID | None,
+        service_point_id: uuid.UUID | None = None,
+        prefix: str | None = None,
+    ) -> QueueTicket:
+        """Bridge a waiting visit onto the call board, exactly once.
+
+        Called when a visit is opened and when a clinician hands the patient to
+        another unit, so no department can end up with a patient who is waiting
+        but invisible. A visit that already owns a live ticket in the same unit
+        keeps it; a visit that has moved is transferred, which clears the unit
+        it left and gives the new unit a clean queue.
+
+        @param facility_id: Facility the visit belongs to
+        @param encounter: The encounter that is now waiting
+        @param actor_id: Staff member opening or routing the visit
+        @param service_point_id: Optional room to call the patient into
+        @param prefix: Optional ticket-number prefix override
+        @returns The ticket the visit now owns
+        """
+
+        existing = await self._open_ticket_for_encounter(
+            facility_id=facility_id, encounter_id=encounter.id
+        )
+        if existing is not None:
+            if (
+                encounter.department_id is None
+                or existing.department_id == encounter.department_id
+            ):
+                return existing
+            _, moved = await self.transfer(
+                ticket=existing,
+                actor_id=actor_id,
+                department_id=encounter.department_id,
+                service_point_id=service_point_id,
+                reason="encounter routed",
+                priority=encounter.priority,
+            )
+            return moved
+
+        return await self.issue_ticket(
+            facility_id=facility_id,
+            data=_TicketRequest(
+                patient_id=encounter.patient_id,
+                encounter_id=encounter.id,
+                department_id=encounter.department_id,
+                service_point_id=service_point_id,
+                priority=encounter.priority,
+                triage_category=encounter.triage_category,
+            ),
+            created_by=actor_id,
+            prefix=prefix,
+        )
+
+    async def _open_ticket_for_patient(
+        self,
+        *,
+        facility_id: uuid.UUID,
+        patient_id: uuid.UUID,
+        department_id: uuid.UUID | None,
+        prefix: str | None,
+    ) -> QueueTicket | None:
+        """The patient's live ticket in one unit, if they still have one.
+
+        The maternal clinic and the front desk both work without an encounter,
+        so a patient is matched on the unit and, when the unit is unassigned,
+        on the ticket-number prefix that tells those two lines apart. A ticket
+        that has been completed, cancelled, transferred or missed is not live
+        and never blocks a fresh one.
+
+        @param facility_id: Facility scope
+        @param patient_id: The patient who may already be waiting
+        @param department_id: The unit, or None for an unassigned line
+        @param prefix: Ticket-number prefix used to tell unassigned lines apart
+        @returns The open ticket, or None when the patient is not waiting
+        """
+
+        filters = [
+            QueueTicket.facility_id == facility_id,
+            QueueTicket.patient_id == patient_id,
+            QueueTicket.status.in_(_OPEN_TICKET_STATUSES),
+            QueueTicket.is_deleted.is_(False),
+        ]
+        if department_id is None:
+            filters.append(QueueTicket.department_id.is_(None))
+            # Two unassigned lines (front-desk intake, the maternal clinic)
+            # are only told apart by their number prefix, so match on it too.
+            if prefix:
+                filters.append(QueueTicket.ticket_number.like(prefix + "-%"))
+        else:
+            filters.append(QueueTicket.department_id == department_id)
+        return (
+            await self.db.execute(
+                select(QueueTicket)
+                .where(*filters)
+                .order_by(QueueTicket.issued_at.desc())
+                .limit(1)
+            )
+        ).scalars().first()
+
+    async def enqueue_patient(
+        self,
+        *,
+        facility_id: uuid.UUID,
+        patient_id: uuid.UUID,
+        actor_id: uuid.UUID | None,
+        department_id: uuid.UUID | None = None,
+        triage_category: str | None = None,
+        priority: int = 0,
+        prefix: str | None = None,
+        notes: str | None = None,
+        idempotency_key: str | None = None,
+    ) -> QueueTicket:
+        """Bridge a patient who is waiting without an encounter of their own.
+
+        The maternal clinic records a pregnancy and its visits directly, so
+        there is no encounter to key the ticket on. A patient already waiting
+        in the same unit is left where they are, so registering a profile and
+        then a first visit never queues them twice, and the caller's
+        idempotency key makes a retried registration safe.
+
+        @param facility_id: Facility the patient is waiting in
+        @param patient_id: The patient who is waiting
+        @param actor_id: Staff member registering the wait
+        @param department_id: The unit, when one can be resolved
+        @param triage_category: Same vocabulary the encounter queue uses
+        @param priority: Higher is called sooner
+        @param prefix: Optional ticket-number prefix override
+        @param notes: Free-text note kept on the ticket
+        @param idempotency_key: Retry key for this registration
+        @returns The ticket the patient now owns
+        """
+
+        if idempotency_key is not None:
+            replayed = (
+                await self.db.execute(
+                    select(QueueTicket).where(
+                        QueueTicket.facility_id == facility_id,
+                        QueueTicket.idempotency_key == idempotency_key,
+                        QueueTicket.is_deleted.is_(False),
+                    )
+                )
+            ).scalars().first()
+            if replayed is not None:
+                return replayed
+
+        existing = await self._open_ticket_for_patient(
+            facility_id=facility_id,
+            patient_id=patient_id,
+            department_id=department_id,
+            prefix=prefix,
+        )
+        if existing is not None:
+            return existing
+
+        return await self.issue_ticket(
+            facility_id=facility_id,
+            data=_TicketRequest(
+                patient_id=patient_id,
+                department_id=department_id,
+                priority=priority,
+                triage_category=triage_category,
+                notes=notes,
+                idempotency_key=idempotency_key,
+            ),
+            created_by=actor_id,
+            prefix=prefix,
+            idempotency_key=idempotency_key,
+        )
+
+    async def retriage_patient(
+        self,
+        *,
+        facility_id: uuid.UUID,
+        patient_id: uuid.UUID,
+        department_id: uuid.UUID | None,
+        actor_id: uuid.UUID | None,
+        priority: int,
+        triage_category: str | None = None,
+        prefix: str | None = None,
+        reason: str | None = None,
+        source_id: str | None = None,
+    ) -> QueueTicket | None:
+        """Re-rank a patient who is already waiting, called or in the chair.
+
+        Escalating risk on a live ticket is an annotation, not a move, so the
+        ticket keeps whatever status it already has. A ticket already CALLED or
+        IN_SERVICE has no legal PRIORITY_CHANGED transition, so the rank is
+        written straight onto the row and the change is recorded as an
+        immutable event carrying the status it kept. The rank is only ever
+        raised, so a re-triage can never quietly relax an urgent patient.
+
+        @param facility_id: Facility scope
+        @param patient_id: The patient whose risk changed
+        @param department_id: The unit, or None for an unassigned line
+        @param actor_id: Staff member recording the escalation
+        @param priority: New priority, higher is called sooner
+        @param triage_category: New triage category, when it changed
+        @param prefix: Ticket-number prefix used to tell unassigned lines apart
+        @param reason: Why the ticket was re-ranked
+        @param source_id: Identifier of the record that triggered the change
+        @returns The updated ticket, or None when the patient had none open
+        """
+
+        ticket = await self._open_ticket_for_patient(
+            facility_id=facility_id,
+            patient_id=patient_id,
+            department_id=department_id,
+            prefix=prefix,
+        )
+        if ticket is None:
+            return None
+
+        current = int(ticket.priority or 0)
+        incoming = int(priority)
+        # Never lower an already-urgent patient: a later calm reading does not
+        # undo the earlier red flag on the same wait.
+        if incoming < current:
+            return ticket
+
+        category = triage_category or ticket.triage_category
+        if incoming == current and category == ticket.triage_category:
+            return ticket
+
+        ticket.priority = max(current, incoming)
+        ticket.triage_category = category
+        ticket.updated_by = actor_id
+        await self.record_event(
+            ticket=ticket,
+            event=QueueEventType.PRIORITY_CHANGED,
+            actor_id=actor_id,
+            detail={
+                "priority": ticket.priority,
+                "triage_category": ticket.triage_category,
+                "reason": reason,
+                "source_id": source_id,
+            },
+            from_status=ticket.status,
+            to_status=ticket.status,
+        )
+        await self.db.flush()
+        await self.db.refresh(ticket)
+        return ticket
+
+    async def enqueue_return(
+        self,
+        *,
+        facility_id: uuid.UUID,
+        patient_id: uuid.UUID,
+        encounter_id: uuid.UUID | None,
+        department_id: uuid.UUID | None,
+        encounter_type: str | None,
+        actor_id: uuid.UUID | None,
+        priority: int = RETURN_REVIEW_PRIORITY,
+        triage_category: str | None = None,
+        notes: str | None = None,
+        idempotency_key: str | None = None,
+    ) -> QueueTicket:
+        """Put a patient back on the board when their results are ready.
+
+        A return is a fresh wait, not a re-open: the ticket that was served
+        stays served, and the clinician calls the patient back in on the number
+        the speaker reads. When the visit has not been called yet there is
+        nobody to bring back, so the patient's existing waiting ticket is simply
+        moved up instead of being given a second number.
+
+        @param facility_id: Facility the visit belongs to
+        @param patient_id: The patient who is coming back
+        @param encounter_id: The visit the results belong to
+        @param department_id: The unit that asked for the result
+        @param encounter_type: Used to name the queue when there is no unit
+        @param actor_id: Staff member releasing the results
+        @param priority: Higher is called sooner
+        @param triage_category: Same vocabulary the encounter queue uses
+        @param notes: Free-text note kept on the ticket
+        @param idempotency_key: Retry key, so a re-verified result never double-queues
+        @returns The ticket the patient now owns
+        """
+
+        if idempotency_key is not None:
+            replayed = (
+                await self.db.execute(
+                    select(QueueTicket).where(
+                        QueueTicket.facility_id == facility_id,
+                        QueueTicket.idempotency_key == idempotency_key,
+                        QueueTicket.is_deleted.is_(False),
+                    )
+                )
+            ).scalars().first()
+            if replayed is not None:
+                return replayed
+
+        if encounter_id is not None:
+            current = await self._open_ticket_for_encounter(
+                facility_id=facility_id, encounter_id=encounter_id
+            )
+            if current is not None and current.status == QueueTicketStatus.WAITING:
+                bumped = max(int(current.priority or 0), int(priority))
+                if bumped != current.priority or (
+                    triage_category and current.triage_category != triage_category
+                ):
+                    await self.apply_event(
+                        ticket=current,
+                        event=QueueEventType.PRIORITY_CHANGED,
+                        actor_id=actor_id,
+                        detail={
+                            "priority": bumped,
+                            "triage_category": (
+                                triage_category or current.triage_category
+                            ),
+                        },
+                    )
+                return current
+
+        prefix = None
+        if department_id is None:
+            prefix = ENCOUNTER_QUEUE_PREFIXES.get(
+                (encounter_type or "").lower(), "OPD"
+            )
+
+        return await self.issue_ticket(
+            facility_id=facility_id,
+            data=_TicketRequest(
+                patient_id=patient_id,
+                encounter_id=encounter_id,
+                department_id=department_id,
+                priority=priority,
+                triage_category=triage_category,
+                notes=notes,
+                idempotency_key=idempotency_key,
+            ),
+            created_by=actor_id,
+            prefix=prefix,
+            idempotency_key=idempotency_key,
+        )
+
+    async def close_for_encounter(
+        self,
+        *,
+        facility_id: uuid.UUID,
+        encounter_id: uuid.UUID,
+        actor_id: uuid.UUID | None,
+        reason: str | None = None,
+    ) -> int:
+        """Cancel every live ticket when a visit ends outside the board.
+
+        A visit completed from the clinical workspace is over, even if nobody
+        pressed "complete" on the queue board. Closing the tickets here keeps a
+        finished patient from lingering in the waiting count.
+
+        @param facility_id: Facility the visit belongs to
+        @param encounter_id: The visit that has ended
+        @param actor_id: Staff member who closed the visit
+        @param reason: Why the tickets are being closed
+        @returns How many tickets were cancelled
+        """
+
+        stmt = select(QueueTicket).where(
+            QueueTicket.facility_id == facility_id,
+            QueueTicket.encounter_id == encounter_id,
+            QueueTicket.status.in_(_OPEN_TICKET_STATUSES),
+            QueueTicket.is_deleted.is_(False),
+        )
+        tickets = list((await self.db.execute(stmt)).scalars().all())
+        for ticket in tickets:
+            await self.apply_event(
+                ticket=ticket,
+                event=QueueEventType.CANCELLED,
+                actor_id=actor_id,
+                detail={"reason": reason or "encounter closed"},
+            )
+        return len(tickets)
+
+    async def ticket_for_encounter(
+        self, *, facility_id: uuid.UUID, encounter_id: uuid.UUID
+    ) -> QueueTicket | None:
+        """The live ticket a visit is standing in, if it still has one.
+
+        The encounter bridge gives every OPD visit a printable ticket, so
+        a call made from a room can speak the same number the patient is
+        holding. None means the visit never entered a waiting line.
+
+        @param facility_id: Facility the visit belongs to
+        @param encounter_id: The visit whose ticket is wanted
+        @returns The open ticket, or None when there is none
+        """
+
+        return (
+            await self.db.execute(
+                select(QueueTicket)
+                .where(
+                    QueueTicket.facility_id == facility_id,
+                    QueueTicket.encounter_id == encounter_id,
+                    QueueTicket.status.in_(_OPEN_TICKET_STATUSES),
+                    QueueTicket.is_deleted.is_(False),  # noqa: E712
+                )
+                .order_by(QueueTicket.issued_at.desc())
+                .limit(1)
+            )
+        ).scalars().first()
+
+
+    async def sync_encounter_triage(
+        self,
+        *,
+        facility_id: uuid.UUID,
+        encounter_id: uuid.UUID,
+        priority: int,
+        triage_category: str | None,
+        actor_id: uuid.UUID | None,
+    ) -> None:
+        """Re-rank a visit's live ticket after the nurse re-triaged it.
+
+        Triage set in the clinical workspace is what decides call order, so the
+        ticket has to follow it; otherwise a patient who was just made urgent
+        keeps waiting behind everyone in arrival order.
+
+        @param facility_id: Facility the visit belongs to
+        @param encounter_id: The re-triaged visit
+        @param priority: The visit's new priority
+        @param triage_category: The visit's new triage category
+        @param actor_id: Staff member who re-triaged the visit
+        """
+
+        ticket = await self._open_ticket_for_encounter(
+            facility_id=facility_id, encounter_id=encounter_id
+        )
+        if ticket is None:
+            return
+        if ticket.priority == priority and ticket.triage_category == triage_category:
+            return
+        await self.apply_event(
+            ticket=ticket,
+            event=QueueEventType.PRIORITY_CHANGED,
+            actor_id=actor_id,
+            detail={"priority": priority, "triage_category": triage_category},
+        )
 
     async def get_ticket_by_number(
         self, *, facility_id: uuid.UUID, ticket_number: str
@@ -610,6 +1121,7 @@ class QueueService:
         department_id: uuid.UUID,
         service_point_id: uuid.UUID | None = None,
         reason: str | None = None,
+        priority: int | None = None,
     ) -> tuple[QueueTicket, QueueTicket]:
         """Hand the patient to another department's queue.
 
@@ -626,20 +1138,18 @@ class QueueService:
             detail={"department_id": str(department_id), "reason": reason},
         )
 
-        class _Target:
-            pass
-
-        target = _Target()
-        target.patient_id = ticket.patient_id
-        target.encounter_id = ticket.encounter_id
-        target.department_id = department_id
-        target.service_point_id = service_point_id
-        target.priority = ticket.priority
-        target.triage_category = ticket.triage_category
-        target.notes = ticket.notes
-
         new_ticket = await self.issue_ticket(
-            facility_id=ticket.facility_id, data=target, created_by=actor_id
+            facility_id=ticket.facility_id,
+            data=_TicketRequest(
+                patient_id=ticket.patient_id,
+                encounter_id=ticket.encounter_id,
+                department_id=department_id,
+                service_point_id=service_point_id,
+                priority=ticket.priority if priority is None else priority,
+                triage_category=ticket.triage_category,
+                notes=ticket.notes,
+            ),
+            created_by=actor_id,
         )
         await self.record_event(
             ticket=new_ticket,

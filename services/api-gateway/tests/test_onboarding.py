@@ -9,6 +9,7 @@ import pytest
 from httpx import AsyncClient
 
 from app.main import app
+from app.config import settings
 from app.utils.keycloak_admin import get_keycloak_admin_client
 
 
@@ -30,6 +31,18 @@ def fake_admin() -> _FakeAdminClient:
     app.dependency_overrides[get_keycloak_admin_client] = lambda: fake
     yield fake
     app.dependency_overrides.pop(get_keycloak_admin_client, None)
+
+
+@pytest.fixture(autouse=True)
+def _gated_keycloak_signup(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Run these tests as the gated Keycloak flow they describe.
+
+    The dev .env enables internal auth and auto-approval; the contract under
+    test is the one where a sign-up stays pending until a super-admin approves
+    it and the administrator is provisioned through Keycloak.
+    """
+    monkeypatch.setattr(settings, "auth_provider", "keycloak")
+    monkeypatch.setattr(settings, "facility_signup_auto_approve", False)
 
 
 def _signup_payload(**overrides: object) -> dict:

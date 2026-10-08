@@ -26,7 +26,6 @@ from app.services.voice.text import (
 )
 from app.services.voice.tts_provider import (
     CONTENT_TYPES,
-    TTSError,
     TTSProvider,
     provider_from_settings,
 )
@@ -115,8 +114,14 @@ class AnnouncementService:
         destination: str | None,
         recalled: bool = False,
         queue_event_id: uuid.UUID | None = None,
+        with_audio: bool = True,
     ) -> tuple[QueueAnnouncement, bytes | None, str | None]:
         """Prepare and, when possible, render the announcement.
+
+        ``with_audio=False`` builds the script only. A caller that just wants
+        to know what the speaker will say - the board text, a kiosk preview -
+        gets it without the speech engine being installed, reachable or even
+        configured, so a broken speaker can never take the queue down with it.
 
         @returns The audit row, the audio bytes (or None), and an error string
         """
@@ -143,6 +148,11 @@ class AnnouncementService:
             content_type=content_type,
             status="pending",
         )
+
+        if not with_audio:
+            # Nothing was spoken, so there is nothing to audit or cache yet.
+            return row, None, None
+
         self.db.add(row)
         await self.db.flush()
 
@@ -166,7 +176,11 @@ class AnnouncementService:
                 audio_format=settings.tts_audio_format,
                 language=self.language,
             )
-        except TTSError as exc:
+        except Exception as exc:
+            # Any provider failure - a TTSError, or anything its own
+            # dependencies raise (a missing package, a dead socket, a rejected
+            # key) - is recorded on the row and handed back as an error
+            # string. The queue must never block on a speaker.
             row.status = "failed"
             row.error = str(exc)[:1000]
             await self.db.flush()

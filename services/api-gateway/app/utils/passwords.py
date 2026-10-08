@@ -7,7 +7,9 @@ import hashlib
 import hmac
 import secrets
 
-_ITERATIONS = 390_000
+#: OWASP's floor for PBKDF2-HMAC-SHA256 is 600,000 iterations. The count is
+#: stored inside each hash, so existing passwords keep verifying unchanged.
+_ITERATIONS = 600_000
 
 
 def hash_password(password: str) -> str:

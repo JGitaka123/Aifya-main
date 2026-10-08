@@ -117,8 +117,13 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
       // 401 means "wrong credentials" and 403 means "HR has to fix this". The
       // sign-in screen words those two differently, so the distinction has to
       // survive this hop rather than collapsing into a generic 400.
+      // 429 is the throttling answer, not a credential error: the password may
+      // even have been right. Passing it through unchanged is what lets the
+      // sign-in form ask the person to wait instead of calling it a bad guess.
       const status =
-        response.status === 401 || response.status === 403
+        response.status === 401 ||
+        response.status === 403 ||
+        response.status === 429
           ? response.status
           : 400;
       return NextResponse.json(

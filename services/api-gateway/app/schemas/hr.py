@@ -86,10 +86,16 @@ class StaffDirectoryItem(BaseModel):
     phone: str | None
     email: str
     is_active: bool
+    #: Declared availability for provider assignment, independent of account
+    #: activation: an active account can still be off duty or on leave.
+    work_status: str = "available"
     license_number: str | None
     #: Whether this person currently has a sign-in. Their access is the role
     #: above; this only says whether the credentials exist yet.
     has_login: bool = False
+    #: Set on the activation response to say whether the activation email went
+    #: out. Always False on plain directory listings.
+    activation_email_sent: bool = False
 
     model_config = {"from_attributes": True}
 
@@ -98,6 +104,15 @@ class StaffActiveUpdate(BaseModel):
     """Schema for activating or deactivating a staff member."""
 
     is_active: bool
+
+
+class StaffWorkStatusUpdate(BaseModel):
+    """Schema for changing a staff member's declared availability."""
+
+    work_status: str = Field(
+        ...,
+        pattern=r"^(available|busy|on_leave|off_duty|unavailable)$",
+    )
 
 
 class StaffDirectoryResponse(BaseModel):
@@ -144,6 +159,8 @@ class StaffAccessResponse(BaseModel):
     staff_id: uuid.UUID
     role: str
     has_login: bool
+    #: Whether this change emailed the employee their sign-in details.
+    activation_email_sent: bool = False
     message: str
 
 

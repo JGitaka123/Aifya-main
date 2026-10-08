@@ -63,6 +63,12 @@ class Settings(BaseSettings):
     internal_bootstrap_password: str = ""
     internal_bootstrap_facility_name: str = "Aifya Platform"
 
+    # Login throttling for internal mode. Consecutive wrong passwords lock the
+    # account for a cooling-off period; a successful sign-in clears it, and so
+    # does HR resetting the password.
+    login_max_failed_attempts: int = 5
+    login_lockout_minutes: int = 15
+
     # Keycloak-mode first-run bootstrap. The realm import
     # (infrastructure/keycloak/aifya-realm.json) stamps its seeded users with a
     # facility_id attribute, but that UUID has no row in this database, so a
@@ -127,6 +133,16 @@ class Settings(BaseSettings):
     tts_voice: str = "alloy"
     tts_audio_format: str = "mp3"
     tts_language: str = "en"
+    # Local (pyttsx3) provider only: words per minute and volume (0.0-1.0).
+    # Ignored by the openai and elevenlabs providers.
+    tts_local_rate: int = 180
+    tts_local_volume: float = 1.0
+    # Azure Speech provider (TTS_PROVIDER=azure) only. The region builds the
+    # endpoint (https://<region>.tts.speech.microsoft.com/cognitiveservices/v1);
+    # set an explicit endpoint for sovereign clouds. TTS_API_KEY is the
+    # subscription key and TTS_VOICE the neural voice name.
+    tts_azure_region: str = ""
+    tts_azure_endpoint: str = ""
     # Public board / speaker devices prove themselves with this shared
     # token instead of a staff login, and see only ticket numbers and
     # rooms. Leave blank to switch the public board off entirely.
@@ -220,6 +236,12 @@ class Settings(BaseSettings):
     debug: bool = False
     facility_timezone: str = "Africa/Nairobi"
     cors_origins: str = "http://localhost:3000"
+    # Public web-app origin, used for the links Aifya puts in the emails it
+    # sends to staff (account activation, and later password resets). Blank
+    # falls back to the first configured CORS origin, so a single-origin
+    # deployment needs no extra setting; set it explicitly when the API and
+    # the app are served from different hosts.
+    app_base_url: str = ""
 
     @field_validator("*", mode="before")
     @classmethod
@@ -265,6 +287,22 @@ class Settings(BaseSettings):
             for origin in self.cors_origins.split(",")
             if origin.strip()
         ]
+
+    @property
+    def web_base_url(self) -> str:
+        """
+        The public web origin used to build links in outbound emails.
+
+        Defaults to the first CORS origin so the common single-origin
+        deployment needs no extra setting.
+
+        @returns Web origin without a trailing slash
+        """
+        origins = self.cors_origin_list
+        base = self.app_base_url.strip() or (
+            origins[0] if origins else "http://localhost:3000"
+        )
+        return base.rstrip("/")
 
     @property
     def patient_read_role_list(self) -> list[str]:

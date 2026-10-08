@@ -8,6 +8,7 @@ from app.models.base import EventBase
 from app.models.encounter import Encounter
 from app.models.vital import VitalSign
 from app.schemas.vital import VitalSignCreate
+from app.services.queue.queue_service import QueueService
 
 # Critical value thresholds
 CRITICAL_THRESHOLDS = {
@@ -25,6 +26,10 @@ CRITICAL_THRESHOLDS = {
     "blood_glucose_high": 25.0,
     "blood_glucose_low": 3.0,
 }
+
+#: A critical reading is urgent: the patient is called ahead of routine
+#: walk-ins in whichever unit their ticket is waiting in.
+CRITICAL_TRIAGE_PRIORITY = 4
 
 
 def _gcs_total(vital: VitalSign) -> int | None:
@@ -141,7 +146,7 @@ class VitalsService:
         data: VitalSignCreate,
         facility_id: uuid.UUID,
         recorded_by: uuid.UUID,
-    ) -> VitalSign:
+    ) -> VitalSign | None:
         """
         Record vital signs and check for critical values.
         Critical values MUST trigger immediate alert (CLAUDE.md: Clinical Safety).
@@ -151,11 +156,35 @@ class VitalsService:
         history lists, so it is written in the same transaction as the
         observation itself.
 
+        The encounter is read scoped to the caller's facility before anything
+        is written. Without that check a signed-in nurse could post observations
+        against another hospital's visit: the row would be stored under the
+        caller's own facility and quietly contradict the encounter it names.
+
         @param data: Vital signs data
         @param facility_id: Facility UUID
         @param recorded_by: Nurse/staff UUID
-        @returns Recorded vital signs with critical alerts
+        @returns Recorded vital signs with critical alerts, or None when the
+            encounter does not belong to this facility
+        @raises ValueError: When the patient is not the one on the encounter
         """
+        encounter = (
+            await self.db.execute(
+                select(Encounter).where(
+                    Encounter.id == data.encounter_id,
+                    Encounter.facility_id == facility_id,
+                    Encounter.is_deleted == False,  # noqa: E712
+                )
+            )
+        ).scalar_one_or_none()
+        if encounter is None:
+            return None
+        # The body carries the patient as well as the encounter, so the two are
+        # agreed here rather than trusted: a mismatch would file one patient's
+        # observations under another patient's visit.
+        if encounter.patient_id != data.patient_id:
+            raise ValueError("The patient does not match this encounter.")
+
         # Calculate BMI
         bmi: float | None = None
         if data.weight_kg and data.height_cm and data.height_cm > 0:
@@ -165,7 +194,7 @@ class VitalsService:
         vital = VitalSign(
             facility_id=facility_id,
             encounter_id=data.encounter_id,
-            patient_id=data.patient_id,
+            patient_id=encounter.patient_id,
             recorded_by=recorded_by,
             bmi=bmi,
             report_number=await self._next_report_number(facility_id),
@@ -206,6 +235,16 @@ class VitalsService:
             )
         )
 
+        if alerts:
+            # A critical reading is a change of call order, not just a flag on
+            # the vitals row: the patient moves up the unit's queue so the
+            # clinician sees them before the routine walk-ins.
+            await self._bump_queue_priority(
+                facility_id=facility_id,
+                encounter_id=data.encounter_id,
+                recorded_by=recorded_by,
+            )
+
         # Emit event. The summary rides along so the patient's timeline can show
         # the report without re-reading the observation.
         event_data = data.model_dump(mode="json")
@@ -226,6 +265,48 @@ class VitalsService:
         self.db.add(event)
 
         return vital
+
+    async def _bump_queue_priority(
+        self,
+        *,
+        facility_id: uuid.UUID,
+        encounter_id: uuid.UUID,
+        recorded_by: uuid.UUID,
+    ) -> None:
+        """Move a critically-triaged visit up its unit's call order.
+
+        Only the queue priority is raised; the triage category the nurse
+        recorded is left alone, so the board calls the patient sooner without
+        rewriting what the nurse decided. A visit with no open ticket (an
+        admission, say) is simply not on the call board to move.
+
+        @param facility_id: Facility the visit belongs to
+        @param encounter_id: The visit that was just triaged
+        @param recorded_by: Nurse who took the vitals
+        """
+
+        encounter = (
+            await self.db.execute(
+                select(Encounter).where(
+                    Encounter.id == encounter_id,
+                    Encounter.facility_id == facility_id,
+                )
+            )
+        ).scalars().first()
+        if encounter is None:
+            return
+        current = int(encounter.priority or 0)
+        bumped = max(current, CRITICAL_TRIAGE_PRIORITY)
+        if bumped != current:
+            encounter.priority = bumped
+            encounter.updated_by = recorded_by
+        await QueueService(self.db).sync_encounter_triage(
+            facility_id=facility_id,
+            encounter_id=encounter_id,
+            priority=bumped,
+            triage_category=encounter.triage_category,
+            actor_id=recorded_by,
+        )
 
     async def get_encounter_vitals(
         self, encounter_id: uuid.UUID, facility_id: uuid.UUID

@@ -17,6 +17,8 @@ from app.schemas.encounter import (
 from app.schemas.referral import ReferralCreate
 from app.services.clinical_workspace import SCOPE_MINE, scope_filter
 from app.services.consultation_fee import load_consultation_fee_cents
+from app.services.provider_directory import ProviderDirectoryService
+from app.services.queue.queue_service import ENCOUNTER_QUEUE_PREFIXES, QueueService
 from app.services.referral_service import ReferralService
 
 _logger = logging.getLogger(__name__)
@@ -24,6 +26,16 @@ _logger = logging.getLogger(__name__)
 # How urgent a hand-off is, as a queue priority. Deliberately lower than the
 # triage scale top end so routing a red-triage patient never demotes them.
 URGENCY_PRIORITY = {"emergency": 5, "urgent": 4, "routine": 2}
+
+#: Encounter types whose patients wait to be called into a room. IPD and
+#: surgical are admissions and emergency runs its own triage board, so they
+#: are deliberately not put on the call board.
+QUEUE_ENCOUNTER_TYPES = frozenset({"opd", "mch", "dental", "follow_up"})
+
+#: Statuses that mean the visit is over for queueing purposes.
+_CLOSED_ENCOUNTER_STATUSES = frozenset(
+    {"completed", "cancelled", "admitted", "discharged"}
+)
 
 
 def todays_encounters():
@@ -131,6 +143,25 @@ class EncounterService:
             idempotency_key=idempotency_key,
         )
         self.db.add(event)
+
+        # Bridge the visit onto the call board: a patient who is waiting in a
+        # unit must own a queue ticket, or the waiting room and the wall
+        # speakers never learn they are there.
+        if encounter.encounter_type in QUEUE_ENCOUNTER_TYPES:
+            await QueueService(self.db).enqueue_encounter(
+                facility_id=facility_id,
+                encounter=encounter,
+                actor_id=created_by,
+                prefix=(
+                    None
+                    if encounter.department_id
+                    else ENCOUNTER_QUEUE_PREFIXES.get(encounter.encounter_type)
+                ),
+            )
+            # enqueue() writes and flushes, which expires the visit's
+            # server-set timestamps on a dirty object; reload them so the
+            # response is fully populated.
+            await self.db.refresh(encounter)
 
         return encounter
 
@@ -328,6 +359,25 @@ class EncounterService:
         encounter.updated_by = updated_by
         await self.db.flush()
         await self.db.refresh(encounter)
+
+        # A visit closed from the clinical workspace is over; clear its place
+        # on the board so a finished patient does not sit in the waiting count.
+        if encounter.status in _CLOSED_ENCOUNTER_STATUSES:
+            await QueueService(self.db).close_for_encounter(
+                facility_id=facility_id,
+                encounter_id=encounter.id,
+                actor_id=updated_by,
+                reason=f"visit {encounter.status}",
+            )
+        elif data.triage_category:
+            # Re-triage is a change of call order, not just a note.
+            await QueueService(self.db).sync_encounter_triage(
+                facility_id=facility_id,
+                encounter_id=encounter.id,
+                priority=encounter.priority,
+                triage_category=encounter.triage_category,
+                actor_id=updated_by,
+            )
 
         return encounter
 
@@ -616,6 +666,24 @@ class EncounterService:
         if department is None:
             raise ValueError("Destination department not found")
 
+        # A named receiver has to be able to take the patient: active, a
+        # clinical provider, and posted to this unit. Without this check a
+        # hand-off could be addressed to any UUID - a clinician in another
+        # department, or a deactivated account - and the patient would wait
+        # in a queue nobody owns.
+        if data.receiving_doctor_id is not None:
+            eligible = await ProviderDirectoryService(
+                self.db
+            ).is_eligible_receiver(
+                facility_id=facility_id,
+                staff_id=data.receiving_doctor_id,
+                department_id=destination_id,
+            )
+            if not eligible:
+                raise ValueError(
+                    "The chosen clinician is not an active provider in this unit."
+                )
+
         referral = await ReferralService(self.db).create_referral(
             data=ReferralCreate(
                 patient_id=encounter.patient_id,
@@ -678,6 +746,17 @@ class EncounterService:
                 created_by=routed_by,
             )
         )
+
+        # Move the visit's place on the board with it: the unit the patient
+        # left loses the ticket, and the receiving unit picks them up.
+        await QueueService(self.db).enqueue_encounter(
+            facility_id=facility_id,
+            encounter=encounter,
+            actor_id=routed_by,
+        )
+        await self.db.refresh(encounter)
+        encounter.patient_name = patient_name  # type: ignore[attr-defined]
+        encounter.patient_mrn = patient_mrn  # type: ignore[attr-defined]
         return encounter, referral, department.name
 
     async def get_encounter_routes(

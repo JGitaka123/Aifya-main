@@ -19,6 +19,7 @@ import { isServerUnavailable } from "@/lib/api-client";
 import { PERMISSIONS } from "@/lib/auth/permissions";
 import { canOpenDestination } from "@/lib/navigation";
 import { cn, formatDateTime } from "@/lib/utils";
+import { QueueAnnouncer } from "@/components/queue/QueueAnnouncer";
 import { PageHeader } from "@/components/ui/PageHeader";
 import { Avatar } from "@/components/ui/Avatar";
 import { EmptyState } from "@/components/ui/EmptyState";
@@ -165,6 +166,7 @@ export default function ConsultationRoomPage() {
         actions={
           <>
             {canConsult && callNextButton}
+      <QueueAnnouncer />
             {canOpenDestination("/patients/register", permissions) && (
               <Link
                 href="/patients/register"

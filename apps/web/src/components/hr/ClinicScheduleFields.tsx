@@ -3,8 +3,9 @@
 import { useTranslations } from "next-intl";
 import { Plus, Trash2 } from "lucide-react";
 import { apiClient } from "@/lib/api-client";
-import { generateId } from "@/lib/utils";
+import { cn, generateId } from "@/lib/utils";
 import type {
+  AvailabilitySlot,
   DayOfWeek,
   DoctorScheduleCreate,
   DoctorScheduleResponse,
@@ -187,6 +188,46 @@ export function isClinicSessionComplete(draft: ClinicSessionDraft): boolean {
 }
 
 /**
+ * Turn stored sessions into editable drafts.
+ *
+ * The row id becomes the draft key, so a session that survives a save keeps
+ * its row - and any appointment already booked against it - instead of being
+ * deleted and recreated.
+ *
+ * @param slots - Sessions read from the API
+ * @returns Drafts ready for the editor
+ */
+export function scheduleToDrafts(
+  slots: DoctorScheduleResponse[],
+): ClinicSessionDraft[] {
+  return slots.map((slot) => ({
+    key: slot.id,
+    dayOfWeek: slot.day_of_week,
+    startTime: slot.start_time.slice(0, 5),
+    endTime: slot.end_time.slice(0, 5),
+    slotMinutes: String(slot.slot_duration_minutes ?? 15),
+    room: slot.room ?? "",
+  }));
+}
+
+/**
+ * Turn edited drafts into the shared week payload.
+ *
+ * Incomplete rows are dropped rather than rejected: a half-typed session is
+ * not a claim that the clinician works those hours.
+ *
+ * @param drafts - Sessions being edited
+ * @returns Only the complete sessions, in the API's slot shape
+ */
+export function draftsToSlots(drafts: ClinicSessionDraft[]): AvailabilitySlot[] {
+  return drafts.filter(isClinicSessionComplete).map((draft) => ({
+    day_of_week: draft.dayOfWeek,
+    start_time: draft.startTime,
+    end_time: draft.endTime,
+  }));
+}
+
+/**
  * Find the clinical staff row the API created for a payroll employee.
  *
  * Registering an employee mirrors it into the clinical staff directory, and the
@@ -274,9 +315,18 @@ export async function saveClinicSchedules(
 export function ClinicScheduleFields({
   drafts,
   onChange,
+  showClinicDetails = true,
 }: {
   drafts: ClinicSessionDraft[];
   onChange: (drafts: ClinicSessionDraft[]) => void;
+  /**
+   * Whether to show the clinic-only fields (slot length, room).
+   *
+   * Clinician self-service and HR oversight edit a working week, not a
+   * bookable clinic, so those fields are hidden there to keep the edit within
+   * the days and hours the API actually accepts.
+   */
+  showClinicDetails?: boolean;
 }) {
   const t = useTranslations("payroll");
   const tc = useTranslations("common");
@@ -326,7 +376,12 @@ export function ClinicScheduleFields({
           {drafts.map((draft) => (
             <div
               key={draft.key}
-              className="grid gap-2 sm:grid-cols-[1.2fr_1fr_1fr_0.8fr_1fr_auto]"
+              className={cn(
+                "grid gap-2",
+                showClinicDetails
+                  ? "sm:grid-cols-[1.2fr_1fr_1fr_0.8fr_1fr_auto]"
+                  : "sm:grid-cols-[1.2fr_1fr_1fr_auto]",
+              )}
             >
               <select
                 aria-label={t("sessionDay")}
@@ -362,26 +417,30 @@ export function ClinicScheduleFields({
                 }
                 className={fieldClasses}
               />
-              <input
-                aria-label={t("sessionSlotMinutes")}
-                type="number"
-                min={5}
-                value={draft.slotMinutes}
-                onChange={(event) =>
-                  update(draft.key, { slotMinutes: event.target.value })
-                }
-                className={fieldClasses}
-              />
-              <input
-                aria-label={t("sessionRoom")}
-                type="text"
-                value={draft.room}
-                onChange={(event) =>
-                  update(draft.key, { room: event.target.value })
-                }
-                placeholder={t("sessionRoom")}
-                className={fieldClasses}
-              />
+              {showClinicDetails && (
+                <>
+                  <input
+                    aria-label={t("sessionSlotMinutes")}
+                    type="number"
+                    min={5}
+                    value={draft.slotMinutes}
+                    onChange={(event) =>
+                      update(draft.key, { slotMinutes: event.target.value })
+                    }
+                    className={fieldClasses}
+                  />
+                  <input
+                    aria-label={t("sessionRoom")}
+                    type="text"
+                    value={draft.room}
+                    onChange={(event) =>
+                      update(draft.key, { room: event.target.value })
+                    }
+                    placeholder={t("sessionRoom")}
+                    className={fieldClasses}
+                  />
+                </>
+              )}
               <button
                 type="button"
                 onClick={() => remove(draft.key)}
